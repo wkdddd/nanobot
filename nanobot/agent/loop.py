@@ -58,7 +58,7 @@ if TYPE_CHECKING:
 
 UNIFIED_SESSION_KEY = "unified:default"
 
-
+##状态机
 class TurnState(Enum):
     RESTORE = auto()
     COMPACT = auto()
@@ -804,7 +804,18 @@ class AgentLoop:
         return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
 
     async def run(self) -> None:
-        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
+        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop.
+        
+        这是 agent 的"总控循环"，职责是：
+        1. 不断从消息总线的 inbound 队列读取新消息
+        2. 识别优先命令（如 /stop）并直接执行
+        3. 判断该 session 是否已有活动任务
+           - 如果有，把新消息放入 pending 队列（中途注入）
+           - 如果没有，创建新的 asyncio 任务处理该消息
+        4. 定期检查过期 session，触发自动压缩
+        
+        设计目的：通过异步任务管理，既能并发处理不同 session，又能保证同一 session 串行执行。
+        """
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
@@ -879,34 +890,57 @@ class AgentLoop:
             )
 
     async def _dispatch(self, msg: InboundMessage) -> None:
-        """Process a message: per-session serial, cross-session concurrent."""
+        """Process a message: per-session serial, cross-session concurrent.
+        
+        这是"会话级消息处理入口"，它的职责是：
+        1. 获取有效 session_key（支持统一 session 模式）
+        2. 获取该 session 的锁，保证同一 session 串行执行
+        3. 获取全局并发门（Semaphore），限制整体并发数
+        4. 为该 session 创建 pending 队列，用于接收中途到来的消息
+        5. 在 lock + gate 下执行 _process_message()（真正的消息处理）
+        6. 处理异常、取消、stream 回调
+        7. 最后清理：把 pending 队列中剩余消息重新发回总线
+        
+        关键设计：同一 session 用锁保证顺序，中途消息放入 pending 队列等待注入（而不是创建新任务）。
+        """
         session_key = self._effective_session_key(msg)
         if session_key != msg.session_key:
             msg = dataclasses.replace(msg, session_key_override=session_key)
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
 
-        # Register a pending queue so follow-up messages for this session are
-        # routed here (mid-turn injection) instead of spawning a new task.
+        # 为该 session 创建 pending 队列，后续到来的同 session 消息会先进这个队列
+        # 由 runner 的 _drain_pending() 回调定期提取，注入到 LLM 上下文
         pending = asyncio.Queue(maxsize=20)
         self._pending_queues[session_key] = pending
 
         try:
+            # lock：同一 session 串行执行
+            # gate：全局并发门，限制同时处理的消息数（默认 3 个）
             async with lock, gate:
                 try:
+                    # ===== 步骤 1：准备流式输出回调 =====
                     on_stream = on_stream_end = None
                     if msg.metadata.get("_wants_stream"):
-                        # Split one answer into distinct stream segments.
+                        # 如果客户端要求流式输出，就构建两个回调函数
+                        # 这样 LLM 在生成文本时，可以分段发送增量内容
                         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
                         stream_segment = 0
 
                         def _current_stream_id() -> str:
+                            """为每一段流数据生成唯一 ID"""
                             return f"{stream_base_id}:{stream_segment}"
 
                         async def on_stream(delta: str) -> None:
+                            """回调：每当 LLM 生成一段增量文本时调用
+                            
+                            delta：这一段生成的文本
+                            将其包装成 OutboundMessage 并立即发送给客户端
+                            这样用户能"实时看到" AI 生成过程，而不用等整个回答生成完
+                            """
                             meta = dict(msg.metadata or {})
-                            meta["_stream_delta"] = True
-                            meta["_stream_id"] = _current_stream_id()
+                            meta["_stream_delta"] = True  # 标记这是流增量
+                            meta["_stream_id"] = _current_stream_id()  # 该段的唯一 ID
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content=delta,
@@ -914,39 +948,52 @@ class AgentLoop:
                             ))
 
                         async def on_stream_end(*, resuming: bool = False) -> None:
+                            """回调：一段流式输出结束时调用
+                            
+                            resuming=True：意味着 LLM 接下来会执行工具调用，前端应该保持加载状态
+                            resuming=False：整个对话完全结束了，前端可以停止加载
+                            """
                             nonlocal stream_segment
                             meta = dict(msg.metadata or {})
-                            meta["_stream_end"] = True
-                            meta["_resuming"] = resuming
+                            meta["_stream_end"] = True  # 标记段结束
+                            meta["_resuming"] = resuming  # 告诉前端是否继续等待
                             meta["_stream_id"] = _current_stream_id()
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content="",
                                 metadata=meta,
                             ))
-                            stream_segment += 1
+                            stream_segment += 1  # 准备下一段
 
+                    # ===== 步骤 2：真正处理消息 =====
+                    # _process_message() 执行整个状态机（RESTORE -> COMPACT -> COMMAND -> BUILD -> RUN -> SAVE -> RESPOND）
+                    # 返回最终的 OutboundMessage 或 None
                     response = await self._process_message(
                         msg, on_stream=on_stream, on_stream_end=on_stream_end,
                         pending_queue=pending,
                     )
+                    
+                    # ===== 步骤 3：发送最终响应 =====
                     if response is not None:
+                        # 正常情况：把 agent 的回复发送到总线
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
+                        # CLI 特殊处理：即使没有响应，也要发一个空消息（保持交互感）
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=msg.metadata or {},
                         ))
+                    
+                    # ===== 步骤 4：WebSocket 特殊处理 =====
                     if msg.channel == "websocket":
-                        # Signal that the turn is fully complete (all tools executed,
-                        # final text streamed).  This lets WS clients know when to
-                        # definitively stop the loading indicator.
+                        # WebSocket 客户端需要明确知道"这一轮会话已经完全结束"
+                        # 这样前端可以停止加载动画，显示最终结果
                         turn_lat = self._pending_turn_latency_ms.pop(session_key, None)
-                        turn_metadata: dict[str, Any] = {**msg.metadata, "_turn_end": True}
+                        turn_metadata: dict[str, Any] = {**msg.metadata, "_turn_end": True}  # 关键标记
                         if turn_lat is not None:
-                            turn_metadata["latency_ms"] = int(turn_lat)
+                            turn_metadata["latency_ms"] = int(turn_lat)  # 这一轮用了多长时间
                         sess_turn = self.sessions.get_or_create(session_key)
-                        turn_metadata["goal_state"] = goal_state_ws_blob(sess_turn.metadata)
+                        turn_metadata["goal_state"] = goal_state_ws_blob(sess_turn.metadata)  # 当前持久目标的状态
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=turn_metadata,
@@ -970,15 +1017,15 @@ class AgentLoop:
                                     ))
 
                             self._schedule_background(_generate_title_and_notify())
+                # ===== 步骤 5：异常处理 =====
                 except asyncio.CancelledError:
+                    # 用户发送了 /stop 命令，这个处理任务被取消
                     logger.info("Task cancelled for session {}", session_key)
-                    # Preserve partial context from the interrupted turn so
-                    # the user does not lose tool results and assistant
-                    # messages accumulated before /stop.  The checkpoint was
-                    # already persisted to session metadata by
-                    # _emit_checkpoint during tool execution; materializing
-                    # it into session history now makes it visible in the
-                    # next conversation turn.
+                    # 关键：即使被中断，也要把"运行时检查点"恢复到 session，这样：
+                    # - 已执行的工具结果会被保留
+                    # - 已生成的 assistant 消息会被保留
+                    # - 下一轮对话时，用户能看到被中断前发生了什么
+                    # 检查点是在工具执行时实时保存的（_checkpoint 回调），这里只是物化到历史
                     try:
                         key = self._effective_session_key(msg)
                         session = self.sessions.get_or_create(key)
@@ -995,25 +1042,27 @@ class AgentLoop:
                             session_key,
                             exc_info=True,
                         )
-                    raise
+                    raise  # 继续抛出取消异常，通知上层
                 except Exception:
+                    # 任何其他异常都不应该导致任务失败而不通知用户
                     logger.exception("Error processing message for session {}", session_key)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="Sorry, I encountered an error.",
                     ))
+        # ===== 步骤 6：最终清理（无论成功还是异常都执行）=====
         finally:
-            # Drain any messages still in the pending queue and re-publish
-            # them to the bus so they are processed as fresh inbound messages
-            # rather than silently lost.
+            # 关键逻辑：如果本轮处理期间有新消息到来，它们被放入了 pending 队列
+            # 现在要把它们重新发回总线，作为"新消息"处理，避免丢失
             queue = self._pending_queues.pop(session_key, None)
             if queue is not None:
                 leftover = 0
                 while True:
                     try:
-                        item = queue.get_nowait()
+                        item = queue.get_nowait()  # 非阻塞方式取
                     except asyncio.QueueEmpty:
-                        break
+                        break  # 队列空了
+                    # 重新发回总线，让 run() 循环再次处理
                     await self.bus.publish_inbound(item)
                     leftover += 1
                 if leftover:
@@ -1021,7 +1070,10 @@ class AgentLoop:
                         "Re-published {} leftover message(s) to bus for session {}",
                         leftover, session_key,
                     )
+            
+            # 通知系统这个 session 现在进入"空闲"状态
             await publish_turn_run_status(self.bus, msg, "idle")
+            # 清除本轮的延迟记录
             self._pending_turn_latency_ms.pop(session_key, None)
 
     async def close_mcp(self) -> None:
@@ -1146,7 +1198,21 @@ class AgentLoop:
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         pending_queue: asyncio.Queue | None = None,
     ) -> OutboundMessage | None:
-        """Process a single inbound message and return the response."""
+        """Process a single inbound message and return the response.
+        
+        这个方法是一个「状态机引擎」，由以下状态组成：
+        1. RESTORE：恢复上次中断的检查点
+        2. COMPACT：根据需要进行会话池压缩
+        3. COMMAND：常疗判断是否是命令（如 /stop）
+        4. BUILD：构建 LLM 的初始提示词
+        5. RUN：实际调用 LLM 并执行工具
+        6. SAVE：保存轮下消息到 session
+        7. RESPOND：滄下最终的回复
+        8. DONE：结束
+        
+        状态每次转换是由「事件」驱动的，不是固定顺序。
+        例如快捷命令可以跳过 BUILD/RUN/SAVE，直接转到 DONE。
+        """
         self._refresh_provider_snapshot()
 
         if msg.channel == "system":
@@ -1160,27 +1226,31 @@ class AgentLoop:
             )
 
         key = session_key or msg.session_key
+        # 创建本轮转的上下文对象，保存所有中间信息
         ctx = TurnContext(
             msg=msg,
             session=None,
             session_key=key,
-            state=TurnState.RESTORE,
-            turn_id=f"{key}:{time.time_ns()}",
+            state=TurnState.RESTORE,  # 从 RESTORE 状态开始
+            turn_id=f"{key}:{time.time_ns()}",  # 本轮的唯一 ID
             on_progress=on_progress,
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             pending_queue=pending_queue,
         )
 
+        # 状态机主循环：每嬡执行一个状态处理器，转移到下一个状态，直到 DONE
         while ctx.state is not TurnState.DONE:
+            # 动态氹态查找处理函数，不需要寒罫列肓 if/elif
             handler_name = f"_state_{ctx.state.name.lower()}"
             handler = getattr(self, handler_name, None)
             if handler is None:
                 raise RuntimeError(f"Missing state handler for {ctx.state}")
 
+            # 调量执行程序
             t0 = time.perf_counter()
             try:
-                event = await handler(ctx)
+                event = await handler(ctx)  # 状态处理器返回事件字符串
             except Exception:
                 duration = (time.perf_counter() - t0) * 1000
                 ctx.trace.append(
@@ -1195,6 +1265,7 @@ class AgentLoop:
                 raise
 
             duration = (time.perf_counter() - t0) * 1000
+            # 记录每个状态的执行时间，用于性能分析
             ctx.trace.append(
                 StateTraceEntry(
                     state=ctx.state,
@@ -1211,6 +1282,7 @@ class AgentLoop:
                 event,
             )
 
+            # 查转移表，决定下一个状态
             next_state = self._TRANSITIONS.get((ctx.state, event))
             if next_state is None:
                 raise RuntimeError(
@@ -1262,7 +1334,17 @@ class AgentLoop:
         )
 
     async def _state_restore(self, ctx: TurnContext) -> TurnState:
-        """Restore checkpoint / pending user turn; extract documents."""
+        """Restore checkpoint / pending user turn; extract documents.
+        
+        RESTORE 是第一个状态，职责是恢复程序的故障。
+        
+        场景 1：若上次轮转在工具执行中遇到崩溃，
+                  检查点被保存到 session metadata 中。
+                  此时宁安抽取已执行的工具结果和 assistant 消息。
+                  
+        场景 2：若用户消息已经丢进 session，但 assistant 消息没有答复（不常见），
+                  里面済一个错误提示。
+        """
         msg = ctx.msg
 
         if msg.media:
@@ -1273,18 +1355,19 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        # Session is already fetched by the caller (_process_message) but
-        # ensure it exists in case this handler is invoked independently.
+        # 确保 session 存在
         if ctx.session is None:
             ctx.session = self.sessions.get_or_create(ctx.session_key)
         mark_webui_session(ctx.session, msg.metadata)
 
+        # 尝试恢复检查点
         if self._restore_runtime_checkpoint(ctx.session):
             self.sessions.save(ctx.session)
+        # 尝试恢复待处理的用户轮次
         if self._restore_pending_user_turn(ctx.session):
             self.sessions.save(ctx.session)
 
-        return "ok"
+        return "ok"  # 整个恢复步骤完成，下一个状态是 COMPACT
 
     async def _state_compact(self, ctx: TurnContext) -> str:
         ctx.session, pending = self.auto_compact.prepare_session(ctx.session, ctx.session_key)
@@ -1317,6 +1400,20 @@ class AgentLoop:
         return "dispatch"
 
     async def _state_build(self, ctx: TurnContext) -> str:
+        """BUILD 状态：为 LLM 构建初始提示词和历史上下文。
+        
+        它会：
+        1. 根据 token 预算数量进行会话压缩（触发 Dream 二阶段压缩）
+        2. 为所有工具设置上下文（渠道、chat_id 等）
+        3. 获取 session 的历史消息
+        4. 使用 ContextBuilder 构建初始消息序列：
+           - 系统提示词
+           - 历史消息
+           - 当前用户消息
+           - 技能定义
+        5. 提前持久化用户消息（方便 WebUI 历史水合）
+        6. 构建進度回调
+        """
         await self.consolidator.maybe_consolidate_by_tokens(
             ctx.session,
             replay_max_messages=self._max_messages,
@@ -1330,7 +1427,7 @@ class AgentLoop:
         )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()
+                message_tool.start_turn()  # 告诉 message 工具新的轮次开始
 
         _hist_kwargs: dict[str, Any] = {
             "max_messages": self._max_messages,
@@ -1339,6 +1436,7 @@ class AgentLoop:
         }
         ctx.history = ctx.session.get_history(**_hist_kwargs)
 
+        # 技能定义缘来主要借由这个方法提供，因为 BUILD 术上下文内容相对稳定
         ctx.initial_messages = self._build_initial_messages(
             ctx.msg, ctx.session, ctx.history, ctx.pending_summary
         )
@@ -1351,9 +1449,21 @@ class AgentLoop:
         if ctx.on_retry_wait is None:
             ctx.on_retry_wait = await self._build_retry_wait_callback(ctx.msg)
 
-        return "ok"
+        return "ok"  # 下一个状态是 RUN
 
     async def _state_run(self, ctx: TurnContext) -> str:
+        """RUN 状态：实际调用 LLM 并执行工具。
+        
+        这是整个轮次的【程】：
+        1. 发送 initial_messages 给 LLM
+        2. LLM 返回应答 + 工具调用
+        3. 触发工具执行、收集结果
+        4. 将结果注入 LLM 上下文，继续轮次
+        5. 直到 LLM 不再有工具调用（给出了最终回答）
+        
+        并发执行：不同的工具可以并发执行，不需要排队
+        中途注入：轮转中到来的新消息会被 'drain_pending' 回调提取，注入为新的 user 消息
+        """
         await publish_turn_run_status(self.bus, ctx.msg, "running")
         result = await self._run_agent_loop(
             ctx.initial_messages,
@@ -1370,17 +1480,28 @@ class AgentLoop:
             pending_queue=ctx.pending_queue,
         )
         final_content, tools_used, all_msgs, stop_reason, had_injections = result
+        # 把结果保存到 ctx 中，使竞刎 SAVE 状态会用到
         ctx.final_content = final_content
         ctx.tools_used = tools_used
         ctx.all_messages = all_msgs
         ctx.stop_reason = stop_reason
         ctx.had_injections = had_injections
-        return "ok"
+        return "ok"  # 下一个状态是 SAVE
 
     async def _state_save(self, ctx: TurnContext) -> str:
+        """SAVE 状态：保存本轮次的消息到 session。
+        
+        关键逻辑：
+        1. 计算要跳过的消息数（帶了历史 + 提前持久化的策略）
+        2. 丢叫过長時傳的工具结果（帧接採策略上限为 max_tool_result_chars）
+        3. 提取本轮生成的图象 媽媽的
+        4. 保存各轮子消息 + 宗合延迟 媽媽的
+        5. 清除运行时检查点和 pending 位标
+        """
         if ctx.final_content is None or not ctx.final_content.strip():
             ctx.final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
+        # 计算 skip 数量：需要跳过已经在历史里的消息
         ctx.save_skip = 1 + len(ctx.history) + (1 if ctx.user_persisted_early else 0)
         skip_msgs = ctx.all_messages[ctx.save_skip:]
         ctx.generated_media = generated_image_paths_from_messages(skip_msgs)
@@ -1388,7 +1509,9 @@ class AgentLoop:
         extra = getattr(mt, "turn_delivered_media_paths", lambda: [])() if mt else []
         merge_turn_media_into_last_assistant(ctx.all_messages, ctx.generated_media, extra)
 
+        # 计算本轮的延迟
         ctx.turn_latency_ms = max(0, int((time.time() - ctx.turn_wall_started_at) * 1000))
+        # 保存新消息（忽略已的）
         self._save_turn(
             ctx.session, ctx.all_messages, ctx.save_skip,
             turn_latency_ms=ctx.turn_latency_ms,
@@ -1399,13 +1522,14 @@ class AgentLoop:
         self._clear_pending_user_turn(ctx.session)
         self._clear_runtime_checkpoint(ctx.session)
         self.sessions.save(ctx.session)
+        # 自动压缩待樽（后台上会执行）
         self._schedule_background(
             self.consolidator.maybe_consolidate_by_tokens(
                 ctx.session,
                 replay_max_messages=self._max_messages,
             )
         )
-        return "ok"
+        return "ok"  # 下一个状态是 RESPOND
 
     async def _state_respond(self, ctx: TurnContext) -> str:
         ctx.outbound = self._assemble_outbound(

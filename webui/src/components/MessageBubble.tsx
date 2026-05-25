@@ -478,11 +478,43 @@ export function ReasoningBubble({
   const markdownSource = streaming ? deferredText : text;
   const [userToggled, setUserToggled] = useState(false);
   const [openLocal, setOpenLocal] = useState(true);
-  const open = userToggled ? openLocal : streaming;
+  // ##AI修改后
+  const [autoOpen, setAutoOpen] = useState(streaming);
+  const autoCollapseTimerRef = useRef<number | null>(null);
+  const AUTO_COLLAPSE_DELAY_MS = 700;
+  // ######
+  // ##AI修改前
+  // const open = userToggled ? openLocal : streaming;
+  // ######
+  // ##AI修改后
+  const open = userToggled ? openLocal : autoOpen;
+  // ######
   const onToggle = () => {
     setUserToggled(true);
     setOpenLocal((v) => (userToggled ? !v : !open));
   };
+  // ##AI修改后
+  useEffect(() => {
+    if (autoCollapseTimerRef.current !== null) {
+      window.clearTimeout(autoCollapseTimerRef.current);
+      autoCollapseTimerRef.current = null;
+    }
+    if (streaming) {
+      setAutoOpen(true);
+      return;
+    }
+    autoCollapseTimerRef.current = window.setTimeout(() => {
+      setAutoOpen(false);
+      autoCollapseTimerRef.current = null;
+    }, AUTO_COLLAPSE_DELAY_MS);
+    return () => {
+      if (autoCollapseTimerRef.current !== null) {
+        window.clearTimeout(autoCollapseTimerRef.current);
+        autoCollapseTimerRef.current = null;
+      }
+    };
+  }, [streaming]);
+  // ######
   useEffect(() => {
     if (open && text.length > 0) {
       preloadMarkdownText();

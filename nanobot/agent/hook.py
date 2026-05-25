@@ -75,7 +75,7 @@ class CompositeHook(AgentHook):
     ``finalize_content`` is a pipeline (no isolation — bugs should surface).
     """
 
-    __slots__ = ("_hooks",)
+    __slots__ = ("_hooks")
 
     def __init__(self, hooks: list[AgentHook]) -> None:
         super().__init__()

@@ -1,4 +1,9 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+// ##AI修改前
+// import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+// ######
+// ##AI修改后
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+// ######
 import { describe, expect, it, vi } from "vitest";
 
 import { MessageBubble } from "@/components/MessageBubble";
@@ -135,26 +140,97 @@ describe("MessageBubble", () => {
     expect(screen.getByRole("button", { name: /thinking/i }).parentElement).not.toHaveClass("mb-2");
   });
 
-  it("collapses the reasoning section by default once streaming ends", () => {
-    const message: UIMessage = {
-      id: "a-reasoning-done",
-      role: "assistant",
-      content: "The answer is 42.",
-      createdAt: Date.now(),
-      reasoning: "hidden until expanded",
-      reasoningStreaming: false,
-    };
+  // ##AI修改前
+  // it("collapses the reasoning section by default once streaming ends", () => {
+  //   const message: UIMessage = {
+  //     id: "a-reasoning-done",
+  //     role: "assistant",
+  //     content: "The answer is 42.",
+  //     createdAt: Date.now(),
+  //     reasoning: "hidden until expanded",
+  //     reasoningStreaming: false,
+  //   };
+  //
+  //   render(<MessageBubble message={message} />);
+  //
+  //   expect(screen.getByText("Thinking")).toBeInTheDocument();
+  //   expect(screen.getByText("The answer is 42.")).toBeInTheDocument();
+  //   expect(screen.queryByText("hidden until expanded")).not.toBeInTheDocument();
+  //   expect(screen.getByRole("button", { name: /thinking/i }).parentElement).toHaveClass("mb-2");
+  //
+  //   fireEvent.click(screen.getByRole("button", { name: /thinking/i }));
+  //   expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
+  // });
+  // ######
+  // ##AI修改后
+  it("collapses the reasoning section with a short debounce once streaming ends", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = render(
+        <MessageBubble
+          message={{
+            id: "a-reasoning-done",
+            role: "assistant",
+            content: "",
+            createdAt: Date.now(),
+            reasoning: "hidden until expanded",
+            reasoningStreaming: true,
+          }}
+        />,
+      );
 
-    render(<MessageBubble message={message} />);
+      // ##AI修改前
+      // expect(screen.getByText("Thinking鈥?)).toBeInTheDocument();
+      // ######
+      // ##AI修改后
+      expect(screen.getByRole("button", { name: /thinking/i })).toBeInTheDocument();
+      // ######
+      expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
 
-    expect(screen.getByText("Thinking")).toBeInTheDocument();
-    expect(screen.getByText("The answer is 42.")).toBeInTheDocument();
-    expect(screen.queryByText("hidden until expanded")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /thinking/i }).parentElement).toHaveClass("mb-2");
+      rerender(
+        <MessageBubble
+          message={{
+            id: "a-reasoning-done",
+            role: "assistant",
+            content: "The answer is 42.",
+            createdAt: Date.now(),
+            reasoning: "hidden until expanded",
+            reasoningStreaming: false,
+          }}
+        />,
+      );
 
-    fireEvent.click(screen.getByRole("button", { name: /thinking/i }));
-    expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
+      expect(screen.getByText("Thinking")).toBeInTheDocument();
+      expect(screen.getByText("The answer is 42.")).toBeInTheDocument();
+      expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
+
+      // ##AI修改前
+      // vi.advanceTimersByTime(699);
+      // ######
+      // ##AI修改后
+      act(() => {
+        vi.advanceTimersByTime(699);
+      });
+      // ######
+      expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
+
+      // ##AI修改前
+      // vi.advanceTimersByTime(1);
+      // ######
+      // ##AI修改后
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+      // ######
+      expect(screen.queryByText("hidden until expanded")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole("button", { name: /thinking/i }));
+      expect(screen.getByText("hidden until expanded")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
+  // ######
 
   it("renders reasoning body as markdown so headings are not left as raw ###", async () => {
     await import("@/components/MarkdownTextRenderer");

@@ -30,3 +30,8 @@ The skill format and metadata structure follow OpenClaw's conventions to maintai
 | `clawhub` | Search and install skills from ClawHub registry |
 | `skill-creator` | Create new skills |
 | `long-goal` | Sustained objectives: `long_task`, `complete_goal`, idempotent goals, modular project work, early research |
+<!-- #AI修改前: Available Skills table did not include the unsplash skill. -->
+<!-- ###### -->
+<!-- #AI修改后 -->
+| `unsplash` | Search Unsplash for project-ready photos with URLs, attribution, and download tracking guidance |
+<!-- ###### -->
