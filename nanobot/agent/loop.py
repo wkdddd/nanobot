@@ -24,6 +24,7 @@ from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRun
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanobot.agent.tools.message import MessageTool
+from nanobot.agent.tools.unsplash import UnsplashSearchTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.self import MyTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
@@ -177,6 +178,7 @@ class AgentLoop:
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
         tools_config: ToolsConfig | None = None,
+        
         image_generation_provider_config: ProviderConfig | None = None,
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
         provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None,
@@ -185,6 +187,8 @@ class AgentLoop:
         model_preset: str | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
+        unsplash_provider_config:ProviderConfig | None = None,
+        unsplash_provider_configs:dict[str, ProviderConfig] | None = None,
     ):
         from nanobot.config.schema import ToolsConfig
 
@@ -228,6 +232,14 @@ class AgentLoop:
             and "openrouter" not in self._image_generation_provider_configs
         ):
             self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
+        #AI修改前
+        # 未保存 unsplash_provider_config，导致工具上下文拿不到 providers.unsplash 配置。
+        #AI修改后
+        self._unsplash_provider_config = unsplash_provider_config
+        if self._unsplash_provider_config is None and unsplash_provider_configs:
+            self._unsplash_provider_config = unsplash_provider_configs.get("unsplash")
+        
+        
         self.cron_service = cron_service
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
@@ -356,6 +368,10 @@ class AgentLoop:
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
+            #AI修改前
+            # 未从 Config.providers.unsplash 注入 AgentLoop，配置文件中的 Unsplash API key 不会进入工具。
+            #AI修改后
+            unsplash_provider_config=extra.pop("unsplash_provider_config", config.providers.unsplash),
             **extra,
         )
 
@@ -451,6 +467,10 @@ class AgentLoop:
             sessions=self.sessions,
             provider_snapshot_loader=self._provider_snapshot_loader,
             image_generation_provider_configs=self._image_generation_provider_configs,
+            #AI修改前
+            # ToolContext 没有携带 Unsplash provider config。
+            #AI修改后
+            unsplash_provider_config=self._unsplash_provider_config,
             timezone=self.context.timezone or "UTC",
         )
         loader = ToolLoader()

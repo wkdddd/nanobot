@@ -1,227 +1,166 @@
 """Unsplash image search tool."""
-
-from __future__ import annotations
-
-import json
-import os
-from typing import Any
-
-import httpx
-
+from pydantic import Field
+from nanobot.config.schema import Base
+from typing import Any,TYPE_CHECKING
+from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
+from nanobot.providers.unsplash_provider import UnsplashClient, UnsplashError, UnsplashSearchResponse
+class UnsplashSearchToolConfig(Base):
+    """Unsplash search tool configuration.
+    Args:
+        enabled: bool = False
+        default_count: int = Field(default=5, ge=1, le=10)
+        max_results: int = Field(default=10, ge=1, le=30)
+        content_filter: str = "high"
+    """
 
-_DEFAULT_USER_AGENT = "nanobot-unsplash-tool/1.0"
-_UNSPLASH_SEARCH_ENDPOINT = "https://api.unsplash.com/search/photos"
-
-
-def _clean_optional(value: str | None) -> str | None:
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _photo_to_result(photo: dict[str, Any]) -> dict[str, Any]:
-    user = photo.get("user") or {}
-    links = photo.get("links") or {}
-    user_links = user.get("links") or {}
-    urls = photo.get("urls") or {}
-    description = photo.get("alt_description") or photo.get("description") or ""
-    photographer = user.get("name") or user.get("username") or ""
-    unsplash_url = links.get("html") or ""
-    photographer_url = user_links.get("html") or ""
-
-    return {
-        "id": photo.get("id", ""),
-        "description": description,
-        "width": photo.get("width"),
-        "height": photo.get("height"),
-        "color": photo.get("color"),
-        "urls": {
-            "raw": urls.get("raw", ""),
-            "full": urls.get("full", ""),
-            "regular": urls.get("regular", ""),
-            "small": urls.get("small", ""),
-            "thumb": urls.get("thumb", ""),
-        },
-        "links": {
-            "html": unsplash_url,
-            "download_location": links.get("download_location", ""),
-        },
-        "photographer": {
-            "name": photographer,
-            "username": user.get("username", ""),
-            "url": photographer_url,
-        },
-        "attribution": (
-            f"Photo by {photographer} on Unsplash: {unsplash_url}"
-            if photographer and unsplash_url
-            else ""
-        ),
-    }
-
+    enabled: bool = True
+    default_count: int = Field(default=5, ge=1, le=10)
+    max_results: int = Field(default=10, ge=1, le=30)
+    content_filter: str = "high"
 
 @tool_parameters(
     tool_parameters_schema(
-        query=StringSchema(
-            "Image search text, e.g. 'minimal workspace', 'Tokyo night street', or 'forest trail'.",
-            min_length=1,
-        ),
+        query=StringSchema("Image search query.", min_length=1),
         count=IntegerSchema(
-            10,
-            description="Number of photos to return (1-30).",
+            description="Number of image results to return.",
             minimum=1,
-            maximum=30,
+            maximum=10,
+        ),
+        orientation=StringSchema(
+            "Optional orientation filter.",
+            enum=("landscape", "portrait", "squarish"),
+            nullable=True,
+        ),
+        color=StringSchema(
+            "Optional color filter.",
+            enum=(
+                "black_and_white",
+                "black",
+                "white",
+                "yellow",
+                "orange",
+                "red",
+                "purple",
+                "magenta",
+                "green",
+                "teal",
+                "blue",
+            ),
+            nullable=True,
+        ),
+        order_by=StringSchema(
+            "Sort order.",
+            enum=("relevant", "latest"),
+            nullable=True,
         ),
         page=IntegerSchema(
-            1,
-            description="Unsplash results page number.",
+            description="Page number to retrieve.",
             minimum=1,
             maximum=100,
-        ),
-        orientation={
-            "type": "string",
-            "enum": ["landscape", "portrait", "squarish"],
-            "description": "Optional image orientation filter.",
-        },
-        order_by={
-            "type": "string",
-            "enum": ["relevant", "latest"],
-            "description": "Result ordering. Defaults to relevant.",
-        },
-        color=StringSchema(
-            "Optional Unsplash color filter, e.g. black_and_white, black, white, yellow, orange, red, purple, magenta, green, teal, or blue.",
-        ),
-        content_filter={
-            "type": "string",
-            "enum": ["low", "high"],
-            "description": "Unsplash content safety filter. Defaults to low.",
-        },
-        lang=StringSchema(
-            "Optional ISO language code for the search query, e.g. en, zh, ja.",
-            max_length=8,
         ),
         required=["query"],
     )
 )
 class UnsplashSearchTool(Tool):
-    """Search Unsplash photos with official API credentials."""
-
-    _scopes = {"core", "subagent"}
-
+    """Search Unsplash for real photo assets."""
+    config_key = "unsplash"
+    @classmethod
+    def config_cls(cls):
+        return UnsplashSearchToolConfig
+    @classmethod
+    def enabled(cls, ctx: ToolContext) -> bool:
+        return ctx.config.unsplash_search.enabled
+    @classmethod
+    def create(cls, ctx: Any) -> Tool:
+        return cls(
+            config=ctx.config.unsplash_search,
+            provider_config=ctx.unsplash_provider_config,
+        )
+    def __init__(self,
+                 *,
+                 config:UnsplashSearchToolConfig,
+                 provider_config:Any
+                 ):
+        super().__init__()
+        self.config=config
+        self.provider_config=provider_config
     @property
-    def name(self) -> str:
-        return "unsplash_search"
-
+    def name(self):
+        #AI修改前
+        # return "unsplash"
+        #AI修改后
+        return "search_unsplash_images"
     @property
     def description(self) -> str:
         return (
-            "Search Unsplash for photos. Requires UNSPLASH_ACCESS_KEY. "
-            "Returns image URLs, dimensions, photographer attribution, Unsplash page links, "
-            "and download_location values for required download tracking."
+            "Search Unsplash for real photo assets. Returns image URLs, "
+            "photographer attribution, Unsplash page links, and metadata."
         )
-
     @property
     def read_only(self) -> bool:
         return True
-
-    @classmethod
-    def create(cls, ctx: Any) -> Tool:
-        web_cfg = getattr(getattr(ctx, "config", None), "web", None)
-        return cls(
-            proxy=getattr(web_cfg, "proxy", None),
-            user_agent=getattr(web_cfg, "user_agent", None),
-        )
-
-    def __init__(
-        self,
-        *,
-        access_key: str | None = None,
-        proxy: str | None = None,
-        user_agent: str | None = None,
-    ) -> None:
-        self.access_key = access_key
-        self.proxy = proxy
-        self.user_agent = user_agent or _DEFAULT_USER_AGENT
-
-    def _access_key(self) -> str:
-        return (
-            self.access_key
-            or os.environ.get("UNSPLASH_ACCESS_KEY", "")
-            or os.environ.get("UNSPLASH_API_KEY", "")
-        ).strip()
-
+    
     async def execute(
         self,
         query: str,
-        count: int = 10,
-        page: int = 1,
+        count: int | None = None,
         orientation: str | None = None,
-        order_by: str | None = "relevant",
         color: str | None = None,
-        content_filter: str | None = "low",
-        lang: str | None = None,
+        order_by: str | None = None,
+        page: int | None = None,
         **kwargs: Any,
     ) -> str:
-        access_key = self._access_key()
-        if not access_key:
-            return "Error: UNSPLASH_ACCESS_KEY is not configured."
-
-        params: dict[str, Any] = {
-            "query": query,
-            "page": page,
-            "per_page": count,
-            "order_by": _clean_optional(order_by) or "relevant",
-            "content_filter": _clean_optional(content_filter) or "low",
-        }
-        for key, value in {
-            "orientation": orientation,
-            "color": color,
-            "lang": lang,
-        }.items():
-            cleaned = _clean_optional(value)
-            if cleaned:
-                params[key] = cleaned
-
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Client-ID {access_key}",
-            "User-Agent": self.user_agent,
-        }
-
+        api_key = getattr(self.provider_config, "api_key", None)
+        if not api_key:
+            return "Error: Unsplash API key is not configured. Set providers.unsplash.apiKey."
+        requested = count or self.config.default_count
+        if requested > self.config.max_results:
+            return f"Error: count exceeds tools.unsplashSearch.maxResults ({self.config.max_results})"
+        client = UnsplashClient(
+            api_key=api_key,
+            api_base=getattr(self.provider_config, "api_base", None),
+        )
         try:
-            async with httpx.AsyncClient(proxy=self.proxy, timeout=15.0) as client:
-                response = await client.get(
-                    _UNSPLASH_SEARCH_ENDPOINT,
-                    params=params,
-                    headers=headers,
-                )
-                response.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in {401, 403}:
-                return "Error: Unsplash authentication failed. Check UNSPLASH_ACCESS_KEY."
-            if status == 429:
-                return "Error: Unsplash API rate limit reached. Retry later or reduce requests."
-            return f"Error: Unsplash search failed with HTTP {status}: {exc.response.text[:500]}"
-        except httpx.RequestError as exc:
-            return f"Error: Unsplash request failed: {exc}"
-        except Exception as exc:
-            return f"Error: Unsplash search failed: {exc}"
-
-        data = response.json()
-        payload = {
-            "query": query,
-            "page": data.get("page", page),
-            "per_page": data.get("per_page", count),
-            "total": data.get("total", 0),
-            "total_pages": data.get("total_pages", 0),
-            "results": [_photo_to_result(item) for item in data.get("results", [])],
-            "note": (
-                "If a photo is selected for project use or download, call its "
-                "links.download_location endpoint once with the same Unsplash Authorization header."
-            ),
-        }
-        return json.dumps(payload, ensure_ascii=False, indent=2)
-
+            #AI修改前
+            # response=await client.search_photo(
+            #AI修改后
+            response=await client.search_photos(
+                query=query,
+                count=requested,
+                page=page or 1,
+                order_by=order_by or "relevant",
+                orientation=orientation,
+                color=color,
+                content_filter=self.config.content_filter,
+            )
+        except UnsplashError as exc:
+            return f"Error: {exc}"
+        
+        return self._format_unsplash_results(response)
+    
+    def _format_unsplash_results(self,response: UnsplashSearchResponse) -> str:
+        if not response.results:
+            return f"No Unsplash results for: {response.query}"
+        lines = [
+        f"Unsplash results for: {response.query}",
+        f"Total: {response.total} results across {response.total_pages} pages",
+        "",
+    ]
+        for index,data in enumerate(response.results,1):
+            description=data.alt_description or data.description or "no description"
+            lines.extend(
+            [
+                f"{index}. {description}",
+                f"   Author: {data.author_name}",
+                f"   Author page: {data.author_url}",
+                f"   Unsplash page: {data.page_url}",
+                f"   Image: {data.regular_url or data.small_url}",
+                f"   Thumbnail: {data.thumb_url}",
+                f"   Size: {data.width}x{data.height}",
+                f"   Download tracking URL: {data.download_location}",
+                "",
+            ]
+        )
+        return "\n".join(lines).strip()
