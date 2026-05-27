@@ -570,6 +570,29 @@ async def test_send_turn_end_includes_goal_state_when_present() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_turn_end_includes_turn_trace_when_present() -> None:
+    bus = MagicMock()
+    channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus)
+    mock_ws = AsyncMock()
+    channel._attach(mock_ws, "chat-1")
+
+    trace = [
+        {"state": "RESTORE", "event": "ok", "duration_ms": 1},
+        {"state": "RUN", "event": "ok", "duration_ms": 120},
+    ]
+    await channel.send(OutboundMessage(
+        channel="websocket",
+        chat_id="chat-1",
+        content="",
+        metadata={"_turn_end": True, "turn_trace": trace},
+    ))
+
+    mock_ws.send.assert_awaited_once()
+    body = json.loads(mock_ws.send.await_args.args[0])
+    assert body == {"event": "turn_end", "chat_id": "chat-1", "turn_trace": trace}
+
+
+@pytest.mark.asyncio
 async def test_send_goal_status_running_emits_event_with_started_at() -> None:
     bus = MagicMock()
     channel = WebSocketChannel({"enabled": True, "allowFrom": ["*"]}, bus)

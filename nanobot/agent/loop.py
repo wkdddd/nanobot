@@ -245,6 +245,7 @@ class AgentLoop:
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
         self._pending_turn_latency_ms: dict[str, int] = {}
+        self._pending_turn_traces: dict[str, list[dict[str, Any]]] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
 
         self.context = ContextBuilder(workspace, timezone=timezone, disabled_skills=disabled_skills)
@@ -1009,9 +1010,12 @@ class AgentLoop:
                         # WebSocket 客户端需要明确知道"这一轮会话已经完全结束"
                         # 这样前端可以停止加载动画，显示最终结果
                         turn_lat = self._pending_turn_latency_ms.pop(session_key, None)
+                        turn_trace = self._pending_turn_traces.pop(session_key, None)
                         turn_metadata: dict[str, Any] = {**msg.metadata, "_turn_end": True}  # 关键标记
                         if turn_lat is not None:
                             turn_metadata["latency_ms"] = int(turn_lat)  # 这一轮用了多长时间
+                        if turn_trace:
+                            turn_metadata["turn_trace"] = turn_trace
                         sess_turn = self.sessions.get_or_create(session_key)
                         turn_metadata["goal_state"] = goal_state_ws_blob(sess_turn.metadata)  # 当前持久目标的状态
                         await self.bus.publish_outbound(OutboundMessage(
@@ -1095,6 +1099,7 @@ class AgentLoop:
             await publish_turn_run_status(self.bus, msg, "idle")
             # 清除本轮的延迟记录
             self._pending_turn_latency_ms.pop(session_key, None)
+            self._pending_turn_traces.pop(session_key, None)
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
@@ -1282,6 +1287,7 @@ class AgentLoop:
                         error="exception",
                     )
                 )
+                self._remember_turn_trace(ctx.session_key, ctx.trace)
                 raise
 
             duration = (time.perf_counter() - t0) * 1000
@@ -1311,12 +1317,32 @@ class AgentLoop:
                 )
             ctx.state = next_state
 
-        logger.debug(
+        logger.info(
             "[turn {}] Turn completed after {} states",
             ctx.turn_id,
             len(ctx.trace),
         )
+        self._remember_turn_trace(ctx.session_key, ctx.trace)
         return ctx.outbound
+
+    @staticmethod
+    def _serialize_turn_trace(entries: list[StateTraceEntry]) -> list[dict[str, Any]]:
+        trace: list[dict[str, Any]] = []
+        for entry in entries:
+            item: dict[str, Any] = {
+                "state": entry.state.name,
+                "event": entry.event,
+                "duration_ms": max(0, int(round(entry.duration_ms))),
+            }
+            if entry.error:
+                item["error"] = entry.error
+            trace.append(item)
+        return trace
+
+    def _remember_turn_trace(self, session_key: str, entries: list[StateTraceEntry]) -> None:
+        trace = self._serialize_turn_trace(entries)
+        if trace:
+            self._pending_turn_traces[session_key] = trace
 
     def _assemble_outbound(
         self,
@@ -1542,7 +1568,6 @@ class AgentLoop:
         self._clear_pending_user_turn(ctx.session)
         self._clear_runtime_checkpoint(ctx.session)
         self.sessions.save(ctx.session)
-        # 自动压缩待樽（后台上会执行）
         self._schedule_background(
             self.consolidator.maybe_consolidate_by_tokens(
                 ctx.session,

@@ -1610,7 +1610,14 @@ class WebSocketChannel(BaseChannel):
             lat_i = int(lat) if isinstance(lat, (int, float)) else None
             gs = msg.metadata.get("goal_state")
             gs_blob = gs if isinstance(gs, dict) else None
-            await self.send_turn_end(msg.chat_id, latency_ms=lat_i, goal_state=gs_blob)
+            trace = msg.metadata.get("turn_trace")
+            trace_items = trace if isinstance(trace, list) else None
+            await self.send_turn_end(
+                msg.chat_id,
+                latency_ms=lat_i,
+                goal_state=gs_blob,
+                turn_trace=trace_items,
+            )
             return
         if msg.metadata.get("_session_updated"):
             await self.send_session_updated(msg.chat_id)
@@ -1733,6 +1740,7 @@ class WebSocketChannel(BaseChannel):
         latency_ms: int | None = None,
         *,
         goal_state: dict[str, Any] | None = None,
+        turn_trace: list[dict[str, Any]] | None = None,
     ) -> None:
         """Signal that the agent has fully finished processing the current turn."""
         conns = list(self._subs.get(chat_id, ()))
@@ -1743,6 +1751,8 @@ class WebSocketChannel(BaseChannel):
             body["latency_ms"] = int(latency_ms)
         if goal_state is not None:
             body["goal_state"] = goal_state
+        if turn_trace is not None:
+            body["turn_trace"] = turn_trace
         self._try_append_webui_transcript(chat_id, body)
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:

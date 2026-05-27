@@ -30,6 +30,13 @@ export interface UIMediaAttachment {
   name?: string;
 }
 
+export interface TurnTraceItem {
+  state: string;
+  event: string;
+  duration_ms: number;
+  error?: string;
+}
+
 export interface UIMessage {
   id: string;
   role: Role;
@@ -215,6 +222,7 @@ export type InboundEvent =
       latency_ms?: number;
       /** Authoritative sustained-goal snapshot for this chat (same shape as ``goal_state`` events). */
       goal_state?: GoalStateWsPayload;
+      turn_trace?: TurnTraceItem[];
     }
   | {
       event: "goal_status";

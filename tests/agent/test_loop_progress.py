@@ -297,6 +297,18 @@ class TestToolEventProgress:
         assert len(turn_end_msgs) == 1
         assert turn_end_msgs[0].content == ""
         assert turn_end_msgs[0].chat_id == "chat1"
+        trace = turn_end_msgs[0].metadata.get("turn_trace")
+        assert isinstance(trace, list)
+        assert [item["state"] for item in trace] == [
+            "RESTORE",
+            "COMPACT",
+            "COMMAND",
+            "BUILD",
+            "RUN",
+            "SAVE",
+            "RESPOND",
+        ]
+        assert all(isinstance(item.get("duration_ms"), int) for item in trace)
         assert outbound.index(done_msgs[0]) < outbound.index(turn_end_msgs[0])
 
     @pytest.mark.asyncio

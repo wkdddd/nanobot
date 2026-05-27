@@ -32,6 +32,55 @@ class SkillsLoader:
         self.workspace_skills = workspace / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
         self.disabled_skills = disabled_skills or set()
+        self._content_cache: dict[str, tuple[tuple[str, int, int] | None, str]] = {}
+        self._metadata_cache: dict[str, tuple[tuple[str, int, int] | None, dict | None]] = {}
+        self._summary_cache_key: tuple | None = None
+        self._summary_cache_value = ""
+        self._always_cache_key: tuple | None = None
+        self._always_cache_value: list[str] = []
+ 
+    def _resolve_skill_path(self, name: str) -> Path | None:
+        """Resolve the active SKILL.md path, preferring workspace skills."""
+        roots = [self.workspace_skills]
+        if self.builtin_skills:
+            roots.append(self.builtin_skills)
+        for root in roots:
+            path = root / name / "SKILL.md"
+            if path.exists():
+                return path
+        return None
+ 
+    @staticmethod
+    def _file_signature(path: Path) -> tuple[str, int, int] | None:
+        """Return a cheap file signature for cache invalidation."""
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return (str(path), stat.st_mtime_ns, stat.st_size)
+  
+    def _skills_fingerprint(self, entries: list[dict[str, str]] | None = None) -> tuple:
+        """Fingerprint the visible skill set without reading full file contents."""
+        skill_entries = entries if entries is not None else self.list_skills(filter_unavailable=False)
+        items = []
+        for entry in skill_entries:
+            meta = self._get_skill_meta(entry["name"])
+            requires = meta.get("requires", {})
+            bins = tuple(
+                sorted((cmd, shutil.which(cmd)) for cmd in requires.get("bins", []))
+            )
+            env = tuple(
+                sorted((name, os.environ.get(name)) for name in requires.get("env", []))
+            )
+            items.append((
+                entry["name"],
+                entry["source"],
+                self._file_signature(Path(entry["path"])),
+                bins,
+                env,
+            ))
+        return tuple(sorted(items))
+  
 
     def _skill_entries_from_dir(self, base: Path, source: str, *, skip_names: set[str] | None = None) -> list[dict[str, str]]:
         if not base.exists():
@@ -73,6 +122,7 @@ class SkillsLoader:
             return [skill for skill in skills if self._check_requirements(self._get_skill_meta(skill["name"]))]
         return skills
 
+   
     def load_skill(self, name: str) -> str | None:
         """
         Load a skill by name.
@@ -83,15 +133,20 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        roots = [self.workspace_skills]
-        if self.builtin_skills:
-            roots.append(self.builtin_skills)
-        for root in roots:
-            path = root / name / "SKILL.md"
-            if path.exists():
-                logger.info("using the skill {}",name)
-                return path.read_text(encoding="utf-8")
-        return None
+        path = self._resolve_skill_path(name)
+        if path is None:
+            return None
+
+        signature = self._file_signature(path)
+        cached = self._content_cache.get(name)
+        if cached and cached[0] == signature:
+            return cached[1]
+
+        logger.info("using the skill {}", name)
+        content = path.read_text(encoding="utf-8")
+        self._content_cache[name] = (signature, content)
+        return content
+   
 
     def load_skills_for_context(self, skill_names: list[str]) -> str:
         """
@@ -124,7 +179,13 @@ class SkillsLoader:
             Markdown-formatted skills summary.
         """
         all_skills = self.list_skills(filter_unavailable=False)
+        exclude_key = tuple(sorted(exclude or []))
+        cache_key = (self._skills_fingerprint(all_skills), exclude_key)
+        if cache_key == self._summary_cache_key:
+            return self._summary_cache_value
         if not all_skills:
+            self._summary_cache_key = cache_key
+            self._summary_cache_value = ""
             return ""
 
         lines: list[str] = []
@@ -141,7 +202,11 @@ class SkillsLoader:
                 missing = self._get_missing_requirements(meta)
                 suffix = f" (unavailable: {missing})" if missing else " (unavailable)"
                 lines.append(f"- **{skill_name}** — {desc}{suffix}  `{entry['path']}`")
-        return "\n".join(lines)
+        summary = "\n".join(lines)
+        self._summary_cache_key = cache_key
+        self._summary_cache_value = summary
+        return summary
+  
 
     def _get_missing_requirements(self, skill_meta: dict) -> str:
         """Get a description of missing requirements."""
@@ -204,16 +269,25 @@ class SkillsLoader:
 
     def get_always_skills(self) -> list[str]:
         """Get skills marked as always=true that meet requirements."""
-        return [
+        all_skills = self.list_skills(filter_unavailable=False)
+        cache_key = self._skills_fingerprint(all_skills)
+        if cache_key == self._always_cache_key:
+            return list(self._always_cache_value)
+
+        always_skills = [
             entry["name"]
-            for entry in self.list_skills(filter_unavailable=True)
-            if (meta := self.get_skill_metadata(entry["name"]) or {})
+            for entry in all_skills
+            if self._check_requirements(self._get_skill_meta(entry["name"]))
+            and (meta := self.get_skill_metadata(entry["name"]) or {})
             and (
                 self._parse_nanobot_metadata(meta.get("metadata")).get("always")
                 or meta.get("always")
             )
         ]
-
+        self._always_cache_key = cache_key
+        self._always_cache_value = list(always_skills)
+        return always_skills
+   
     def get_skill_metadata(self, name: str) -> dict | None:
         """
         Get metadata from a skill's frontmatter.
@@ -224,21 +298,36 @@ class SkillsLoader:
         Returns:
             Metadata dict or None.
         """
+        path = self._resolve_skill_path(name)
+        if path is None:
+            return None
+
+        signature = self._file_signature(path)
+        cached = self._metadata_cache.get(name)
+        if cached and cached[0] == signature:
+            return cached[1]
+
         content = self.load_skill(name)
         if not content or not content.startswith("---"):
+            self._metadata_cache[name] = (signature, None)
             return None
         match = _STRIP_SKILL_FRONTMATTER.match(content)
         if not match:
+            self._metadata_cache[name] = (signature, None)
             return None
         try:
             parsed = yaml.safe_load(match.group(1))
         except yaml.YAMLError:
+            self._metadata_cache[name] = (signature, None)
             return None
         if not isinstance(parsed, dict):
+            self._metadata_cache[name] = (signature, None)
             return None
         # yaml.safe_load returns native types (int, bool, list, etc.);
         # keep values as-is so downstream consumers get correct types.
         metadata: dict[str, object] = {}
         for key, value in parsed.items():
             metadata[str(key)] = value
+        self._metadata_cache[name] = (signature, metadata)
         return metadata
+  
