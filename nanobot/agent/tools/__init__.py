@@ -28,4 +28,6 @@ __all__ = [
     "ToolRegistry",
     "tool_parameters",
     "tool_parameters_schema",
+    "unsplash",
+    "repo_context",
 ]

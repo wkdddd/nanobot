@@ -126,6 +126,10 @@ def _parse_page_range(pages: str, total: int) -> tuple[int, int]:
             description="Line number to start reading from (1-indexed, default 1)",
             minimum=1,
         ),
+        force=BooleanSchema(
+        default=False,
+        description="Return full content even if this file was read before.",
+        ),
         limit=IntegerSchema(
             2000,
             description="Maximum number of lines to read (default 2000)",
@@ -162,7 +166,7 @@ class ReadFileTool(_FsTool):
     def read_only(self) -> bool:
         return True
 
-    async def execute(self, path: str | None = None, offset: int = 1, limit: int | None = None, pages: str | None = None, **kwargs: Any) -> Any:
+    async def execute(self, path: str | None = None, offset: int = 1, limit: int | None = None, pages: str | None = None, force: bool = False,**kwargs: Any) -> Any:
         try:
             if not path:
                 return "Error reading file: Unknown path"
@@ -202,7 +206,7 @@ class ReadFileTool(_FsTool):
                 current_mtime = os.path.getmtime(fp)
             except OSError:
                 current_mtime = 0.0
-            if entry and entry.can_dedup and entry.offset == offset and entry.limit == limit:
+            if not force and entry and entry.can_dedup and entry.offset == offset and entry.limit == limit:
                 if current_mtime != entry.mtime:
                     # File was modified externally - force full read and mark as not dedupable
                     entry.can_dedup = False

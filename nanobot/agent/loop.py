@@ -468,9 +468,6 @@ class AgentLoop:
             sessions=self.sessions,
             provider_snapshot_loader=self._provider_snapshot_loader,
             image_generation_provider_configs=self._image_generation_provider_configs,
-            #AI修改前
-            # ToolContext 没有携带 Unsplash provider config。
-            #AI修改后
             unsplash_provider_config=self._unsplash_provider_config,
             timezone=self.context.timezone or "UTC",
         )
@@ -1266,13 +1263,11 @@ class AgentLoop:
 
         # 状态机主循环：每嬡执行一个状态处理器，转移到下一个状态，直到 DONE
         while ctx.state is not TurnState.DONE:
-            # 动态氹态查找处理函数，不需要寒罫列肓 if/elif
             handler_name = f"_state_{ctx.state.name.lower()}"
             handler = getattr(self, handler_name, None)
             if handler is None:
                 raise RuntimeError(f"Missing state handler for {ctx.state}")
 
-            # 调量执行程序
             t0 = time.perf_counter()
             try:
                 event = await handler(ctx)  # 状态处理器返回事件字符串
@@ -1318,9 +1313,13 @@ class AgentLoop:
             ctx.state = next_state
 
         logger.info(
-            "[turn {}] Turn completed after {} states",
+            "[turn {}] Turn completed after {} states: {}",
             ctx.turn_id,
             len(ctx.trace),
+            ", ".join(
+                f"{entry.state.name}={entry.duration_ms:.1f}ms"
+                for entry in ctx.trace
+            ),
         )
         self._remember_turn_trace(ctx.session_key, ctx.trace)
         return ctx.outbound

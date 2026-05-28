@@ -1,12 +1,17 @@
 ---
 name: repo-reader
-description: 按照给定流程阅读代码仓库，给出意见和建议
+description: 当用户提供 GitHub/GitLab 仓库链接或要求分析一个代码仓库时，**必须按照给定流程阅读代码仓库**，给出意见和建议
+always: true
 ---
 
 # repo-reader
 
 ## When to Use
-Use this skill when the user wants to understand a code repository before changing it.
+Use this skill when:
+- The user provides a GitHub, GitLab, or other git hosting URL (e.g. https://github.com/user/repo)
+- The user asks to look at, analyze, review, or understand a code repository
+- The user asks "帮我看看这个仓库", "分析一下这个项目" or similar phrases
+- The user wants to understand a code repository before changing it
 
 ## workflow
 1. Inspect top-level files and directories.
@@ -23,6 +28,7 @@ Use this skill when the user wants to understand a code repository before changi
 - Prefer facts from files over assumptions.
 - Keep explanations beginner-friendly when the user is learning.
 - Mention uncertainty clearly.
+- Do not summarize a repository from README alone.
 
 ## Output
 

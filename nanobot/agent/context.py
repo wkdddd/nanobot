@@ -33,7 +33,7 @@ class ContextBuilder:
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
-
+    
     def build_system_prompt(
         self,
         skill_names: list[str] | None = None,
