@@ -30,4 +30,5 @@ __all__ = [
     "tool_parameters_schema",
     "unsplash",
     "repo_context",
+    "web_context",
 ]
