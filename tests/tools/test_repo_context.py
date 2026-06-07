@@ -13,6 +13,20 @@ from nanobot.agent.tools.repo_context import (
 )
 
 
+class FakeEmbeddingClient:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector_for_text(text) for text in texts]
+
+    async def embed_query(self, query: str) -> list[float]:
+        return [0.0, 1.0]
+
+    @staticmethod
+    def _vector_for_text(text: str) -> list[float]:
+        if "semantic target" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+
 def test_repo_context_prefers_python_function_chunk(tmp_path: Path) -> None:
     src = tmp_path / "pkg"
     src.mkdir()
@@ -145,3 +159,24 @@ async def test_repo_context_tool_accepts_include_tests_false(tmp_path: Path) -> 
 
     assert "app.py:1-2" in result
     assert "likely related tests" not in result
+
+
+@pytest.mark.asyncio
+async def test_repo_context_tool_uses_semantic_hits_in_output(tmp_path: Path) -> None:
+    (tmp_path / "lexical.py").write_text(
+        "def lexical():\n    return 'auth keyword only'\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "semantic.py").write_text(
+        "def semantic_target():\n    return 'semantic target payment handler'\n",
+        encoding="utf-8",
+    )
+    tool = RepoContextTool(
+        tmp_path,
+        embedding_client=FakeEmbeddingClient(),
+        semantic_weight=0.6,
+    )
+
+    result = await tool.execute("auth", max_hits=2)
+
+    assert result.index("## semantic.py:1-2") < result.index("## lexical.py:1-2")

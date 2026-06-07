@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+from nanobot.agent.embedding import cosine_similarity, deserialize_embedding
+
 
 @dataclass(slots=True)
 class IndexedChunk:
@@ -37,12 +39,13 @@ class IndexedHit:
 
 ScoreFn = Callable[[IndexedChunk, list[str]], tuple[float, list[str]]]
 ChunkerFn = Callable[[Path, str], list[IndexedChunk]]
+ChunkKey = tuple[str, int, int, str]
 
 
 class ContextIndex:
     """SQLite-backed chunk index shared by context retrieval tools."""
 
-    _SCHEMA_VERSION = 1
+    _SCHEMA_VERSION = 2
 
     def __init__(self, workspace: Path, db_path: Path | None = None) -> None:
         self.workspace = workspace.expanduser().resolve()
@@ -87,6 +90,8 @@ class ContextIndex:
         query: str,
         max_hits: int,
         score_fn: ScoreFn,
+        semantic_scores: dict[ChunkKey, float] | None = None,
+        semantic_weight: float = 0.6,
     ) -> list[IndexedHit]:
         terms = query_terms(query)
         if not terms:
@@ -104,11 +109,27 @@ class ContextIndex:
                 """,
                 (source_type,),
             ).fetchall()
+
+        max_lexical = 0.0
+        raw_scores: list[tuple[IndexedChunk, float, list[str]]] = []
         for row in rows:
             chunk = self._chunk_from_row(row)
             score, reason = score_fn(chunk, terms)
-            if score > 0:
-                hits.append(IndexedHit(chunk=chunk, score=score, reason=reason))
+            if score > max_lexical:
+                max_lexical = score
+            raw_scores.append((chunk, score, reason))
+
+        for chunk, lexical, reason in raw_scores:
+            key = (chunk.path, chunk.start_line, chunk.end_line, chunk.kind)
+            if semantic_scores:
+                lex_norm = lexical / max_lexical if max_lexical > 0 else 0.0
+                sem = semantic_scores.get(key, 0.0)
+                final = (1 - semantic_weight) * lex_norm + semantic_weight * sem
+                if final > 0:
+                    hits.append(IndexedHit(chunk=chunk, score=final, reason=reason))
+            elif lexical > 0:
+                hits.append(IndexedHit(chunk=chunk, score=lexical, reason=reason))
+
         hits.sort(key=lambda hit: (-hit.score, hit.chunk.path, hit.chunk.start_line))
         return hits[:max_hits]
 
@@ -120,6 +141,68 @@ class ContextIndex:
                 (source_type,),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    def get_chunks_without_embedding(self, source_type: str) -> list[tuple[str, int, int, str, str]]:
+        """Return (path, start_line, end_line, kind, text) for chunks missing embeddings."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, start_line, end_line, kind, text
+                FROM chunks
+                WHERE source_type = ? AND embedding IS NULL
+                ORDER BY path, start_line
+                """,
+                (source_type,),
+            ).fetchall()
+        return [(str(r[0]), int(r[1]), int(r[2]), str(r[3]), str(r[4])) for r in rows]
+
+    def store_embeddings(
+        self,
+        source_type: str,
+        embeddings: dict[ChunkKey, bytes],
+    ) -> None:
+        """Store serialized embedding vectors for chunks. Key: (path, start, end, kind)."""
+        if not embeddings:
+            return
+        self._ensure_schema()
+        with self._connect() as conn:
+            for (path, start, end, kind), data in embeddings.items():
+                conn.execute(
+                    """
+                    UPDATE chunks SET embedding = ?
+                    WHERE source_type = ? AND path = ? AND start_line = ?
+                          AND end_line = ? AND kind = ?
+                    """,
+                    (data, source_type, path, start, end, kind),
+                )
+
+    def semantic_search(
+        self,
+        source_type: str,
+        query_embedding: list[float],
+    ) -> dict[ChunkKey, float]:
+        """Compute cosine similarity for all embedded chunks. Returns {key: score}."""
+        self._ensure_schema()
+        scores: dict[ChunkKey, float] = {}
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT path, start_line, end_line, kind, embedding
+                FROM chunks
+                WHERE source_type = ? AND embedding IS NOT NULL
+                """,
+                (source_type,),
+            ).fetchall()
+        for row in rows:
+            data = row[4]
+            if not data:
+                continue
+            chunk_vec = deserialize_embedding(data)
+            sim = cosine_similarity(query_embedding, chunk_vec)
+            if sim > 0:
+                scores[(str(row[0]), int(row[1]), int(row[2]), str(row[3]))] = sim
+        return scores
 
     def _connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -154,6 +237,7 @@ class ContextIndex:
                     fetched_at TEXT NOT NULL,
                     mtime REAL NOT NULL,
                     content_hash TEXT NOT NULL,
+                    embedding BLOB,
                     PRIMARY KEY (source_type, path, start_line, end_line, kind)
                 )
                 """
@@ -161,6 +245,10 @@ class ContextIndex:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_chunks_source_path ON chunks(source_type, path)"
             )
+            # Migrate from schema v1: add embedding column if missing
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(chunks)").fetchall()}
+            if "embedding" not in cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(self._SCHEMA_VERSION),),
@@ -352,3 +440,4 @@ def lexical_score(
                 score += weight
             reason.append(f"{name}:{term}")
     return score, list(dict.fromkeys(reason))
+

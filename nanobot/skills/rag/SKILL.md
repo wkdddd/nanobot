@@ -20,18 +20,18 @@ Do not use this skill when:
 ## Decision Tree
 
 1. Is the answer in the local repository?
-   → `repo_context(query="...")`
+   -> `repo_context(query="...")`
 2. Is the answer on the web (docs, APIs, current info)?
-   → `web_context(query="...")` — auto-caches from web if no local cache exists.
+   -> `web_context(query="...")` auto-caches from web if no local cache exists.
 3. Need both local code AND external docs?
-   → Call both tools.
+   -> Call both tools.
 4. Have a specific URL to read?
-   → Use `web_fetch(url="...")` directly.
+   -> Use `web_fetch(url="...")` directly.
 
 ## repo_context
 
 - Retrieves relevant files, functions, classes, and symbols from the workspace.
-- Uses Python AST for precise function/class boundaries in .py files.
+- Uses Python AST for precise function/class boundaries in `.py` files.
 - Includes related test file paths in results.
 - Example: `repo_context(query="authentication middleware")`
 - Always read matched files before editing them.

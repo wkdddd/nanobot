@@ -14,8 +14,8 @@ if TYPE_CHECKING:
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
-    from nanobot.agent.tools.web import WebToolsConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
+    from nanobot.agent.tools.web import WebToolsConfig
 
 
 class Base(BaseModel):
@@ -228,6 +228,18 @@ class HeartbeatConfig(Base):
     keep_recent_messages: int = 8
 
 
+class EmbeddingConfig(Base):
+    """Embedding model configuration for semantic search."""
+
+    enable: bool = False
+    api_key: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: str = "text-embedding-v3"
+    dimensions: int = 1024
+    batch_size: int = 25
+    semantic_weight: float = 0.6
+
+
 class ApiConfig(Base):
     """OpenAI-compatible API server configuration."""
 
@@ -291,6 +303,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -465,8 +478,8 @@ def _resolve_tool_config_refs() -> None:
     from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
-    from nanobot.agent.tools.web import WebFetchConfig, WebSearchConfig, WebToolsConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
+    from nanobot.agent.tools.web import WebFetchConfig, WebSearchConfig, WebToolsConfig
 
     # Re-export into this module's namespace
     mod = sys.modules[__name__]

@@ -9,6 +9,20 @@ import pytest
 from nanobot.agent.tools.web_context import WebContextRetriever, WebContextTool
 
 
+class FakeEmbeddingClient:
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector_for_text(text) for text in texts]
+
+    async def embed_query(self, query: str) -> list[float]:
+        return [0.0, 1.0]
+
+    @staticmethod
+    def _vector_for_text(text: str) -> list[float]:
+        if "semantic target" in text:
+            return [0.0, 1.0]
+        return [1.0, 0.0]
+
+
 def _write_cached_page(
     workspace: Path,
     name: str = "example.md",
@@ -181,3 +195,38 @@ async def test_web_context_tool_auto_cache_handles_network_failure(tmp_path: Pat
     result = await tool.execute("anything", auto_cache=True)
 
     assert "Auto-cache failed" in result
+
+
+@pytest.mark.asyncio
+async def test_web_context_tool_auto_cache_uses_semantic_hits(tmp_path: Path) -> None:
+    class MockSearch:
+        async def execute(self, **kwargs):
+            return "\n".join(
+                [
+                    "https://example.com/lexical",
+                    "https://example.com/semantic",
+                ]
+            )
+
+    class MockFetch:
+        async def execute(self, **kwargs):
+            import json
+
+            url = kwargs["url"]
+            if url.endswith("/semantic"):
+                text = "# Semantic Docs\n\nsemantic target payment handler\n"
+            else:
+                text = "# Lexical Docs\n\nauth keyword only\n"
+            return json.dumps({"text": text})
+
+    tool = WebContextTool(
+        workspace=tmp_path,
+        search=MockSearch(),
+        fetch=MockFetch(),
+        embedding_client=FakeEmbeddingClient(),
+        semantic_weight=0.6,
+    )
+
+    result = await tool.execute("auth", auto_cache=True, max_hits=2)
+
+    assert result.index("- title: Semantic Docs") < result.index("- title: Lexical Docs")
