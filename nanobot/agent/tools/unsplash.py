@@ -1,7 +1,7 @@
 """Unsplash image search tool."""
 from pydantic import Field
 from nanobot.config.schema import Base
-from typing import Any,TYPE_CHECKING
+from typing import Any
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import IntegerSchema, StringSchema, tool_parameters_schema
