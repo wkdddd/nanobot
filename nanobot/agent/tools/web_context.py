@@ -12,17 +12,14 @@ from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import urlparse
 
-from nanobot.agent.context_index import (
-    ChunkKey,
-    ContextIndex,
+from nanobot.agent.rag import (
     IndexedChunk,
-    IndexedHit,
+    RAGIndex,
     best_snippet,
-    lexical_score,
+    create_embedding_client_from_config,
     query_terms,
 )
-from nanobot.agent.embedding import create_embedding_client_from_config
-from nanobot.agent.semantic_index import SemanticIndexService
+from nanobot.agent.rag.rerank import create_rerank_client_from_config
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -149,26 +146,46 @@ class WebContextRetriever:
         workspace: Path,
         config: WebContextRetrieverConfig | None = None,
         embedding_client: Any | None = None,
+        rerank_client: Any | None = None,
         semantic_weight: float = 0.6,
     ) -> None:
         self.workspace = workspace.expanduser().resolve()
         self.config = config or WebContextRetrieverConfig()
-        self.index = ContextIndex(self.workspace)
-        self._embedding_client = embedding_client
         self._semantic_weight = semantic_weight
-        self._semantic_index = SemanticIndexService(self.index, embedding_client)
+        self.index = RAGIndex(
+            self.workspace,
+            embedding_client=embedding_client,
+            rerank_client=rerank_client,
+            dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
+        )
 
     @property
     def pages_dir(self) -> Path:
         return self.workspace / "references" / "web" / "pages"
 
     def retrieve(self, query: str, *, max_hits: int | None = None) -> list[WebContextHit]:
-        terms = query_terms(query)
-        if not terms:
-            return []
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
 
-        self._sync_index()
-        return self._search_hits(query, terms, max_hits=max_hits)
+        if loop and loop.is_running():
+            terms = query_terms(query)
+            if not terms:
+                return []
+            self._sync_index()
+            fts_scores = self.index._fts5_search("web", query, limit=max_hits or self.config.max_hits)
+            chunks = self.index._load_chunks_by_keys(set(fts_scores.keys()))
+            raw = []
+            for key, score in sorted(fts_scores.items(), key=lambda x: -x[1]):
+                chunk = chunks.get(key)
+                if chunk:
+                    from nanobot.agent.rag.utils import IndexedHit
+                    raw.append(IndexedHit(chunk=chunk, score=score, reason=["bm25"]))
+            return [self._to_hit(h, terms) for h in raw[: max_hits or self.config.max_hits]]
+        else:
+            return asyncio.run(self.async_retrieve(query, max_hits=max_hits))
 
     async def async_retrieve(
         self, query: str, *, max_hits: int | None = None
@@ -179,19 +196,13 @@ class WebContextRetriever:
 
         self._sync_index()
 
-        semantic_scores = None
-        if self._embedding_client:
-            semantic_scores = await self._semantic_index.compute_scores(
-                source_type="web",
-                query=query,
-            )
-
-        return self._search_hits(
-            query,
-            terms,
-            max_hits=max_hits,
-            semantic_scores=semantic_scores,
+        hits = await self.index.search(
+            source_type="web",
+            query=query,
+            max_hits=max_hits or self.config.max_hits,
+            semantic_weight=self._semantic_weight,
         )
+        return [self._to_hit(h, terms) for h in hits]
 
     def build_context_block(self, query: str, *, max_hits: int | None = None) -> str:
         if not self.pages_dir.exists():
@@ -205,29 +216,7 @@ class WebContextRetriever:
 
         return self._format_context_block(hits)
 
-    def _search_hits(
-        self,
-        query: str,
-        terms: list[str],
-        *,
-        max_hits: int | None = None,
-        semantic_scores: dict[ChunkKey, float] | None = None,
-    ) -> list[WebContextHit]:
-        hits = [
-            self._to_hit(hit, terms)
-            for hit in self.index.search(
-                source_type="web",
-                query=query,
-                max_hits=max_hits or self.config.max_hits,
-                score_fn=self._score_chunk,
-                semantic_scores=semantic_scores,
-                semantic_weight=self._semantic_weight,
-            )
-        ]
-        hits.sort(key=lambda item: (-item.score, item.path, item.start_line))
-        return hits[: max_hits or self.config.max_hits]
-
-    def _to_hit(self, hit: IndexedHit, terms: list[str]) -> WebContextHit:
+    def _to_hit(self, hit: Any, terms: list[str]) -> WebContextHit:
         chunk = hit.chunk
         return WebContextHit(
             path=chunk.path,
@@ -387,19 +376,6 @@ class WebContextRetriever:
             value = value[1:-1]
         return value.replace('\\"', '"').replace("\\\\", "\\")
 
-    @staticmethod
-    def _score_chunk(chunk: IndexedChunk, terms: list[str]) -> tuple[float, list[str]]:
-        return lexical_score(
-            terms=terms,
-            fields={
-                "title": chunk.title,
-                "url": chunk.url,
-                "query": chunk.query,
-                "path": chunk.path,
-                "text": chunk.text,
-            },
-            weights={"title": 14, "url": 8, "query": 8, "path": 5, "text": 1},
-        )
 
 
 @tool_parameters(
@@ -455,6 +431,9 @@ class WebContextTool(Tool):
             search=search,
             fetch=fetch,
             embedding_client=create_embedding_client_from_config(ctx.config.embedding),
+            rerank_client=create_rerank_client_from_config(
+                getattr(ctx.config, "rerank", None)
+            ),
             semantic_weight=ctx.config.embedding.semantic_weight,
         )
 
@@ -481,11 +460,13 @@ class WebContextTool(Tool):
         search: Tool | None = None,
         fetch: Tool | None = None,
         embedding_client: Any | None = None,
+        rerank_client: Any | None = None,
         semantic_weight: float = 0.6,
     ) -> None:
         self.retriever = WebContextRetriever(
             workspace,
             embedding_client=embedding_client,
+            rerank_client=rerank_client,
             semantic_weight=semantic_weight,
         )
         self.workspace = workspace
@@ -513,10 +494,9 @@ class WebContextTool(Tool):
             if self._is_cache_empty(result):
                 return f"Auto-cached web pages but no relevant hits found.\n{cache_msg}"
 
-        if self.retriever._embedding_client and not self._is_cache_empty(result):
-            hits = await self.retriever.async_retrieve(query, max_hits=max_hits)
-            if hits:
-                return self.retriever._format_context_block(hits)
+        hits = await self.retriever.async_retrieve(query, max_hits=max_hits)
+        if hits:
+            return self.retriever._format_context_block(hits)
 
         return result
 

@@ -2,24 +2,20 @@
 
 from __future__ import annotations
 
-import ast
 import fnmatch
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from nanobot.agent.context_index import (
-    ChunkKey,
-    ContextIndex,
+from nanobot.agent.rag import (
     IndexedChunk,
-    IndexedHit,
+    RAGIndex,
+    TreeSitterChunker,
     best_snippet,
-    lexical_score,
+    create_embedding_client_from_config,
     query_terms,
 )
-from nanobot.agent.embedding import create_embedding_client_from_config
-from nanobot.agent.semantic_index import SemanticIndexService
+from nanobot.agent.rag.rerank import create_rerank_client_from_config
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import (
     BooleanSchema,
@@ -58,11 +54,6 @@ _DEFAULT_TEXT_EXTS = {
     ".html",
     ".txt",
 }
-
-_SYMBOL_RE = re.compile(
-    r"^\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)",
-    re.MULTILINE,
-)
 
 
 @dataclass(slots=True)
@@ -121,14 +112,19 @@ class RepoContextRetriever:
         workspace: Path,
         config: RepoContextRetrieverConfig | None = None,
         embedding_client: Any | None = None,
+        rerank_client: Any | None = None,
         semantic_weight: float = 0.6,
     ) -> None:
         self.workspace = workspace.expanduser().resolve()
         self.config = config or RepoContextRetrieverConfig()
-        self.index = ContextIndex(self.workspace)
-        self._embedding_client = embedding_client
         self._semantic_weight = semantic_weight
-        self._semantic_index = SemanticIndexService(self.index, embedding_client)
+        self._chunker = TreeSitterChunker()
+        self.index = RAGIndex(
+            self.workspace,
+            embedding_client=embedding_client,
+            rerank_client=rerank_client,
+            dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
+        )
 
     async def async_retrieve(
         self, query: str, *, max_hits: int | None = None
@@ -139,27 +135,38 @@ class RepoContextRetriever:
 
         self._sync_index()
 
-        semantic_scores = None
-        if self._embedding_client and self.config.enable_semantic:
-            semantic_scores = await self._semantic_index.compute_scores(
-                source_type="repo",
-                query=query,
-            )
-
-        return self._search_hits(
-            query,
-            terms,
-            max_hits=max_hits,
-            semantic_scores=semantic_scores,
+        hits = await self.index.search(
+            source_type="repo",
+            query=query,
+            max_hits=max_hits or self.config.max_hits,
+            semantic_weight=self._semantic_weight,
         )
+        return [self._to_hit(h, terms) for h in hits]
 
     def retrieve(self, query: str, *, max_hits: int | None = None) -> list[RepoContextHit]:
-        terms = query_terms(query)
-        if not terms:
-            return []
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
 
-        self._sync_index()
-        return self._search_hits(query, terms, max_hits=max_hits)
+        if loop and loop.is_running():
+            # Sync fallback: FTS5-only (no embedding)
+            terms = query_terms(query)
+            if not terms:
+                return []
+            self._sync_index()
+            fts_scores = self.index._fts5_search("repo", query, limit=max_hits or self.config.max_hits)
+            chunks = self.index._load_chunks_by_keys(set(fts_scores.keys()))
+            raw = []
+            for key, score in sorted(fts_scores.items(), key=lambda x: -x[1]):
+                chunk = chunks.get(key)
+                if chunk:
+                    from nanobot.agent.rag.utils import IndexedHit
+                    raw.append(IndexedHit(chunk=chunk, score=score, reason=["bm25"]))
+            return [self._to_hit(h, terms) for h in raw[: max_hits or self.config.max_hits]]
+        else:
+            return asyncio.run(self.async_retrieve(query, max_hits=max_hits))
 
     def build_context_block(
         self,
@@ -174,29 +181,7 @@ class RepoContextRetriever:
 
         return self._format_context_block(hits, include_tests=include_tests)
 
-    def _search_hits(
-        self,
-        query: str,
-        terms: list[str],
-        *,
-        max_hits: int | None = None,
-        semantic_scores: dict[ChunkKey, float] | None = None,
-    ) -> list[RepoContextHit]:
-        hits = [
-            self._to_hit(hit, terms)
-            for hit in self.index.search(
-                source_type="repo",
-                query=query,
-                max_hits=max_hits or self.config.max_hits,
-                score_fn=self._score_chunk,
-                semantic_scores=semantic_scores,
-                semantic_weight=self._semantic_weight,
-            )
-        ]
-        hits.sort(key=lambda hit: (-hit.score, hit.path, hit.start_line))
-        return hits[: max_hits or self.config.max_hits]
-
-    def _to_hit(self, hit: IndexedHit, terms: list[str]) -> RepoContextHit:
+    def _to_hit(self, hit: Any, terms: list[str]) -> RepoContextHit:
         chunk = hit.chunk
         return RepoContextHit(
             path=chunk.path,
@@ -250,13 +235,23 @@ class RepoContextRetriever:
         self.index.sync_files(
             source_type="repo",
             files=self._iter_candidate_files(),
-            chunker=lambda path, text: self._chunk_file(
-                path,
-                text,
-                self._extract_symbols(path, text),
-            ),
+            chunker=self._chunk_file,
             max_file_chars=self.config.max_file_chars,
         )
+
+    def _chunk_file(self, path: Path, text: str) -> list[IndexedChunk]:
+        rel = path.relative_to(self.workspace).as_posix()
+        suffix = path.suffix.lower()
+
+        # Try Tree-sitter semantic chunking first
+        if self._chunker.can_parse(suffix):
+            chunks = self._chunker.chunk_file(rel, text, suffix, source_type="repo")
+            if chunks:
+                return chunks[: self.config.max_chunks_per_file]
+
+        # Fallback: sliding window
+        symbols = self._chunker.extract_symbols(text, suffix)
+        return self._line_window_chunks(rel, text, symbols=symbols)
 
     def _iter_candidate_files(self) -> Iterable[Path]:
         count = 0
@@ -289,79 +284,6 @@ class RepoContextRetriever:
             fnmatch.fnmatch(path.name, pattern)
             for pattern in self.config.ignore_globs
         )
-
-    @staticmethod
-    def _extract_symbols(path: Path, text: str) -> list[str]:
-        if path.suffix.lower() == ".py":
-            return RepoContextRetriever._extract_python_symbols(text)
-        return list(dict.fromkeys(_SYMBOL_RE.findall(text)))
-
-    @staticmethod
-    def _extract_python_symbols(text: str) -> list[str]:
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return []
-
-        symbols: list[str] = []
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                symbols.append(node.name)
-        return list(dict.fromkeys(symbols))
-
-    def _chunk_file(
-        self,
-        path: Path,
-        text: str,
-        symbols: list[str],
-    ) -> list[IndexedChunk]:
-        rel = path.relative_to(self.workspace).as_posix()
-        if path.suffix.lower() == ".py":
-            chunks = self._extract_python_chunks(rel, text)
-            if chunks:
-                return chunks[: self.config.max_chunks_per_file]
-        return self._line_window_chunks(rel, text, symbols=symbols)
-
-    def _extract_python_chunks(self, rel_path: str, text: str) -> list[IndexedChunk]:
-        try:
-            tree = ast.parse(text)
-        except SyntaxError:
-            return []
-
-        lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        chunks: list[IndexedChunk] = []
-        nodes = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            and hasattr(node, "lineno")
-        ]
-        nodes.sort(key=lambda node: (node.lineno, getattr(node, "end_lineno", node.lineno)))
-
-        for node in nodes:
-            start = max(1, int(node.lineno))
-            end = int(getattr(node, "end_lineno", start) or start)
-            end = min(end, len(lines))
-            if start > end:
-                continue
-            kind = "class" if isinstance(node, ast.ClassDef) else "function"
-            symbol = getattr(node, "name", "")
-            chunk_text = "\n".join(lines[start - 1:end])
-            chunks.append(
-                IndexedChunk(
-                    source_type="repo",
-                    path=rel_path,
-                    start_line=start,
-                    end_line=end,
-                    text=chunk_text,
-                    symbols=[symbol] if symbol else [],
-                    kind=kind,
-                )
-            )
-
-        if chunks:
-            return chunks
-        return self._line_window_chunks(rel_path, text, symbols=[])
 
     def _line_window_chunks(
         self,
@@ -407,33 +329,6 @@ class RepoContextRetriever:
         if suffix in {".json", ".toml", ".yaml", ".yml"}:
             return "config"
         return "text"
-
-    @staticmethod
-    def _score_chunk(chunk: IndexedChunk, terms: list[str]) -> tuple[float, list[str]]:
-        score, reason = lexical_score(
-            terms=terms,
-            fields={
-                "path": chunk.path,
-                "file": Path(chunk.path).name,
-                "symbol": " ".join(chunk.symbols),
-                "text": chunk.text,
-            },
-            weights={"path": 8, "file": 12, "symbol": 16, "text": 1},
-        )
-
-        if chunk.kind in {"class", "function"}:
-            score += 2
-
-        path_lower = chunk.path.lower()
-        file_name = Path(chunk.path).name.lower()
-        if "/tests/" in f"/{path_lower}" or file_name.startswith("test_"):
-            score += 1
-            reason.append("test-file")
-
-        if path_lower.endswith(("readme.md", "pyproject.toml", "package.json")):
-            score += 1
-
-        return score, list(dict.fromkeys(reason))
 
     def _related_test_paths(self, rel_path: str) -> list[str]:
         source = PureRepoPath(rel_path)
@@ -524,9 +419,13 @@ class RepoContextTool(Tool):
     @classmethod
     def create(cls, ctx: Any) -> Tool:
         embedding_client = create_embedding_client_from_config(ctx.config.embedding)
+        rerank_client = create_rerank_client_from_config(
+            getattr(ctx.config, "rerank", None)
+        )
         return cls(
             workspace=Path(ctx.workspace),
             embedding_client=embedding_client,
+            rerank_client=rerank_client,
             semantic_weight=ctx.config.embedding.semantic_weight,
         )
 
@@ -534,6 +433,7 @@ class RepoContextTool(Tool):
         self,
         workspace: Path,
         embedding_client: Any | None = None,
+        rerank_client: Any | None = None,
         semantic_weight: float = 0.6,
     ) -> None:
         config = RepoContextRetrieverConfig(
@@ -543,6 +443,7 @@ class RepoContextTool(Tool):
             workspace,
             config=config,
             embedding_client=embedding_client,
+            rerank_client=rerank_client,
             semantic_weight=semantic_weight,
         )
 
@@ -571,17 +472,7 @@ class RepoContextTool(Tool):
         if not query or not query.strip():
             return "Error: query is required."
 
-        if self.retriever.config.enable_semantic:
-            hits = await self.retriever.async_retrieve(query.strip(), max_hits=max_hits)
-            if not hits:
-                return "No relevant repository context found."
-            return self.retriever._format_context_block(
-                hits,
-                include_tests=include_tests,
-            )
-
-        return self.retriever.build_context_block(
-            query.strip(),
-            max_hits=max_hits,
-            include_tests=include_tests,
-        )
+        hits = await self.retriever.async_retrieve(query.strip(), max_hits=max_hits)
+        if not hits:
+            return "No relevant repository context found."
+        return self.retriever._format_context_block(hits, include_tests=include_tests)

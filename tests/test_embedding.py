@@ -1,57 +1,14 @@
-"""Tests for embedding client and hybrid scoring."""
+"""Tests for RAG index and embedding integration."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
-from nanobot.agent.context_index import (
-    ContextIndex,
-    IndexedChunk,
-)
-from nanobot.agent.embedding import (
-    cosine_similarity,
-    deserialize_embedding,
-    serialize_embedding,
-)
+from nanobot.agent.rag import IndexedChunk, RAGIndex
 
 
-def test_cosine_similarity_identical_vectors():
-    vec = [1.0, 2.0, 3.0]
-    assert cosine_similarity(vec, vec) == pytest.approx(1.0)
-
-
-def test_cosine_similarity_orthogonal_vectors():
-    a = [1.0, 0.0, 0.0]
-    b = [0.0, 1.0, 0.0]
-    assert cosine_similarity(a, b) == pytest.approx(0.0)
-
-
-def test_cosine_similarity_opposite_vectors():
-    a = [1.0, 0.0]
-    b = [-1.0, 0.0]
-    assert cosine_similarity(a, b) == pytest.approx(-1.0)
-
-
-def test_cosine_similarity_zero_vector():
-    a = [0.0, 0.0, 0.0]
-    b = [1.0, 2.0, 3.0]
-    assert cosine_similarity(a, b) == 0.0
-
-
-def test_serialize_deserialize_embedding():
-    vec = [0.1, 0.2, 0.3, -0.5, 1.0]
-    data = serialize_embedding(vec)
-    assert isinstance(data, bytes)
-    assert len(data) == len(vec) * 4
-    restored = deserialize_embedding(data)
-    for a, b in zip(vec, restored):
-        assert a == pytest.approx(b, abs=1e-6)
-
-
-def test_context_index_embedding_column_exists(tmp_path: Path):
-    index = ContextIndex(tmp_path)
+def test_rag_index_schema_has_embedding_column(tmp_path: Path):
+    index = RAGIndex(tmp_path)
     index._ensure_schema()
     import sqlite3
     conn = sqlite3.connect(str(index.db_path))
@@ -60,101 +17,73 @@ def test_context_index_embedding_column_exists(tmp_path: Path):
     assert "embedding" in cols
 
 
-def test_store_and_retrieve_embeddings(tmp_path: Path):
-    index = ContextIndex(tmp_path)
+def test_rag_index_fts5_table_exists(tmp_path: Path):
+    index = RAGIndex(tmp_path)
+    index._ensure_schema()
+    import sqlite3
+    conn = sqlite3.connect(str(index.db_path))
+    tables = {
+        row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'shadow')"
+        ).fetchall()
+    }
+    conn.close()
+    assert "chunks_fts" in tables
+
+
+def test_sync_and_fts5_search(tmp_path: Path):
+    index = RAGIndex(tmp_path)
+    _write_test_file(tmp_path, "hello.py", "def hello_world():\n    print('hi')\n")
+    _write_test_file(tmp_path, "utils.py", "def retry_logic():\n    pass\n")
+
     index.sync_files(
         source_type="repo",
-        files=[_write_test_file(tmp_path, "hello.py", "def hello():\n    pass\n")],
+        files=[tmp_path / "hello.py", tmp_path / "utils.py"],
         chunker=_simple_chunker,
         max_file_chars=80_000,
     )
 
-    missing = index.get_chunks_without_embedding("repo")
-    assert len(missing) == 1
-    path, start, end, kind, text = missing[0]
-
-    vec = [0.1] * 16
-    store = {(path, start, end, kind): serialize_embedding(vec)}
-    index.store_embeddings("repo", store)
-
-    missing_after = index.get_chunks_without_embedding("repo")
-    assert len(missing_after) == 0
+    scores = index._fts5_search("repo", "retry", limit=10)
+    assert len(scores) >= 1
+    keys = list(scores.keys())
+    assert any("utils.py" in k[0] for k in keys)
 
 
-def test_semantic_search_returns_scores(tmp_path: Path):
-    index = ContextIndex(tmp_path)
+def test_sync_prune_missing(tmp_path: Path):
+    index = RAGIndex(tmp_path)
+    f1 = _write_test_file(tmp_path, "a.py", "x = 1")
+    f2 = _write_test_file(tmp_path, "b.py", "y = 2")
+
     index.sync_files(
         source_type="repo",
-        files=[
-            _write_test_file(tmp_path, "a.py", "def foo(): pass"),
-            _write_test_file(tmp_path, "b.py", "def bar(): pass"),
-        ],
+        files=[f1, f2],
         chunker=_simple_chunker,
         max_file_chars=80_000,
     )
+    assert index.count("repo") == 2
 
-    # Store embeddings
-    missing = index.get_chunks_without_embedding("repo")
-    assert len(missing) == 2
-    vecs = [[0.9, 0.1, 0.0, 0.0] * 4, [0.1, 0.9, 0.0, 0.0] * 4]
-    store = {}
-    for (path, start, end, kind, _), vec in zip(missing, vecs):
-        store[(path, start, end, kind)] = serialize_embedding(vec)
-    index.store_embeddings("repo", store)
-
-    # Search with a query embedding similar to first file
-    query_vec = [0.85, 0.15, 0.0, 0.0] * 4
-    scores = index.semantic_search("repo", query_vec)
-    assert len(scores) == 2
-
-    # First file should score higher
-    keys = sorted(scores.keys(), key=lambda k: -scores[k])
-    assert "a.py" in keys[0][0]
-
-
-def test_hybrid_search_combines_scores(tmp_path: Path):
-    index = ContextIndex(tmp_path)
+    # Only sync a.py — b.py should be pruned
     index.sync_files(
         source_type="repo",
-        files=[
-            _write_test_file(tmp_path, "config.py", "settings = {}"),
-            _write_test_file(tmp_path, "utils.py", "def retry(): pass"),
-        ],
+        files=[f1],
         chunker=_simple_chunker,
         max_file_chars=80_000,
     )
+    assert index.count("repo") == 1
 
-    # Store embeddings - utils.py semantically closer to "retry logic"
-    missing = index.get_chunks_without_embedding("repo")
-    store = {}
-    for path, start, end, kind, _ in missing:
-        if "utils" in path:
-            vec = [0.9, 0.8, 0.1, 0.0] * 4
-        else:
-            vec = [0.1, 0.1, 0.9, 0.0] * 4
-        store[(path, start, end, kind)] = serialize_embedding(vec)
-    index.store_embeddings("repo", store)
 
-    query_vec = [0.85, 0.75, 0.1, 0.0] * 4
-    semantic_scores = index.semantic_search("repo", query_vec)
+def test_count(tmp_path: Path):
+    index = RAGIndex(tmp_path)
+    assert index.count("repo") == 0
 
-    def score_fn(chunk, terms):
-        from nanobot.agent.context_index import lexical_score
-        return lexical_score(
-            terms=terms, fields={"text": chunk.text}, weights={"text": 1}
-        )
-
-    # With semantic scores, utils.py should rank higher even if "config" matches lexically
-    hits = index.search(
+    _write_test_file(tmp_path, "f.py", "code")
+    index.sync_files(
         source_type="repo",
-        query="retry",
-        max_hits=5,
-        score_fn=score_fn,
-        semantic_scores=semantic_scores,
-        semantic_weight=0.6,
+        files=[tmp_path / "f.py"],
+        chunker=_simple_chunker,
+        max_file_chars=80_000,
     )
-    assert len(hits) >= 1
-    assert "utils.py" in hits[0].chunk.path
+    assert index.count("repo") == 1
 
 
 # --- Helpers ---

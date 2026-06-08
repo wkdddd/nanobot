@@ -1,32 +1,13 @@
-"""Embedding client for semantic search via DashScope OpenAI-compatible API."""
+"""Embedding client for semantic search via OpenAI-compatible API."""
 
 from __future__ import annotations
 
 import logging
 import os
-import struct
 from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-def serialize_embedding(vec: list[float]) -> bytes:
-    return struct.pack(f"{len(vec)}f", *vec)
-
-
-def deserialize_embedding(data: bytes) -> list[float]:
-    count = len(data) // 4
-    return list(struct.unpack(f"{count}f", data))
 
 
 def create_embedding_client_from_config(
@@ -34,7 +15,6 @@ def create_embedding_client_from_config(
     *,
     env: Mapping[str, str] | None = None,
 ) -> "EmbeddingClient | None":
-    """Create an embedding client from config, returning None when disabled."""
     if not getattr(config, "enable", False):
         return None
     values = env or os.environ
@@ -45,8 +25,7 @@ def create_embedding_client_from_config(
         api_key=api_key,
         model=getattr(config, "model", "text-embedding-v3"),
         base_url=getattr(
-            config,
-            "base_url",
+            config, "base_url",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         ),
         dimensions=getattr(config, "dimensions", 1024),
@@ -55,7 +34,7 @@ def create_embedding_client_from_config(
 
 
 class EmbeddingClient:
-    """DashScope embedding via OpenAI-compatible API."""
+    """Embedding via OpenAI-compatible API (DashScope, OpenAI, etc.)."""
 
     def __init__(
         self,
@@ -78,14 +57,14 @@ class EmbeddingClient:
             self._client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
         return self._client
 
-    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Batch embed texts, respecting batch_size limit."""
+    async def embed_texts(self, texts: list[str]) -> list[list[float] | None]:
+        """Batch embed texts. Returns None per item on failure (no zero-vector fallback)."""
         if not texts:
             return []
         client = self._get_client()
-        all_embeddings: list[list[float]] = []
+        all_embeddings: list[list[float] | None] = []
         for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
+            batch = texts[i: i + self.batch_size]
             try:
                 response = await client.embeddings.create(
                     model=self.model,
@@ -95,10 +74,10 @@ class EmbeddingClient:
                 all_embeddings.extend(item.embedding for item in response.data)
             except Exception as e:
                 logger.warning("Embedding API call failed: %s", e)
-                all_embeddings.extend([[0.0] * self.dimensions] * len(batch))
+                all_embeddings.extend([None] * len(batch))
         return all_embeddings
 
-    async def embed_query(self, query: str) -> list[float]:
-        """Embed a single query string."""
+    async def embed_query(self, query: str) -> list[float] | None:
+        """Embed a single query string. Returns None on failure."""
         results = await self.embed_texts([query])
-        return results[0] if results else [0.0] * self.dimensions
+        return results[0] if results else None
