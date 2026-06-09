@@ -36,7 +36,6 @@ class ContextBuilder:
     
     def build_system_prompt(
         self,
-        skill_names: list[str] | None = None,
         channel: str | None = None,
         session_summary: str | None = None,
     ) -> str:
@@ -146,7 +145,6 @@ class ContextBuilder:
         self,
         history: list[dict[str, Any]],
         current_message: str,
-        skill_names: list[str] | None = None,
         media: list[str] | None = None,
         channel: str | None = None,
         chat_id: str | None = None,
@@ -175,7 +173,7 @@ class ContextBuilder:
         else:
             merged = user_content + [{"type": "text", "text": runtime_ctx}]
         messages = [
-            {"role": "system", "content": self.build_system_prompt(skill_names, channel=channel, session_summary=session_summary)},
+            {"role": "system", "content": self.build_system_prompt(channel=channel, session_summary=session_summary)},
             *history,
         ]
         if messages[-1].get("role") == current_role:

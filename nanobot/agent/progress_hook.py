@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -17,6 +18,8 @@ from nanobot.utils.progress_events import (
     on_progress_accepts_tool_events,
 )
 from nanobot.utils.tool_hints import format_tool_hints
+
+_SKILL_PATH_RE = re.compile(r"[/\\]skills[/\\]([^/\\]+)[/\\]SKILL\.md$", re.IGNORECASE)
 
 
 class AgentProgressHook(AgentHook):
@@ -173,6 +176,16 @@ class AgentProgressHook(AgentHook):
             u.get("completion_tokens", 0),
             u.get("cached_tokens", 0),
         )
+        if context.tool_calls and context.tool_results:
+            for tc, result in zip(context.tool_calls, context.tool_results):
+                if tc.name != "read_file":
+                    continue
+                if not isinstance(result, str) or result.startswith(("Error", "[File unchanged")):
+                    continue
+                path = tc.arguments.get("path") or tc.arguments.get("file_path") or ""
+                m = _SKILL_PATH_RE.search(path)
+                if m:
+                    logger.info("using the skill {}", m.group(1))
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return self._strip_think(content)

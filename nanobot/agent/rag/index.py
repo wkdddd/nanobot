@@ -190,7 +190,8 @@ class RAGIndex:
             rows = conn.execute(
                 """
                 SELECT path, start_line, end_line, kind, text
-                FROM chunks WHERE source_type = ? AND embedding IS NULL
+                FROM chunks
+                WHERE source_type = ? AND embedding IS NULL AND trim(text) <> ''
                 ORDER BY path, start_line
                 """,
                 (source_type,),
@@ -304,15 +305,31 @@ class RAGIndex:
     def _get_hnsw(self, source_type: str) -> "_HnswHandle":
         if source_type not in self._hnsw_indexes:
             index_dir = self.db_path.parent
+            dim = self._detect_embedding_dim(source_type) or self.dimensions
             handle = _HnswHandle(
                 index_path=index_dir / f"rag_{source_type}.hnsw",
                 keys_path=index_dir / f"rag_{source_type}_keys.json",
-                dim=self.dimensions,
+                dim=dim,
             )
             if not handle.load():
                 self._rebuild_hnsw(source_type, handle)
             self._hnsw_indexes[source_type] = handle
         return self._hnsw_indexes[source_type]
+
+    def _detect_embedding_dim(self, source_type: str) -> int | None:
+        """Detect actual embedding dimension from stored data."""
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT embedding FROM chunks "
+                    "WHERE source_type = ? AND embedding IS NOT NULL LIMIT 1",
+                    (source_type,),
+                ).fetchone()
+            if row and row[0]:
+                return len(row[0]) // 4
+        except Exception:
+            pass
+        return None
 
     def _rebuild_hnsw(self, source_type: str, handle: "_HnswHandle") -> None:
         """Rebuild HNSW index from existing embeddings in SQLite."""
@@ -558,6 +575,11 @@ class _HnswHandle:
             self.build(keys, vectors)
             return
 
+        # Dimension changed (e.g. model switched) — rebuild from scratch
+        if vectors and len(vectors[0]) != self.dim:
+            self.build(keys, vectors)
+            return
+
         new_keys = []
         new_vecs = []
         for key, vec in zip(keys, vectors):
@@ -585,6 +607,8 @@ class _HnswHandle:
 
     def query(self, vector: list[float], *, top_k: int = 50) -> dict[ChunkKey, float]:
         if self._index is None or self._index.get_current_count() == 0:
+            return {}
+        if len(vector) != self.dim:
             return {}
         k = min(top_k, self._index.get_current_count())
         labels, distances = self._index.knn_query([vector], k=k)

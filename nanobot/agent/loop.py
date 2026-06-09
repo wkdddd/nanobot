@@ -177,6 +177,8 @@ class AgentLoop:
         unified_session: bool = False,
         disabled_skills: list[str] | None = None,
         tools_config: ToolsConfig | None = None,
+        embedding_config: Any | None = None,
+        rerank_config: Any | None = None,
         
         image_generation_provider_config: ProviderConfig | None = None,
         image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
@@ -189,9 +191,15 @@ class AgentLoop:
         unsplash_provider_config:ProviderConfig | None = None,
         unsplash_provider_configs:dict[str, ProviderConfig] | None = None,
     ):
-        from nanobot.config.schema import ToolsConfig
+        from nanobot.config.schema import EmbeddingConfig, RerankConfig, ToolsConfig
 
         _tc = tools_config or ToolsConfig()
+        _embedding_config = (
+            embedding_config if embedding_config is not None else EmbeddingConfig()
+        )
+        _rerank_config = (
+            rerank_config if rerank_config is not None else RerankConfig()
+        )
         defaults = AgentDefaults()
         self.bus = bus
         self.channels_config = channels_config
@@ -223,6 +231,8 @@ class AgentLoop:
             else defaults.tool_hint_max_length
         )
         self.tools_config = _tc
+        self.embedding_config = _embedding_config
+        self.rerank_config = _rerank_config
         self.web_config = _tc.web
         self.exec_config = _tc.exec
         self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
@@ -260,6 +270,8 @@ class AgentLoop:
             bus=bus,
             model=self.model,
             tools_config=_tc,
+            embedding_config=self.embedding_config,
+            rerank_config=self.rerank_config,
             max_tool_result_chars=self.max_tool_result_chars,
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=disabled_skills,
@@ -364,13 +376,12 @@ class AgentLoop:
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
             tools_config=config.tools,
+            embedding_config=config.embedding,
+            rerank_config=config.rerank,
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
-            #AI修改前
-            # 未从 Config.providers.unsplash 注入 AgentLoop，配置文件中的 Unsplash API key 不会进入工具。
-            #AI修改后
             unsplash_provider_config=extra.pop("unsplash_provider_config", config.providers.unsplash),
             **extra,
         )
@@ -461,6 +472,8 @@ class AgentLoop:
         ctx = ToolContext(
             config=self.tools_config,
             workspace=str(self.workspace),
+            embedding_config=self.embedding_config,
+            rerank_config=self.rerank_config,
             bus=self.bus,
             subagent_manager=self.subagents,
             cron_service=self.cron_service,

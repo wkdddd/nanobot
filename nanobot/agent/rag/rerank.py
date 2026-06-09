@@ -9,6 +9,14 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+_DASHSCOPE_COMPATIBLE_MODE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+_DASHSCOPE_QWEN3_RERANK_BASE = "https://dashscope.aliyuncs.com/compatible-api/v1"
+_DASHSCOPE_TEXT_RERANK_BASE = "https://dashscope.aliyuncs.com"
+_DASHSCOPE_TEXT_RERANK_PATH = "/api/v1/services/rerank/text-rerank/text-rerank"
+_QWEN3_RERANK_INSTRUCT = (
+    "Given a web search query, retrieve relevant passages that answer the query."
+)
+
 
 def create_rerank_client_from_config(
     config: Any,
@@ -18,45 +26,111 @@ def create_rerank_client_from_config(
     if not getattr(config, "enable", False):
         return None
     values = env or os.environ
-    api_key = getattr(config, "api_key", "") or values.get("DASHSCOPE_API_KEY", "")
+    api_key = (
+        _config_value(config, "api_key", "apiKey", "apikey")
+        or values.get("DASHSCOPE_API_KEY", "")
+    )
     if not api_key:
         return None
     return RerankClient(
         api_key=api_key,
-        model=getattr(config, "model", "gte-rerank"),
-        base_url=getattr(
-            config, "base_url",
-            "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        ),
-        top_n=getattr(config, "top_n", 20),
+        model=getattr(config, "model", "qwen3-vl-rerank"),
+        base_url=_config_value(config, "base_url", "baseUrl", "apiBase")
+        or _DASHSCOPE_COMPATIBLE_MODE_BASE,
+        top_n=int(_config_value(config, "top_n", "topN") or 20),
+        instruct=_config_value(config, "instruct"),
     )
 
 
+def _config_value(config: Any, *names: str) -> Any:
+    for name in names:
+        value = getattr(config, name, None)
+        if value:
+            return value
+    return None
+
+
 class RerankClient:
-    """Rerank candidates using a cross-encoder model via OpenAI-compatible API."""
+    """Rerank candidates using DashScope reranking APIs."""
 
     def __init__(
         self,
         api_key: str,
-        model: str = "gte-rerank",
-        base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model: str = "qwen3-vl-rerank",
+        base_url: str = _DASHSCOPE_COMPATIBLE_MODE_BASE,
         top_n: int = 20,
+        instruct: str | None = None,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url
         self.top_n = top_n
+        self.instruct = instruct
         self._client: Any = None
 
     def _get_client(self) -> Any:
         if self._client is None:
             import httpx
             self._client = httpx.AsyncClient(
-                base_url=self.base_url,
+                base_url=self._effective_base_url(),
                 headers={"Authorization": f"Bearer {self.api_key}"},
                 timeout=30.0,
             )
         return self._client
+
+    def _effective_base_url(self) -> str:
+        if self.model == "qwen3-rerank":
+            if self.base_url.rstrip("/") == _DASHSCOPE_COMPATIBLE_MODE_BASE:
+                return _DASHSCOPE_QWEN3_RERANK_BASE
+            return self.base_url
+        if self.model in {"qwen3-vl-rerank", "gte-rerank-v2"}:
+            if self.base_url.rstrip("/") in {
+                _DASHSCOPE_COMPATIBLE_MODE_BASE,
+                _DASHSCOPE_QWEN3_RERANK_BASE,
+            }:
+                return _DASHSCOPE_TEXT_RERANK_BASE
+            return self.base_url
+        return self.base_url
+
+    def _endpoint_path(self) -> str:
+        if self.model == "qwen3-rerank":
+            return "/reranks"
+        if self.model in {"qwen3-vl-rerank", "gte-rerank-v2"}:
+            return _DASHSCOPE_TEXT_RERANK_PATH
+        return "/rerank"
+
+    def _request_body(self, query: str, documents: list[str], top_n: int) -> dict[str, Any]:
+        if self.model == "qwen3-rerank":
+            body: dict[str, Any] = {
+                "model": self.model,
+                "query": query,
+                "documents": documents,
+                "top_n": top_n,
+            }
+            body["instruct"] = self.instruct or _QWEN3_RERANK_INSTRUCT
+            return body
+
+        if self.model in {"qwen3-vl-rerank", "gte-rerank-v2"}:
+            body = {
+                "model": self.model,
+                "input": {
+                    "query": query,
+                    "documents": documents,
+                },
+                "parameters": {
+                    "top_n": top_n,
+                },
+            }
+            if self.model == "qwen3-vl-rerank" and self.instruct:
+                body["parameters"]["instruct"] = self.instruct
+            return body
+
+        return {
+            "model": self.model,
+            "query": query,
+            "documents": documents,
+            "top_n": top_n,
+        }
 
     async def rerank(
         self, query: str, documents: list[str], top_n: int | None = None
@@ -71,17 +145,12 @@ class RerankClient:
         client = self._get_client()
         try:
             resp = await client.post(
-                "/rerank",
-                json={
-                    "model": self.model,
-                    "query": query,
-                    "documents": documents,
-                    "top_n": n,
-                },
+                self._endpoint_path(),
+                json=self._request_body(query, documents, n),
             )
             resp.raise_for_status()
             data = resp.json()
-            results = data.get("results", [])
+            results = data.get("results") or data.get("output", {}).get("results", [])
             return [
                 (int(r["index"]), float(r.get("relevance_score", 0.0)))
                 for r in sorted(results, key=lambda x: -x.get("relevance_score", 0.0))

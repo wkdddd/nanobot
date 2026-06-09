@@ -62,7 +62,7 @@ dependencies = [
     "python-pptx>=1.0.0,<2.0.0",
     "filelock>=3.25.2",
     "boto3>=1.43.0",
-    "chroma-hnswlib>=0.7.5",
+    "chroma-hnswlib>=0.7.5,<0.7.6",
     "tree-sitter>=0.23.0",
 ]
 
@@ -75,7 +75,13 @@ lang-js = ["tree-sitter-javascript>=0.23.0"]
 lang-ts = ["tree-sitter-typescript>=0.23.0"]
 lang-go = ["tree-sitter-go>=0.23.0"]
 lang-rust = ["tree-sitter-rust>=0.23.0"]
-lang-all = ["nanobot[lang-python,lang-js,lang-ts,lang-go,lang-rust]"]
+lang-all = [
+    "tree-sitter-python>=0.23.0",
+    "tree-sitter-javascript>=0.23.0",
+    "tree-sitter-typescript>=0.23.0",
+    "tree-sitter-go>=0.23.0",
+    "tree-sitter-rust>=0.23.0",
+]
 wecom = [
     "wecom-aibot-sdk-python>=0.1.5",
 ]

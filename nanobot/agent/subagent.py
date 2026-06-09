@@ -76,6 +76,8 @@ class SubagentManager:
         max_tool_result_chars: int,
         model: str | None = None,
         tools_config: ToolsConfig | None = None,
+        embedding_config: Any | None = None,
+        rerank_config: Any | None = None,
         restrict_to_workspace: bool = False,
         disabled_skills: list[str] | None = None,
         max_iterations: int | None = None,
@@ -87,6 +89,8 @@ class SubagentManager:
         self.bus = bus
         self.model = model or provider.get_default_model()
         self.tools_config = tools_config or ToolsConfig()
+        self.embedding_config = embedding_config
+        self.rerank_config = rerank_config
         self.max_tool_result_chars = max_tool_result_chars
         self.restrict_to_workspace = restrict_to_workspace
         self.disabled_skills = set(disabled_skills or [])
@@ -122,6 +126,8 @@ class SubagentManager:
         ctx = ToolContext(
             config=cfg,
             workspace=str(root.resolve()),
+            embedding_config=self.embedding_config,
+            rerank_config=self.rerank_config,
             file_state_store=FileStates(),
         )
         ToolLoader().load(ctx, registry, scope="subagent")

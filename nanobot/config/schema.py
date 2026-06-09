@@ -233,10 +233,15 @@ class EmbeddingConfig(Base):
 
     enable: bool = False
     api_key: str = ""
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
+        serialization_alias="baseUrl",
+    )
     model: str = "text-embedding-v3"
     dimensions: int = 1024
-    batch_size: int = 25
+    batch_size: int = 10
+    max_input_chars: int = 2048
     semantic_weight: float = 0.6
 
 
@@ -245,8 +250,12 @@ class RerankConfig(Base):
 
     enable: bool = False
     api_key: str = ""
-    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: str = "gte-rerank"
+    base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-api/v1",
+        validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
+        serialization_alias="baseUrl",
+    )
+    model: str = "qwen3-rerank"
     top_n: int = 20
 
 

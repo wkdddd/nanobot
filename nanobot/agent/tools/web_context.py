@@ -421,6 +421,12 @@ class WebContextTool(Tool):
     def create(cls, ctx: Any) -> Tool:
         from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 
+        embedding_config = getattr(ctx, "embedding_config", None)
+        if embedding_config is None:
+            embedding_config = getattr(ctx.config, "embedding", None)
+        rerank_config = getattr(ctx, "rerank_config", None)
+        if rerank_config is None:
+            rerank_config = getattr(ctx.config, "rerank", None)
         search: Tool | None = None
         fetch: Tool | None = None
         if ctx.config.web.enable:
@@ -430,11 +436,9 @@ class WebContextTool(Tool):
             workspace=Path(ctx.workspace),
             search=search,
             fetch=fetch,
-            embedding_client=create_embedding_client_from_config(ctx.config.embedding),
-            rerank_client=create_rerank_client_from_config(
-                getattr(ctx.config, "rerank", None)
-            ),
-            semantic_weight=ctx.config.embedding.semantic_weight,
+            embedding_client=create_embedding_client_from_config(embedding_config),
+            rerank_client=create_rerank_client_from_config(rerank_config),
+            semantic_weight=getattr(embedding_config, "semantic_weight", 0.6),
         )
 
     @property
