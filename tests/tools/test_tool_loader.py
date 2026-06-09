@@ -407,7 +407,7 @@ def test_loader_registers_same_tools_as_old_hardcoded():
     expected = {
         "read_file", "write_file", "edit_file", "list_dir",
         "grep", "notebook_edit", "exec", "web_search", "web_fetch",
-        "web_context", "message", "spawn", "cron",
+        "repo_context", "web_context", "message", "spawn", "cron",
     }
     actual = set(registered)
     assert expected <= actual, f"Missing tools: {expected - actual}"
