@@ -89,4 +89,46 @@ describe("ThreadMessages", () => {
     render(<ThreadMessages messages={messages} isStreaming={false} />);
     expect(screen.getAllByRole("button", { name: "Copy reply" })).toHaveLength(1);
   });
+
+  it("shares one date separator across nearby user turns", () => {
+    const messages: UIMessage[] = [
+      { id: "u1", role: "user", content: "first", createdAt: 1_700_000_000_000 },
+      {
+        id: "t1",
+        role: "tool",
+        kind: "trace",
+        content: "search()",
+        traces: ["search()"],
+        createdAt: 1_700_000_000_500,
+      },
+      { id: "a1", role: "assistant", content: "answer", createdAt: 1_700_000_001_000 },
+      { id: "u2", role: "user", content: "second", createdAt: 1_700_000_002_000 },
+    ];
+
+    const { container } = render(<ThreadMessages messages={messages} isStreaming={false} />);
+    const separators = Array.from(container.querySelectorAll("time"));
+
+    expect(separators).toHaveLength(1);
+    expect(separators.map((el) => el.getAttribute("datetime"))).toEqual([
+      "2023-11-14T22:13:20.000Z",
+    ]);
+    expect(screen.getByText("answer")).toBeInTheDocument();
+  });
+
+  it("renders another date separator after a larger turn gap", () => {
+    const messages: UIMessage[] = [
+      { id: "u1", role: "user", content: "first", createdAt: 1_700_000_000_000 },
+      { id: "a1", role: "assistant", content: "answer", createdAt: 1_700_000_001_000 },
+      { id: "u2", role: "user", content: "later", createdAt: 1_700_000_301_000 },
+    ];
+
+    const { container } = render(<ThreadMessages messages={messages} isStreaming={false} />);
+    const separators = Array.from(container.querySelectorAll("time"));
+
+    expect(separators).toHaveLength(2);
+    expect(separators.map((el) => el.getAttribute("datetime"))).toEqual([
+      "2023-11-14T22:13:20.000Z",
+      "2023-11-14T22:18:21.000Z",
+    ]);
+  });
 });

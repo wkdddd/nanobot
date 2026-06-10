@@ -3,7 +3,10 @@ import {
   AgentActivityCluster,
   isAgentActivityMember,
 } from "@/components/thread/AgentActivityCluster";
+import { fmtDateTime } from "@/lib/format";
 import type { UIMessage } from "@/lib/types";
+
+const DATE_SEPARATOR_MIN_GAP_MS = 5 * 60 * 1000;
 
 interface ThreadMessagesProps {
   messages: UIMessage[];
@@ -13,6 +16,7 @@ interface ThreadMessagesProps {
 
 export type DisplayUnit =
   | { type: "cluster"; messages: UIMessage[] }
+  | { type: "date-separator"; id: string; createdAt: number }
   | { type: "single"; message: UIMessage };
 
 /** True when this unit index is the last assistant text slice before the next user message (or end of thread). */
@@ -24,6 +28,7 @@ export function isFinalAssistantSliceBeforeNextUser(
   if (u.type !== "single" || u.message.role !== "assistant") return true;
   for (let j = index + 1; j < units.length; j++) {
     const v = units[j];
+    if (v.type === "date-separator") continue;
     if (v.type === "single" && v.message.role === "user") break;
     return false;
   }
@@ -33,6 +38,7 @@ export function isFinalAssistantSliceBeforeNextUser(
 function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
   const out: DisplayUnit[] = [];
   let i = 0;
+  let lastDateSeparatorAt: number | null = null;
   while (i < messages.length) {
     const m = messages[i];
     if (isAgentActivityMember(m)) {
@@ -43,6 +49,17 @@ function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
       }
       out.push({ type: "cluster", messages: cluster });
       continue;
+    }
+    if (
+      m.role === "user"
+      && Number.isFinite(m.createdAt)
+      && (
+        lastDateSeparatorAt === null
+        || m.createdAt - lastDateSeparatorAt >= DATE_SEPARATOR_MIN_GAP_MS
+      )
+    ) {
+      out.push({ type: "date-separator", id: `date-${m.id}`, createdAt: m.createdAt });
+      lastDateSeparatorAt = m.createdAt;
     }
     out.push({ type: "single", message: m });
     i += 1;
@@ -75,6 +92,8 @@ export function ThreadMessages({ messages, isStreaming = false }: ThreadMessages
                 isTurnStreaming={isStreaming}
                 hasBodyBelow={hasBodyBelow}
               />
+            ) : unit.type === "date-separator" ? (
+              <DateSeparator createdAt={unit.createdAt} />
             ) : (
               <MessageBubble
                 message={unit.message}
@@ -97,10 +116,14 @@ function unitKey(unit: DisplayUnit, index: number): string {
     const anchor = unit.messages[0]?.id;
     return anchor != null ? `cluster-${anchor}` : `cluster-idx-${index}`;
   }
+  if (unit.type === "date-separator") return unit.id;
   return unit.message.id;
 }
 
 function marginAfterPrevUnit(prev: DisplayUnit): string {
+  if (prev.type === "date-separator") {
+    return "mt-3";
+  }
   if (prev.type === "cluster") {
     return "mt-4";
   }
@@ -116,4 +139,20 @@ function marginAfterPrevUnit(prev: DisplayUnit): string {
     return "mt-2";
   }
   return "mt-5";
+}
+
+function DateSeparator({ createdAt }: { createdAt: number }) {
+  const label = fmtDateTime(createdAt);
+  if (!label) return null;
+  const dateTime = Number.isFinite(createdAt) ? new Date(createdAt).toISOString() : undefined;
+  return (
+    <div className="flex w-full justify-center">
+      <time
+        dateTime={dateTime}
+        className="max-w-full rounded-full bg-muted/65 px-2.5 py-1 text-[11px] leading-none text-muted-foreground/80"
+      >
+        {label}
+      </time>
+    </div>
+  );
 }

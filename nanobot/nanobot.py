@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.hook import AgentHook, SDKCaptureHook
+from nanobot.agent.lifecycle_hook import AgentHook, SDKCaptureHook
 from nanobot.agent.loop import AgentLoop
 
 

@@ -13,6 +13,17 @@ import type { ChatSummary, UIMessage } from "@/lib/types";
 
 const EMPTY_MESSAGES: UIMessage[] = [];
 
+function parseMessageCreatedAt(value: unknown): number {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric) && numeric > 0) return numeric;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return Date.now();
+}
+
 /** Sidebar state: fetches the full session list and exposes create / delete actions. */
 export function useSessions(): {
   sessions: ChatSummary[];
@@ -159,7 +170,7 @@ export function useSessionHistory(key: string | null): {
         const ui: UIMessage[] = body.messages.map((m, idx) => ({
           ...m,
           id: m.id ?? `hist-${idx}`,
-          createdAt: typeof m.createdAt === "number" ? m.createdAt : Date.now(),
+          createdAt: parseMessageCreatedAt(m.createdAt),
         }));
         const last = ui[ui.length - 1];
         const hasPending = last?.kind === "trace";

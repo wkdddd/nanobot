@@ -232,11 +232,14 @@ class RepoContextRetriever:
         return "\n".join(parts)
 
     def _sync_index(self) -> None:
+        from nanobot.agent.rag.chunk_filter import should_skip_file_embedding
+
         self.index.sync_files(
             source_type="repo",
             files=self._iter_candidate_files(),
             chunker=self._chunk_file,
             max_file_chars=self.config.max_file_chars,
+            skip_embed_filter=should_skip_file_embedding,
         )
 
     def _chunk_file(self, path: Path, text: str) -> list[IndexedChunk]:

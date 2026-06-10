@@ -1024,6 +1024,8 @@ class WebSocketChannel(BaseChannel):
         sk = f"websocket:{chat_id}"
         try:
             dup = json.loads(json.dumps(wire, ensure_ascii=False))
+            if isinstance(dup, dict):
+                dup.setdefault("createdAt", int(time.time() * 1000))
             append_transcript_object(sk, dup)
         except (ValueError, TypeError) as e:
             self.logger.warning("webui transcript append failed: {}", e)

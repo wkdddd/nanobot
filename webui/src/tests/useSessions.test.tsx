@@ -179,6 +179,27 @@ describe("useSessions", () => {
     expect(third.images).toBeUndefined();
   });
 
+  it("parses persisted string createdAt values from WebUI transcript history", async () => {
+    vi.mocked(api.fetchWebuiThread).mockResolvedValue({
+      schemaVersion: 3,
+      messages: [
+        {
+          id: "u1",
+          role: "user",
+          content: "when?",
+          createdAt: "2026-06-10T06:30:00.000Z" as unknown as number,
+        },
+      ],
+    });
+
+    const { result } = renderHook(() => useSessionHistory("websocket:chat-time"), {
+      wrapper: wrap(fakeClient()),
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.messages[0]?.createdAt).toBe(Date.parse("2026-06-10T06:30:00.000Z"));
+  });
+
   it("passes through assistant video media from transcript replay", async () => {
     vi.mocked(api.fetchWebuiThread).mockResolvedValue({
       schemaVersion: 3,

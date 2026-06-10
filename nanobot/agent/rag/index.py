@@ -7,12 +7,25 @@ import json
 import logging
 import sqlite3
 import struct
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
 from nanobot.agent.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
 
 logger = logging.getLogger(__name__)
+
+
+def _vec_norm(vec: list[float]) -> float:
+    return sum(x * x for x in vec) ** 0.5
+
+
+def _cosine_sim(a: list[float], b: list[float], a_norm: float) -> float:
+    b_norm = _vec_norm(b)
+    if a_norm == 0 or b_norm == 0:
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    return dot / (a_norm * b_norm)
 
 
 class RAGIndex:
@@ -46,6 +59,7 @@ class RAGIndex:
         chunker: ChunkerFn,
         max_file_chars: int,
         prune_missing: bool = True,
+        skip_embed_filter: Callable[[str, str], bool] | None = None,
     ) -> None:
         self._ensure_schema()
         seen: set[str] = set()
@@ -65,7 +79,11 @@ class RAGIndex:
                 except UnicodeDecodeError:
                     continue
                 chunks = chunker(path, text)
-                self._replace_chunks(conn, source_type, rel, chunks, digest, mtime)
+                file_skip = bool(skip_embed_filter and skip_embed_filter(rel, text))
+                self._replace_chunks(
+                    conn, source_type, rel, chunks, digest, mtime,
+                    skip_embedding=file_skip,
+                )
 
             if prune_missing:
                 self._prune_missing(conn, source_type, seen)
@@ -99,11 +117,12 @@ class RAGIndex:
         # Stage 1: FTS5 BM25 lexical candidates
         lexical_hits = self._fts5_search(source_type, query, limit=100)
 
-        # Stage 2: Semantic ANN candidates (if embedding available)
+        # Stage 2: On-demand semantic scoring of BM25 candidates
         semantic_scores: dict[ChunkKey, float] = {}
-        if self.embedding_client:
-            await self._ensure_embeddings(source_type)
-            semantic_scores = await self._ann_search(source_type, query, top_k=100)
+        if self.embedding_client and lexical_hits:
+            semantic_scores = await self._embed_and_score_candidates(
+                source_type, query, set(lexical_hits.keys())
+            )
 
         # Stage 3: Hybrid scoring
         hits = self._merge_scores(
@@ -180,54 +199,76 @@ class RAGIndex:
                     scores[key] = scores.get(key, 0.0) + 1.0
         return scores
 
-    # ─── Semantic ANN search ─────────────────────────────────────────────
+    # ─── Semantic on-demand embedding ─────────────────────────────────────
 
-    async def _ensure_embeddings(self, source_type: str) -> None:
-        """Compute embeddings for chunks that don't have them yet."""
-        if not self.embedding_client:
-            return
-        with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT path, start_line, end_line, kind, text
-                FROM chunks
-                WHERE source_type = ? AND embedding IS NULL AND trim(text) <> ''
-                ORDER BY path, start_line
-                """,
-                (source_type,),
-            ).fetchall()
-
-        if not rows:
-            return
-
-        texts = [str(r[4]) for r in rows]
-        vecs = await self.embedding_client.embed_texts(texts)
-
-        hnsw = self._get_hnsw(source_type)
-        with self._connect() as conn:
-            for row, vec in zip(rows, vecs):
-                if vec is None:
-                    continue
-                key: ChunkKey = (str(row[0]), int(row[1]), int(row[2]), str(row[3]))
-                data = struct.pack(f"{len(vec)}f", *vec)
-                conn.execute(
-                    """
-                    UPDATE chunks SET embedding = ?
-                    WHERE source_type = ? AND path = ? AND start_line = ? AND end_line = ? AND kind = ?
-                    """,
-                    (data, source_type, key[0], key[1], key[2], key[3]),
-                )
-                hnsw.add([key], [vec])
-        hnsw.save()
-
-    async def _ann_search(
-        self, source_type: str, query: str, *, top_k: int = 100
+    async def _embed_and_score_candidates(
+        self,
+        source_type: str,
+        query: str,
+        candidate_keys: set[ChunkKey],
     ) -> dict[ChunkKey, float]:
+        """Embed query + BM25 candidates on-demand, return cosine similarities."""
+        if not self.embedding_client or not candidate_keys:
+            return {}
+
         query_vec = await self.embedding_client.embed_query(query)
         if query_vec is None:
             return {}
-        hnsw = self._get_hnsw(source_type)
-        return hnsw.query(query_vec, top_k=top_k)
+
+        # Load candidate texts that need embedding
+        to_embed: list[tuple[ChunkKey, str]] = []
+        cached: dict[ChunkKey, list[float]] = {}
+
+        with self._connect() as conn:
+            for key in candidate_keys:
+                row = conn.execute(
+                    """
+                    SELECT text, embedding FROM chunks
+                    WHERE source_type = ? AND path = ? AND start_line = ?
+                      AND end_line = ? AND kind = ?
+                    """,
+                    (source_type, key[0], key[1], key[2], key[3]),
+                ).fetchone()
+                if not row:
+                    continue
+                text, emb_blob = row
+                if emb_blob:
+                    n = len(emb_blob) // 4
+                    cached[key] = list(struct.unpack(f"{n}f", emb_blob))
+                elif text and text.strip():
+                    to_embed.append((key, text))
+
+        # Batch embed only those without cached embeddings
+        if to_embed:
+            texts = [t for _, t in to_embed]
+            vecs = await self.embedding_client.embed_texts(texts)
+
+            with self._connect() as conn:
+                for (key, _), vec in zip(to_embed, vecs):
+                    if vec is None:
+                        continue
+                    cached[key] = vec
+                    data = struct.pack(f"{len(vec)}f", *vec)
+                    conn.execute(
+                        """
+                        UPDATE chunks SET embedding = ?
+                        WHERE source_type = ? AND path = ? AND start_line = ?
+                          AND end_line = ? AND kind = ?
+                        """,
+                        (data, source_type, key[0], key[1], key[2], key[3]),
+                    )
+
+        # Compute cosine similarity
+        scores: dict[ChunkKey, float] = {}
+        q_norm = _vec_norm(query_vec)
+        if q_norm == 0:
+            return {}
+        for key, vec in cached.items():
+            sim = _cosine_sim(query_vec, vec, q_norm)
+            if sim > 0:
+                scores[key] = sim
+
+        return scores
 
     # ─── Hybrid merge ────────────────────────────────────────────────────
 
@@ -423,6 +464,8 @@ class RAGIndex:
             cols = {r[1] for r in conn.execute("PRAGMA table_info(chunks)").fetchall()}
             if "embedding" not in cols:
                 conn.execute("ALTER TABLE chunks ADD COLUMN embedding BLOB")
+            if "skip_embedding" not in cols:
+                conn.execute("ALTER TABLE chunks ADD COLUMN skip_embedding INTEGER DEFAULT 0")
             conn.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(self._SCHEMA_VERSION),),
@@ -465,17 +508,21 @@ class RAGIndex:
         chunks: list[IndexedChunk],
         content_hash: str,
         mtime: float,
+        skip_embedding: bool = False,
     ) -> None:
+        from nanobot.agent.rag.chunk_filter import is_chunk_valid
+
         conn.execute(
             "DELETE FROM chunks WHERE source_type = ? AND path = ?", (source_type, path)
         )
         for chunk in chunks:
+            chunk_skip = skip_embedding or not is_chunk_valid(chunk.text, chunk.kind)
             conn.execute(
                 """
                 INSERT INTO chunks(
                     source_type, path, start_line, end_line, kind, text, symbols,
-                    title, url, query, fetched_at, mtime, content_hash
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    title, url, query, fetched_at, mtime, content_hash, skip_embedding
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     source_type, path, int(chunk.start_line), int(chunk.end_line),
@@ -483,6 +530,7 @@ class RAGIndex:
                     json.dumps(chunk.symbols, ensure_ascii=False),
                     chunk.title, chunk.url, chunk.query, chunk.fetched_at,
                     mtime, content_hash,
+                    1 if chunk_skip else 0,
                 ),
             )
 

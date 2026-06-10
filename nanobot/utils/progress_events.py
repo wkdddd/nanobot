@@ -6,7 +6,7 @@ import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from nanobot.agent.hook import AgentHookContext
+from nanobot.agent.lifecycle_hook import AgentHookContext
 
 
 def on_progress_accepts_tool_events(cb: Callable[..., Any]) -> bool:

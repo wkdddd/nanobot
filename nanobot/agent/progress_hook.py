@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-from nanobot.agent.hook import AgentHook, AgentHookContext
+from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
 from nanobot.utils.helpers import IncrementalThinkExtractor, strip_think
 from nanobot.utils.progress_events import (
     build_tool_event_finish_payloads,

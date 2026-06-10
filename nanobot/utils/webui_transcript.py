@@ -110,6 +110,24 @@ def tool_trace_lines_from_events(events: Any) -> list[str]:
     return lines
 
 
+def _record_created_at_ms(rec: dict[str, Any], idx: int, fallback_base: int) -> int:
+    value = rec.get("createdAt")
+    if isinstance(value, bool):
+        value = None
+    if isinstance(value, int | float):
+        ms = int(value)
+        if ms > 0:
+            return ms
+    if isinstance(value, str):
+        try:
+            ms = int(float(value))
+        except ValueError:
+            ms = 0
+        if ms > 0:
+            return ms
+    return fallback_base + idx
+
+
 def replay_transcript_to_ui_messages(
     lines: list[dict[str, Any]],
     *,
@@ -130,7 +148,12 @@ def replay_transcript_to_ui_messages(
     def _new_id(prefix: str, idx: int) -> str:
         return f"{prefix}-{idx}-{uuid.uuid4().hex[:8]}"
 
-    def attach_reasoning_chunk(prev: list[dict[str, Any]], chunk: str, idx: int) -> None:
+    def attach_reasoning_chunk(
+        prev: list[dict[str, Any]],
+        chunk: str,
+        idx: int,
+        created_at: int,
+    ) -> None:
         for i in range(len(prev) - 1, -1, -1):
             candidate = prev[i]
             if candidate.get("role") == "user":
@@ -165,7 +188,7 @@ def replay_transcript_to_ui_messages(
                 "isStreaming": True,
                 "reasoning": chunk,
                 "reasoningStreaming": True,
-                "createdAt": _ts_base + idx,
+                "createdAt": created_at,
             },
         )
 
@@ -220,7 +243,7 @@ def replay_transcript_to_ui_messages(
                 }
                 return
 
-    def absorb_complete(extra: dict[str, Any], idx: int) -> None:
+    def absorb_complete(extra: dict[str, Any], idx: int, created_at: int) -> None:
         last = messages[-1] if messages else None
         if last and is_reasoning_only_placeholder(last):
             messages[-1] = {
@@ -234,13 +257,14 @@ def replay_transcript_to_ui_messages(
                 {
                     "id": _new_id("as", idx),
                     "role": "assistant",
-                    "createdAt": _ts_base + idx,
+                    "createdAt": created_at,
                     **extra,
                 },
             )
 
     for idx, rec in enumerate(lines):
         ev = rec.get("event")
+        created_at = _record_created_at_ms(rec, idx, _ts_base)
         if ev == "user":
             text = rec.get("text")
             text_s = text if isinstance(text, str) else ""
@@ -255,7 +279,7 @@ def replay_transcript_to_ui_messages(
                 "id": _new_id("u", idx),
                 "role": "user",
                 "content": text_s,
-                "createdAt": _ts_base + idx,
+                "createdAt": created_at,
             }
             if media_att:
                 row["media"] = media_att
@@ -282,7 +306,7 @@ def replay_transcript_to_ui_messages(
                             "role": "assistant",
                             "content": "",
                             "isStreaming": True,
-                            "createdAt": _ts_base + idx,
+                            "createdAt": created_at,
                         },
                     )
             buffer_parts.append(chunk)
@@ -308,7 +332,7 @@ def replay_transcript_to_ui_messages(
             chunk = rec.get("text")
             if not isinstance(chunk, str) or not chunk:
                 continue
-            attach_reasoning_chunk(messages, chunk, idx)
+            attach_reasoning_chunk(messages, chunk, idx, created_at)
             continue
 
         if ev == "reasoning_end":
@@ -329,7 +353,7 @@ def replay_transcript_to_ui_messages(
                 line = rec.get("text")
                 if not isinstance(line, str) or not line:
                     continue
-                attach_reasoning_chunk(messages, line, idx)
+                attach_reasoning_chunk(messages, line, idx, created_at)
                 close_reasoning(messages)
                 continue
             if kind in ("tool_hint", "progress"):
@@ -355,7 +379,7 @@ def replay_transcript_to_ui_messages(
                             "kind": "trace",
                             "content": trace_lines[-1],
                             "traces": trace_lines,
-                            "createdAt": _ts_base + idx,
+                            "createdAt": created_at,
                         },
                     )
                 continue
@@ -382,7 +406,7 @@ def replay_transcript_to_ui_messages(
             lat = rec.get("latency_ms")
             if isinstance(lat, (int, float)) and lat >= 0:
                 extra["latencyMs"] = int(lat)
-            absorb_complete(extra, idx)
+            absorb_complete(extra, idx, created_at)
             if media:
                 suppress_until_turn_end = True
             continue
