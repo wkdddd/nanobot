@@ -60,6 +60,8 @@ export interface UIMessage {
   reasoningStreaming?: boolean;
   /** End-to-end wall time for this assistant turn (persisted ``latency_ms`` / ``turn_end``). */
   latencyMs?: number;
+  /** Permission requests that arrived during this assistant turn. */
+  permissionRecords?: PermissionRequest[];
 }
 
 /** Structured UI blob on ``progress`` WS frames; channels may add more ``kind`` values later. */

@@ -125,7 +125,6 @@ export function ThreadShell({
     send,
     stop,
     setMessages,
-    permissionRecords,
     sessionApprovalEnabled,
     setSessionApproval,
     respondToPermission,
@@ -347,8 +346,6 @@ export function ThreadShell({
           goalState={goalState}
           sessionApprovalEnabled={sessionApprovalEnabled}
           onSessionApprovalChange={setSessionApproval}
-          permissionRecords={permissionRecords}
-          onPermissionRespond={respondToPermission}
         />
       ) : (
         <ThreadComposer
@@ -404,6 +401,7 @@ export function ThreadShell({
         composer={composer}
         scrollToBottomSignal={scrollToBottomSignal}
         conversationKey={historyKey}
+        onPermissionRespond={respondToPermission}
       />
     </section>
   );

@@ -248,7 +248,12 @@ export function useNanobotStream(
   const [goalState, setGoalState] = useState<GoalStateWsPayload | undefined>(undefined);
   const [streamError, setStreamError] = useState<StreamError | null>(null);
   const [permissionRecords, setPermissionRecords] = useState<PermissionRequest[]>([]);
-  const [sessionApprovalEnabled, setSessionApprovalEnabled] = useState(false);
+  const [sessionApprovalEnabled, setSessionApprovalEnabled] = useState(() => {
+    if (!chatId) return false;
+    try {
+      return window.localStorage.getItem(`nanobot:approval:${chatId}`) === "1";
+    } catch { return false; }
+  });
   const buffer = useRef<StreamBuffer | null>(null);
   const suppressStreamUntilTurnEndRef = useRef(false);
   /** Timer that defers ``isStreaming = false`` after ``stream_end``.
@@ -278,7 +283,12 @@ export function useNanobotStream(
     );
     setStreamError(null);
     setPermissionRecords([]);
-    setSessionApprovalEnabled(false);
+    setSessionApprovalEnabled(() => {
+      if (!chatId) return false;
+      try {
+        return window.localStorage.getItem(`nanobot:approval:${chatId}`) === "1";
+      } catch { return false; }
+    });
     setRunStartedAt(chatId ? client.getRunStartedAt(chatId) : null);
     setGoalState(chatId ? client.getGoalState(chatId) : undefined);
     buffer.current = null;
@@ -390,21 +400,37 @@ export function useNanobotStream(
       }
 
       if (ev.event === "permission_request") {
-        setPermissionRecords((prev) => [
-          ...prev,
-          {
-            requestId: ev.request_id,
-            toolName: ev.tool_name,
-            arguments: ev.arguments,
-            permission: ev.permission,
-            createdAt: Date.now(),
-          },
-        ]);
+        const record = {
+          requestId: ev.request_id,
+          toolName: ev.tool_name,
+          arguments: ev.arguments,
+          permission: ev.permission,
+          createdAt: Date.now(),
+        } satisfies PermissionRequest;
+        setPermissionRecords((prev) => [...prev, record]);
+        setMessages((prev) => {
+          for (let i = prev.length - 1; i >= 0; i--) {
+            const m = prev[i];
+            if (m.role === "user") break;
+            if (m.role === "assistant" && m.kind !== "trace") {
+              const updated = { ...m, permissionRecords: [...(m.permissionRecords ?? []), record] };
+              return [...prev.slice(0, i), updated, ...prev.slice(i + 1)];
+            }
+          }
+          return prev;
+        });
         return;
       }
 
       if (ev.event === "session_permission_updated") {
         setSessionApprovalEnabled(ev.approval_enabled);
+        try {
+          if (ev.approval_enabled) {
+            window.localStorage.setItem(`nanobot:approval:${chatId}`, "1");
+          } else {
+            window.localStorage.removeItem(`nanobot:approval:${chatId}`);
+          }
+        } catch { /* ignore */ }
         return;
       }
 
@@ -578,6 +604,17 @@ export function useNanobotStream(
           r.requestId === requestId ? { ...r, resolved: true, approved } : r,
         ),
       );
+      setMessages((prev) =>
+        prev.map((m) => {
+          if (!m.permissionRecords?.some((r) => r.requestId === requestId)) return m;
+          return {
+            ...m,
+            permissionRecords: m.permissionRecords!.map((r) =>
+              r.requestId === requestId ? { ...r, resolved: true, approved } : r,
+            ),
+          };
+        }),
+      );
       client.sendPermissionResponse(chatId, requestId, approved);
     },
     [chatId, client],
@@ -587,6 +624,13 @@ export function useNanobotStream(
     (enabled: boolean) => {
       if (!chatId) return;
       setSessionApprovalEnabled(enabled);
+      try {
+        if (enabled) {
+          window.localStorage.setItem(`nanobot:approval:${chatId}`, "1");
+        } else {
+          window.localStorage.removeItem(`nanobot:approval:${chatId}`);
+        }
+      } catch { /* ignore storage errors */ }
       client.sendSetSessionPermission(chatId, enabled);
     },
     [chatId, client],

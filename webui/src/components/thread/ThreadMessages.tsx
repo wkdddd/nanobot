@@ -3,6 +3,7 @@ import {
   AgentActivityCluster,
   isAgentActivityMember,
 } from "@/components/thread/AgentActivityCluster";
+import { PermissionCard } from "@/components/thread/PermissionCard";
 import { fmtDateTime } from "@/lib/format";
 import type { UIMessage } from "@/lib/types";
 
@@ -12,6 +13,7 @@ interface ThreadMessagesProps {
   messages: UIMessage[];
   /** When true, agent turn still in flight — keeps activity cluster expanded. */
   isStreaming?: boolean;
+  onPermissionRespond?: (requestId: string, approved: boolean) => void;
 }
 
 export type DisplayUnit =
@@ -67,7 +69,7 @@ function buildDisplayUnits(messages: UIMessage[]): DisplayUnit[] {
   return out;
 }
 
-export function ThreadMessages({ messages, isStreaming = false }: ThreadMessagesProps) {
+export function ThreadMessages({ messages, isStreaming = false, onPermissionRespond }: ThreadMessagesProps) {
   const units = buildDisplayUnits(messages);
 
   return (
@@ -87,22 +89,45 @@ export function ThreadMessages({ messages, isStreaming = false }: ThreadMessages
         return (
           <div key={unitKey(unit, index)} className={marginTop}>
             {unit.type === "cluster" ? (
-              <AgentActivityCluster
-                messages={unit.messages}
-                isTurnStreaming={isStreaming}
-                hasBodyBelow={hasBodyBelow}
-              />
+              <>
+                <AgentActivityCluster
+                  messages={unit.messages}
+                  isTurnStreaming={isStreaming}
+                  hasBodyBelow={hasBodyBelow}
+                />
+                {onPermissionRespond && (() => {
+                  const allRecords = unit.messages.flatMap(m => m.permissionRecords ?? []);
+                  return allRecords.length > 0 ? (
+                    <div className="mt-1.5">
+                      <PermissionCard records={allRecords} onRespond={onPermissionRespond} />
+                    </div>
+                  ) : null;
+                })()}
+              </>
             ) : unit.type === "date-separator" ? (
               <DateSeparator createdAt={unit.createdAt} />
             ) : (
-              <MessageBubble
-                message={unit.message}
-                showAssistantCopyAction={
-                  unit.message.role === "assistant"
-                    ? isFinalAssistantSliceBeforeNextUser(units, index)
-                    : true
-                }
-              />
+              <>
+                <MessageBubble
+                  message={unit.message}
+                  showAssistantCopyAction={
+                    unit.message.role === "assistant"
+                      ? isFinalAssistantSliceBeforeNextUser(units, index)
+                      : true
+                  }
+                />
+                {unit.message.role === "assistant"
+                  && unit.message.permissionRecords
+                  && unit.message.permissionRecords.length > 0
+                  && onPermissionRespond ? (
+                  <div className="mt-1.5">
+                    <PermissionCard
+                      records={unit.message.permissionRecords}
+                      onRespond={onPermissionRespond}
+                    />
+                  </div>
+                ) : null}
+              </>
             )}
           </div>
         );

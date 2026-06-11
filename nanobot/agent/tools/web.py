@@ -472,6 +472,9 @@ class WebFetchTool(Tool):
     def read_only(self) -> bool:
         return True
 
+    def requires_approval(self, params: dict[str, Any]) -> bool:
+        return True
+
     async def execute(
         self,
         url: str,

@@ -24,7 +24,6 @@ import {
   RotateCw,
   ShieldAlert,
   ShieldCheck,
-  ShieldX,
   Sparkles,
   Square,
   SquarePen,
@@ -44,7 +43,7 @@ import {
 } from "@/hooks/useAttachedImages";
 import { useClipboardAndDrop } from "@/hooks/useClipboardAndDrop";
 import type { SendImage, SendOptions } from "@/hooks/useNanobotStream";
-import type { SlashCommand, GoalStateWsPayload, PermissionRequest } from "@/lib/types";
+import type { SlashCommand, GoalStateWsPayload } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** ``<input accept>``: aligned with the server's MIME whitelist. SVG is
@@ -74,8 +73,6 @@ interface ThreadComposerProps {
   goalState?: GoalStateWsPayload;
   sessionApprovalEnabled?: boolean;
   onSessionApprovalChange?: (enabled: boolean) => void;
-  permissionRecords?: PermissionRequest[];
-  onPermissionRespond?: (requestId: string, approved: boolean) => void;
 }
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
@@ -385,8 +382,6 @@ export function ThreadComposer({
   goalState,
   sessionApprovalEnabled = false,
   onSessionApprovalChange,
-  permissionRecords = [],
-  onPermissionRespond,
 }: ThreadComposerProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
@@ -396,12 +391,10 @@ export function ThreadComposer({
   const [uncontrolledImageMode, setUncontrolledImageMode] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState<ImageAspectRatio>("auto");
   const [aspectMenuOpen, setAspectMenuOpen] = useState(false);
-  const [permissionPanelOpen, setPermissionPanelOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const aspectControlRef = useRef<HTMLDivElement>(null);
-  const permissionControlRef = useRef<HTMLDivElement>(null);
   const chipRefs = useRef(new Map<string, HTMLButtonElement>());
   const isHero = variant === "hero";
   const imageMode = controlledImageMode ?? uncontrolledImageMode;
@@ -600,45 +593,6 @@ export function ThreadComposer({
       document.removeEventListener("wheel", closeOnWheel, true);
     };
   }, [aspectMenuOpen]);
-
-  const pendingPermissionCount = permissionRecords.filter((r) => !r.resolved).length;
-
-  useEffect(() => {
-    if (pendingPermissionCount > 0) setPermissionPanelOpen(true);
-  }, [pendingPermissionCount]);
-
-  useEffect(() => {
-    if (!permissionPanelOpen) return;
-
-    const closeOnPointerDown = (event: PointerEvent) => {
-      const target = event.target;
-      if (target instanceof Node && permissionControlRef.current?.contains(target)) return;
-      setPermissionPanelOpen(false);
-    };
-    const closeOnKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setPermissionPanelOpen(false);
-        textareaRef.current?.focus();
-      }
-    };
-    const closeOnScroll = () => setPermissionPanelOpen(false);
-    const closeOnWheel = (event: WheelEvent) => {
-      if (event.target instanceof Node && permissionControlRef.current?.contains(event.target)) return;
-      setPermissionPanelOpen(false);
-      scrollNearestOverflowParent(event.target, event.deltaY);
-    };
-
-    document.addEventListener("pointerdown", closeOnPointerDown, true);
-    document.addEventListener("keydown", closeOnKeyDown);
-    document.addEventListener("scroll", closeOnScroll, true);
-    document.addEventListener("wheel", closeOnWheel, { capture: true, passive: true });
-    return () => {
-      document.removeEventListener("pointerdown", closeOnPointerDown, true);
-      document.removeEventListener("keydown", closeOnKeyDown);
-      document.removeEventListener("scroll", closeOnScroll, true);
-      document.removeEventListener("wheel", closeOnWheel, true);
-    };
-  }, [permissionPanelOpen]);
 
   const resizeTextarea = useCallback(() => {
     requestAnimationFrame(() => {
@@ -991,39 +945,6 @@ export function ThreadComposer({
                 />
               ) : null}
             </div>
-            {permissionRecords.length > 0 && onPermissionRespond ? (
-              <div ref={permissionControlRef} className="relative flex items-center">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  aria-pressed={permissionPanelOpen}
-                  aria-label={t("permission.panelTitle")}
-                  onClick={() => setPermissionPanelOpen((open) => !open)}
-                  className={cn(
-                    "rounded-full border border-border/55 px-2.5 font-medium shadow-[0_2px_8px_rgba(15,23,42,0.04)]",
-                    isHero ? "h-9 text-[12px]" : "h-7.5 text-[10.5px]",
-                    pendingPermissionCount > 0
-                      ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/12 dark:text-amber-300"
-                      : "bg-card text-muted-foreground hover:bg-card hover:text-foreground",
-                  )}
-                >
-                  <ShieldAlert className={cn("mr-1.5", isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
-                  {t("permission.panelTitle")}
-                  {pendingPermissionCount > 0 && (
-                    <span className="ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-500/20 px-1 text-[10px] font-semibold">
-                      {pendingPermissionCount}
-                    </span>
-                  )}
-                </Button>
-                {permissionPanelOpen ? (
-                  <PermissionPopover
-                    records={permissionRecords}
-                    isHero={isHero}
-                    onRespond={onPermissionRespond}
-                  />
-                ) : null}
-              </div>
-            ) : null}
             {modelLabel ? (
               <span
                 title={modelLabel}
@@ -1138,130 +1059,6 @@ function ImageAspectMenu({
           </button>
         );
       })}
-    </div>
-  );
-}
-
-const PERMISSION_TIMEOUT_S = 300;
-
-function PermissionPopover({
-  records,
-  isHero,
-  onRespond,
-}: {
-  records: PermissionRequest[];
-  isHero: boolean;
-  onRespond: (requestId: string, approved: boolean) => void;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div
-      className={cn(
-        "absolute left-0 z-30 w-80 overflow-hidden rounded-[16px] border",
-        isHero ? "top-full mt-2" : "bottom-full mb-2",
-        "border-border/65 bg-popover p-1.5 text-popover-foreground shadow-[0_16px_45px_rgba(15,23,42,0.16)]",
-        "dark:border-white/10 dark:shadow-[0_18px_45px_rgba(0,0,0,0.42)]",
-      )}
-    >
-      <div className="px-2 pb-1 pt-1.5 text-[11px] font-medium text-muted-foreground/70">
-        {t("permission.panelTitle")}
-      </div>
-      <div className="max-h-[240px] overflow-y-auto">
-        {records.map((record) => (
-          <PermissionPopoverRow key={record.requestId} record={record} onRespond={onRespond} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function PermissionPopoverRow({
-  record,
-  onRespond,
-}: {
-  record: PermissionRequest;
-  onRespond: (requestId: string, approved: boolean) => void;
-}) {
-  const { t } = useTranslation();
-  const [remaining, setRemaining] = useState(() => {
-    if (record.resolved) return 0;
-    const elapsed = Math.floor((Date.now() - record.createdAt) / 1000);
-    return Math.max(0, PERMISSION_TIMEOUT_S - elapsed);
-  });
-
-  useEffect(() => {
-    if (record.resolved || remaining <= 0) return;
-    const interval = setInterval(() => {
-      setRemaining((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          onRespond(record.requestId, false);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [record.resolved, record.requestId, remaining, onRespond]);
-
-  const commandPreview = record.arguments?.command;
-
-  if (record.resolved) {
-    return (
-      <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
-        {record.approved ? (
-          <ShieldCheck className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
-        ) : (
-          <ShieldX className="h-3 w-3 text-red-500 dark:text-red-400" />
-        )}
-        <span>{record.approved ? t("permission.approved") : t("permission.denied")}:</span>
-        <code className="max-w-[180px] truncate text-[10px]">
-          {typeof commandPreview === "string" ? commandPreview : record.toolName}
-        </code>
-      </div>
-    );
-  }
-
-  return (
-    <div className="mx-1 my-1 rounded-lg border border-amber-200 bg-amber-50/60 p-2 dark:border-amber-800/60 dark:bg-amber-950/20">
-      <div className="mb-1 flex items-center gap-2">
-        <ShieldAlert className="h-3.5 w-3.5 text-amber-600" />
-        <span className="text-[11px] font-medium text-foreground">{t("permission.title")}</span>
-        <span className={cn(
-          "ml-auto text-[10px] tabular-nums",
-          remaining <= 30 ? "font-medium text-red-500" : "text-muted-foreground",
-        )}>
-          {remaining}s
-        </span>
-      </div>
-      <p className="mb-1 text-[11px] text-muted-foreground">
-        <code className="rounded bg-muted px-1 py-0.5 text-[10px]">{record.toolName}</code>
-      </p>
-      {typeof commandPreview === "string" && commandPreview && (
-        <code className="mb-1.5 block max-h-[48px] overflow-hidden whitespace-pre-wrap break-all rounded bg-muted p-1.5 text-[10px]">
-          {commandPreview}
-        </code>
-      )}
-      <div className="flex justify-end gap-1.5">
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-5.5 px-2 text-[10px]"
-          onMouseDown={(e) => { e.preventDefault(); onRespond(record.requestId, false); }}
-        >
-          {t("permission.deny")}
-        </Button>
-        <Button
-          type="button"
-          variant="default"
-          size="sm"
-          className="h-5.5 px-2 text-[10px]"
-          onMouseDown={(e) => { e.preventDefault(); onRespond(record.requestId, true); }}
-        >
-          {t("permission.approve")}
-        </Button>
-      </div>
     </div>
   );
 }

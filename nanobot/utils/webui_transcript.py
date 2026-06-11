@@ -416,12 +416,58 @@ def replay_transcript_to_ui_messages(
             for i, m in enumerate(messages):
                 if m.get("isStreaming"):
                     messages[i] = {**m, "isStreaming": False}
+                records = m.get("permissionRecords")
+                if records:
+                    updated = False
+                    for j, r in enumerate(records):
+                        if not r.get("resolved"):
+                            records[j] = {**r, "resolved": True, "approved": False}
+                            updated = True
+                    if updated:
+                        messages[i] = {**messages[i], "permissionRecords": list(records)}
             prune_reasoning_only()
             lat = rec.get("latency_ms")
             if isinstance(lat, (int, float)) and lat >= 0:
                 stamp_latency(int(lat))
             buffer_message_id = None
             buffer_parts = []
+            continue
+
+        if ev == "permission_request":
+            request_id = rec.get("request_id")
+            if not isinstance(request_id, str):
+                continue
+            record = {
+                "requestId": request_id,
+                "toolName": rec.get("tool_name", ""),
+                "arguments": rec.get("arguments"),
+                "permission": rec.get("permission"),
+                "createdAt": created_at,
+            }
+            for i in range(len(messages) - 1, -1, -1):
+                m = messages[i]
+                if m.get("role") == "user":
+                    break
+                if m.get("role") == "assistant" and m.get("kind") != "trace":
+                    prev_records = list(m.get("permissionRecords") or [])
+                    prev_records.append(record)
+                    messages[i] = {**m, "permissionRecords": prev_records}
+                    break
+            continue
+
+        if ev == "permission_response":
+            request_id = rec.get("request_id")
+            approved = bool(rec.get("approved", False))
+            if not isinstance(request_id, str):
+                continue
+            for m in messages:
+                records = m.get("permissionRecords")
+                if not records:
+                    continue
+                for j, r in enumerate(records):
+                    if r.get("requestId") == request_id:
+                        records[j] = {**r, "resolved": True, "approved": approved}
+                        break
             continue
 
     for m in messages:

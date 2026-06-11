@@ -495,9 +495,10 @@ class WebSocketChannel(BaseChannel):
         self._subs.setdefault(chat_id, set()).add(connection)
         self._conn_chats.setdefault(connection, set()).add(chat_id)
 
-    def _cleanup_connection(self, connection: Any) -> None:
+    async def _cleanup_connection(self, connection: Any) -> None:
         """Remove *connection* from every subscription set; safe to call multiple times."""
         chat_ids = self._conn_chats.pop(connection, set())
+        orphaned_chats: list[str] = []
         for cid in chat_ids:
             subs = self._subs.get(cid)
             if subs is None:
@@ -505,7 +506,18 @@ class WebSocketChannel(BaseChannel):
             subs.discard(connection)
             if not subs:
                 self._subs.pop(cid, None)
+                orphaned_chats.append(cid)
         self._conn_default.pop(connection, None)
+        for cid in orphaned_chats:
+            await self.bus.publish_inbound(
+                InboundMessage(
+                    channel="websocket",
+                    chat_id=cid,
+                    sender_id="",
+                    content="",
+                    metadata={"_permission_disconnect": True},
+                )
+            )
 
     async def _maybe_push_active_goal_state(self, chat_id: str) -> None:
         """Replay an active sustained goal from session metadata after *chat_id* is subscribed.
@@ -532,10 +544,34 @@ class WebSocketChannel(BaseChannel):
             return
         await self.send_goal_status(chat_id, "running", started_at=t0)
 
+    async def _maybe_push_session_approval_state(self, chat_id: str) -> None:
+        """Replay session approval toggle after subscribe so refreshes restore it."""
+        if self._session_manager is None:
+            return
+        row = self._session_manager.read_session_file(f"websocket:{chat_id}")
+        meta = row.get("metadata", {}) if isinstance(row, dict) else {}
+        if not isinstance(meta, dict):
+            meta = {}
+        perms = meta.get("permissions", {})
+        if not isinstance(perms, dict):
+            return
+        approval_enabled = bool(perms.get("approval_enabled", False))
+        if not approval_enabled:
+            return
+        conns = list(self._subs.get(chat_id, ()))
+        for conn in conns:
+            await self._send_event(
+                conn,
+                "session_permission_updated",
+                chat_id=chat_id,
+                approval_enabled=approval_enabled,
+            )
+
     async def _hydrate_after_subscribe(self, chat_id: str) -> None:
         """Replay goal/run strip state after subscribe (same-process refresh)."""
         await self._maybe_push_active_goal_state(chat_id)
         await self._maybe_push_turn_run_wall_clock(chat_id)
+        await self._maybe_push_session_approval_state(chat_id)
 
     async def _send_event(self, connection: Any, event: str, **fields: Any) -> None:
         """Send a control event (attached, error, ...) to a single connection."""
@@ -545,7 +581,7 @@ class WebSocketChannel(BaseChannel):
         try:
             await connection.send(raw)
         except ConnectionClosed:
-            self._cleanup_connection(connection)
+            await self._cleanup_connection(connection)
         except Exception as e:
             self.logger.warning("failed to send {} event: {}", event, e)
 
@@ -1392,7 +1428,7 @@ class WebSocketChannel(BaseChannel):
         except Exception as e:
             self.logger.debug("connection ended: {}", e)
         finally:
-            self._cleanup_connection(connection)
+            await self._cleanup_connection(connection)
 
     def _save_envelope_media(
         self,
@@ -1549,6 +1585,9 @@ class WebSocketChannel(BaseChannel):
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
+            self._try_append_webui_transcript(
+                cid, {"event": "permission_response", "request_id": request_id, "approved": bool(approved)}
+            )
             await self.bus.publish_inbound(
                 InboundMessage(
                     channel="websocket",
@@ -1565,6 +1604,7 @@ class WebSocketChannel(BaseChannel):
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
+            logger.info("session websocket:{} tool approval: {}", cid, "enabled" if approval_enabled else "disabled")
             if self._session_manager is not None:
                 session_key = f"websocket:{cid}"
                 session = self._session_manager.get_or_create(session_key)
@@ -1603,7 +1643,7 @@ class WebSocketChannel(BaseChannel):
         try:
             await connection.send(raw)
         except ConnectionClosed:
-            self._cleanup_connection(connection)
+            await self._cleanup_connection(connection)
             self.logger.warning("connection gone{}", label)
         except Exception:
             self.logger.exception("send failed{}", label)
@@ -1619,6 +1659,7 @@ class WebSocketChannel(BaseChannel):
 
         if msg.metadata.get("_permission_request"):
             payload = msg.metadata["_permission_request"]
+            self._try_append_webui_transcript(msg.chat_id, {"event": "permission_request", **payload})
             conns = list(self._subs.get(msg.chat_id, ()))
             for conn in conns:
                 await self._send_event(

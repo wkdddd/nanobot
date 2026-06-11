@@ -374,6 +374,9 @@ class WriteFileTool(_FsTool):
             "For partial edits, prefer edit_file instead."
         )
 
+    def requires_approval(self, params: dict[str, Any]) -> bool:
+        return True
+
     async def execute(self, path: str | None = None, content: str | None = None, **kwargs: Any) -> str:
         try:
             if not path:
@@ -416,7 +419,6 @@ def _curly_double_quotes(text: str) -> str:
         else:
             parts.append(ch)
     return "".join(parts)
-
 
 def _curly_single_quotes(text: str) -> str:
     parts: list[str] = []
@@ -683,6 +685,9 @@ class EditFileTool(_FsTool):
             "If old_text matches multiple times, you must provide more context "
             "or set replace_all=true. Shows a diff of the closest match on failure."
         )
+
+    def requires_approval(self, params: dict[str, Any]) -> bool:
+        return True
 
     @staticmethod
     def _strip_trailing_ws(text: str) -> str:

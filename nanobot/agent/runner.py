@@ -830,7 +830,7 @@ class AgentRunner:
                         "arguments": params,
                         "permission": "user_approval",
                     }
-                    future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+                    future: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
                     approved = await spec.permission_request_callback(request_id, payload, future)
                     if not approved:
                         event = {"name": tool_call.name, "status": "denied", "detail": "user denied"}
@@ -838,7 +838,9 @@ class AgentRunner:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            logger.exception("Permission check failed for tool {!r}, denying by default", tool_call.name)
+            event = {"name": tool_call.name, "status": "denied", "detail": "permission check error"}
+            return "Tool execution denied due to permission check error.", event, None
         try:
             if tool is not None:
                 result = await tool.execute(**params)

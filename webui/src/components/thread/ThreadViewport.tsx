@@ -14,6 +14,7 @@ interface ThreadViewportProps {
   emptyState?: ReactNode;
   scrollToBottomSignal?: number;
   conversationKey?: string | null;
+  onPermissionRespond?: (requestId: string, approved: boolean) => void;
 }
 
 const NEAR_BOTTOM_PX = 48;
@@ -25,6 +26,7 @@ export function ThreadViewport({
   emptyState,
   scrollToBottomSignal = 0,
   conversationKey = null,
+  onPermissionRespond,
 }: ThreadViewportProps) {
   const { t } = useTranslation();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -155,7 +157,7 @@ export function ThreadViewport({
           <div ref={contentRef} className="mx-auto flex min-h-full w-full max-w-[64rem] flex-col">
             <div className="flex-1 px-4 pb-20 pt-4">
               <div className="mx-auto w-full max-w-[49.5rem]">
-                <ThreadMessages messages={messages} isStreaming={isStreaming} />
+                <ThreadMessages messages={messages} isStreaming={isStreaming} onPermissionRespond={onPermissionRespond} />
               </div>
             </div>
 

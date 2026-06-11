@@ -914,6 +914,12 @@ class AgentLoop:
                 if fut and not fut.done():
                     fut.set_result(bool(approved))
                 continue
+            if msg.metadata.get("_permission_disconnect"):
+                for req_id, fut in list(self._permission_futures.items()):
+                    if not fut.done():
+                        fut.set_result(False)
+                self._permission_futures.clear()
+                continue
             if self.commands.is_priority(raw):
                 await self._dispatch_command_inline(
                     msg, msg.session_key, raw,
