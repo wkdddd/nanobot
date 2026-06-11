@@ -88,6 +88,9 @@ class ExecTool(Tool):
             deny_patterns=cfg.deny_patterns,
         )
 
+    def requires_approval(self, params: dict[str, Any]) -> bool:
+        return True
+
     def __init__(
         self,
         timeout: int = 60,

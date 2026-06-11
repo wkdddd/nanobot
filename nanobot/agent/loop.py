@@ -235,6 +235,7 @@ class AgentLoop:
             else defaults.tool_hint_max_length
         )
         self.tools_config = _tc
+        self.permissions_config = _tc
         self.embedding_config = _embedding_config
         self.rerank_config = _rerank_config
         self.web_config = _tc.web
