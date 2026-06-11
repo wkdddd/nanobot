@@ -367,5 +367,16 @@
       "title": "消息过大",
       "body": "服务端因超过大小限制拒收了上一条消息。可移除部分图片或使用更小的图片后重试。"
     }
+  },
+  "permission": {
+    "panelTitle": "工具审批",
+    "recordCount": "{{count}} 条审批记录",
+    "title": "需要授权",
+    "approve": "批准",
+    "deny": "拒绝",
+    "approved": "已批准",
+    "denied": "已拒绝",
+    "toggleOn": "开启本会话工具审批",
+    "toggleOff": "关闭本会话工具审批"
   }
 }

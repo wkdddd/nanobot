@@ -9,6 +9,7 @@ import type {
   OutboundImageGeneration,
   OutboundMedia,
   GoalStateWsPayload,
+  PermissionRequest,
   UIImage,
   UIMessage,
 } from "@/lib/types";
@@ -218,6 +219,14 @@ export function useNanobotStream(
   send: (content: string, images?: SendImage[], options?: SendOptions) => void;
   stop: () => void;
   setMessages: React.Dispatch<React.SetStateAction<UIMessage[]>>;
+  /** Permission requests for the current session. */
+  permissionRecords: PermissionRequest[];
+  /** Whether tool approval is enabled for this session. */
+  sessionApprovalEnabled: boolean;
+  /** Toggle session-level tool approval. */
+  setSessionApproval: (enabled: boolean) => void;
+  /** Respond to a permission request (approve/deny). */
+  respondToPermission: (requestId: string, approved: boolean) => void;
   /** Latest transport-level fault raised since the last ``dismissStreamError``.
    * ``null`` when there is nothing to show. */
   streamError: StreamError | null;
@@ -238,6 +247,8 @@ export function useNanobotStream(
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [goalState, setGoalState] = useState<GoalStateWsPayload | undefined>(undefined);
   const [streamError, setStreamError] = useState<StreamError | null>(null);
+  const [permissionRecords, setPermissionRecords] = useState<PermissionRequest[]>([]);
+  const [sessionApprovalEnabled, setSessionApprovalEnabled] = useState(false);
   const buffer = useRef<StreamBuffer | null>(null);
   const suppressStreamUntilTurnEndRef = useRef(false);
   /** Timer that defers ``isStreaming = false`` after ``stream_end``.
@@ -266,6 +277,8 @@ export function useNanobotStream(
         : false) || hasPendingToolCalls,
     );
     setStreamError(null);
+    setPermissionRecords([]);
+    setSessionApprovalEnabled(false);
     setRunStartedAt(chatId ? client.getRunStartedAt(chatId) : null);
     setGoalState(chatId ? client.getGoalState(chatId) : undefined);
     buffer.current = null;
@@ -373,6 +386,25 @@ export function useNanobotStream(
         } else {
           setRunStartedAt(null);
         }
+        return;
+      }
+
+      if (ev.event === "permission_request") {
+        setPermissionRecords((prev) => [
+          ...prev,
+          {
+            requestId: ev.request_id,
+            toolName: ev.tool_name,
+            arguments: ev.arguments,
+            permission: ev.permission,
+            createdAt: Date.now(),
+          },
+        ]);
+        return;
+      }
+
+      if (ev.event === "session_permission_updated") {
+        setSessionApprovalEnabled(ev.approval_enabled);
         return;
       }
 
@@ -538,6 +570,28 @@ export function useNanobotStream(
     client.sendMessage(chatId, "/stop");
   }, [chatId, client]);
 
+  const respondToPermission = useCallback(
+    (requestId: string, approved: boolean) => {
+      if (!chatId) return;
+      setPermissionRecords((prev) =>
+        prev.map((r) =>
+          r.requestId === requestId ? { ...r, resolved: true, approved } : r,
+        ),
+      );
+      client.sendPermissionResponse(chatId, requestId, approved);
+    },
+    [chatId, client],
+  );
+
+  const setSessionApproval = useCallback(
+    (enabled: boolean) => {
+      if (!chatId) return;
+      setSessionApprovalEnabled(enabled);
+      client.sendSetSessionPermission(chatId, enabled);
+    },
+    [chatId, client],
+  );
+
   return {
     messages,
     isStreaming,
@@ -546,6 +600,10 @@ export function useNanobotStream(
     send,
     stop,
     setMessages,
+    permissionRecords,
+    sessionApprovalEnabled,
+    setSessionApproval,
+    respondToPermission,
     streamError,
     dismissStreamError,
   };

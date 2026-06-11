@@ -238,6 +238,19 @@ export type InboundEvent =
       goal_state: GoalStateWsPayload;
     }
   | { event: "session_updated"; chat_id: string }
+  | {
+      event: "permission_request";
+      chat_id: string;
+      request_id: string;
+      tool_name: string;
+      arguments?: Record<string, unknown>;
+      permission?: "user_approval";
+    }
+  | {
+      event: "session_permission_updated";
+      chat_id: string;
+      approval_enabled: boolean;
+    }
   | { event: "error"; chat_id?: string; detail?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
@@ -266,6 +279,16 @@ export interface WebuiThreadPersistedPayload {
   messages: UIMessage[];
 }
 
+export interface PermissionRequest {
+  requestId: string;
+  toolName: string;
+  arguments?: Record<string, unknown>;
+  permission?: "user_approval";
+  resolved?: boolean;
+  approved?: boolean;
+  createdAt: number;
+}
+
 export type Outbound =
   | { type: "new_chat" }
   | { type: "attach"; chat_id: string }
@@ -278,4 +301,15 @@ export type Outbound =
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;
+    }
+  | {
+      type: "permission_response";
+      chat_id: string;
+      request_id: string;
+      approved: boolean;
+    }
+  | {
+      type: "set_session_permission";
+      chat_id: string;
+      approval_enabled: boolean;
     };

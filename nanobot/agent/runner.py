@@ -82,6 +82,8 @@ class AgentRunSpec:
     checkpoint_callback: Any | None = None
     injection_callback: Any | None = None
     llm_timeout_s: float | None = None
+    permission_policy: Any | None = None
+    permission_request_callback: Any | None = None
 
 
 @dataclass(slots=True)
@@ -815,6 +817,28 @@ class AgentRunner:
             return prep_error + hint, event, (
                 RuntimeError(prep_error) if spec.fail_on_tool_error else None
             )
+        try:
+            if spec.permission_policy and spec.permission_request_callback:
+                from nanobot.agent.tools.permissions import PermissionVerdict, check_permission
+                verdict = check_permission(tool_call.name, tool, params, spec.permission_policy)
+                if verdict == PermissionVerdict.CONFIRM:
+                    import uuid as _uuid
+                    request_id = str(_uuid.uuid4())
+                    payload = {
+                        "request_id": request_id,
+                        "tool_name": tool_call.name,
+                        "arguments": params,
+                        "permission": "user_approval",
+                    }
+                    future: asyncio.Future[bool] = asyncio.get_event_loop().create_future()
+                    approved = await spec.permission_request_callback(request_id, payload, future)
+                    if not approved:
+                        event = {"name": tool_call.name, "status": "denied", "detail": "user denied"}
+                        return "Tool execution denied by user.", event, None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
         try:
             if tool is not None:
                 result = await tool.execute(**params)

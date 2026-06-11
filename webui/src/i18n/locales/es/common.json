@@ -345,5 +345,16 @@
       "title": "Mensaje demasiado grande",
       "body": "El servidor rechazó tu último mensaje por superar el tamaño permitido. Quita algunas imágenes o usa archivos más pequeños y vuelve a enviarlo."
     }
+  },
+  "permission": {
+    "panelTitle": "Aprobaciones de herramientas",
+    "recordCount": "{{count}} aprobación(es)",
+    "title": "Permiso requerido",
+    "approve": "Aprobar",
+    "deny": "Denegar",
+    "approved": "Aprobado",
+    "denied": "Denegado",
+    "toggleOn": "Activar aprobación de herramientas para esta sesión",
+    "toggleOff": "Desactivar aprobación de herramientas para esta sesión"
   }
 }

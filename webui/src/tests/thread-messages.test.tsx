@@ -5,6 +5,52 @@ import { ThreadMessages } from "@/components/thread/ThreadMessages";
 import type { UIMessage } from "@/lib/types";
 
 describe("ThreadMessages", () => {
+  it("renders a lone streaming reasoning row directly so the text stays visible", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "r-live",
+        role: "assistant",
+        content: "",
+        reasoning: "live thought",
+        reasoningStreaming: true,
+        isStreaming: true,
+        createdAt: Date.now(),
+      },
+    ];
+
+    render(<ThreadMessages messages={messages} isStreaming />);
+
+    expect(screen.getByRole("button", { name: /thinking/i })).toBeInTheDocument();
+    expect(screen.getByText("live thought")).toBeInTheDocument();
+    expect(screen.queryByText(/Working/)).not.toBeInTheDocument();
+  });
+
+  it("auto-expands activity clusters while reasoning is streaming", () => {
+    const messages: UIMessage[] = [
+      {
+        id: "r-live-tool",
+        role: "assistant",
+        content: "",
+        reasoning: "inspect before tool",
+        reasoningStreaming: true,
+        isStreaming: true,
+        createdAt: Date.now(),
+      },
+      {
+        id: "t-live",
+        role: "tool",
+        kind: "trace",
+        content: "search()",
+        traces: ["search()"],
+        createdAt: Date.now(),
+      },
+    ];
+
+    render(<ThreadMessages messages={messages} isStreaming />);
+
+    expect(screen.getByText("inspect before tool")).toBeInTheDocument();
+  });
+
   it("groups consecutive reasoning and tool rows into one cluster before the answer", () => {
     const messages: UIMessage[] = [
       {

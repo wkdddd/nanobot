@@ -345,5 +345,16 @@
       "title": "Tin nhắn quá lớn",
       "body": "Máy chủ đã từ chối tin nhắn trước vì vượt quá giới hạn kích thước. Hãy bớt ảnh hoặc chọn tệp nhỏ hơn rồi thử lại."
     }
+  },
+  "permission": {
+    "panelTitle": "Phê duyệt công cụ",
+    "recordCount": "{{count}} bản ghi phê duyệt",
+    "title": "Cần quyền truy cập",
+    "approve": "Chấp thuận",
+    "deny": "Từ chối",
+    "approved": "Đã chấp thuận",
+    "denied": "Đã từ chối",
+    "toggleOn": "Bật phê duyệt công cụ cho phiên này",
+    "toggleOff": "Tắt phê duyệt công cụ cho phiên này"
   }
 }

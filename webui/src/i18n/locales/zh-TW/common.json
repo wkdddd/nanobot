@@ -345,5 +345,16 @@
       "title": "訊息過大",
       "body": "伺服器因超過大小限制拒收了上一則訊息。可移除部分圖片或改用較小的圖片後再試。"
     }
+  },
+  "permission": {
+    "panelTitle": "工具審批",
+    "recordCount": "{{count}} 條審批記錄",
+    "title": "需要授權",
+    "approve": "批准",
+    "deny": "拒絕",
+    "approved": "已批准",
+    "denied": "已拒絕",
+    "toggleOn": "開啟本會話工具審批",
+    "toggleOff": "關閉本會話工具審批"
   }
 }

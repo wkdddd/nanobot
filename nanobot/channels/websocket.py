@@ -30,7 +30,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
-from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
+from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import builtin_command_palette
@@ -1539,6 +1539,45 @@ class WebSocketChannel(BaseChannel):
                 is_dm=False,
             )
             return
+        if t == "permission_response":
+            request_id = envelope.get("request_id")
+            approved = envelope.get("approved", False)
+            cid = envelope.get("chat_id")
+            if not isinstance(request_id, str) or not request_id:
+                await self._send_event(connection, "error", detail="missing request_id")
+                return
+            if not _is_valid_chat_id(cid):
+                await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            await self.bus.publish_inbound(
+                InboundMessage(
+                    channel="websocket",
+                    chat_id=cid,
+                    sender_id=client_id,
+                    content="",
+                    metadata={"_permission_response": {"request_id": request_id, "approved": bool(approved)}},
+                )
+            )
+            return
+        if t == "set_session_permission":
+            cid = envelope.get("chat_id")
+            approval_enabled = bool(envelope.get("approval_enabled", False))
+            if not _is_valid_chat_id(cid):
+                await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            if self._session_manager is not None:
+                session_key = f"websocket:{cid}"
+                session = self._session_manager.get_or_create(session_key)
+                perms = session.metadata.setdefault("permissions", {})
+                perms["approval_enabled"] = approval_enabled
+                self._session_manager.save(session)
+            await self._send_event(
+                connection,
+                "session_permission_updated",
+                chat_id=cid,
+                approval_enabled=approval_enabled,
+            )
+            return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
 
     async def stop(self) -> None:
@@ -1576,6 +1615,18 @@ class WebSocketChannel(BaseChannel):
                 model_name=msg.metadata.get("model"),
                 model_preset=msg.metadata.get("model_preset"),
             )
+            return
+
+        if msg.metadata.get("_permission_request"):
+            payload = msg.metadata["_permission_request"]
+            conns = list(self._subs.get(msg.chat_id, ()))
+            for conn in conns:
+                await self._send_event(
+                    conn,
+                    "permission_request",
+                    chat_id=msg.chat_id,
+                    **payload,
+                )
             return
 
         # Snapshot the subscriber set so ConnectionClosed cleanups mid-iteration are safe.

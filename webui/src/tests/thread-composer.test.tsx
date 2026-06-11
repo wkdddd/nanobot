@@ -252,6 +252,22 @@ describe("ThreadComposer", () => {
     expect(screen.queryByRole("button", { name: "Send message" })).not.toBeInTheDocument();
   });
 
+  it("shows a session approval toggle even before permission requests arrive", () => {
+    const onSessionApprovalChange = vi.fn();
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        sessionApprovalEnabled={false}
+        onSessionApprovalChange={onSessionApprovalChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable tool approval for this session" }));
+
+    expect(onSessionApprovalChange).toHaveBeenCalledWith(true);
+  });
+
   it("lets users select a concrete image aspect ratio", () => {
     const onSend = vi.fn();
     render(

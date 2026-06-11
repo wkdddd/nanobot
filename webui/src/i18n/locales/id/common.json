@@ -345,5 +345,16 @@
       "title": "Pesan terlalu besar",
       "body": "Server menolak pesan terakhir karena melebihi batas ukuran. Hapus beberapa gambar atau gunakan berkas yang lebih kecil, lalu coba lagi."
     }
+  },
+  "permission": {
+    "panelTitle": "Persetujuan Alat",
+    "recordCount": "{{count}} catatan persetujuan",
+    "title": "Izin Diperlukan",
+    "approve": "Setujui",
+    "deny": "Tolak",
+    "approved": "Disetujui",
+    "denied": "Ditolak",
+    "toggleOn": "Aktifkan persetujuan alat untuk sesi ini",
+    "toggleOff": "Nonaktifkan persetujuan alat untuk sesi ini"
   }
 }

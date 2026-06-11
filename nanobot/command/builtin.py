@@ -111,6 +111,13 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "shield",
         "[list|approve <code>|deny <code>|revoke <user_id>]",
     ),
+    BuiltinCommandSpec(
+        "/permission",
+        "Show deny-list policy",
+        "Show tool execution deny-list policy.",
+        "lock",
+        "[show]",
+    ),
 )
 
 
@@ -628,6 +635,40 @@ def build_help_text() -> str:
     return "\n".join(lines)
 
 
+async def cmd_permission(ctx: CommandContext) -> OutboundMessage:
+    """Show the active tool deny-list policy."""
+    msg = ctx.msg
+    session = ctx.session or ctx.loop.sessions.get_or_create(ctx.key)
+    args = ctx.args.strip().lower()
+    meta = {"render_as": "text", **(msg.metadata or {})}
+
+    if not args or args == "show":
+        exec_cfg = getattr(ctx.loop, "exec_config", None)
+        user_deny = list(getattr(exec_cfg, "deny_patterns", []) or [])
+        user_allow = list(getattr(exec_cfg, "allow_patterns", []) or [])
+        lines = [
+            f"Tool deny-list policy (session: {session.key})",
+            "  default: allow tool calls",
+            "  blocked: built-in exec deny-list, tools.exec.denyPatterns, SSRF/internal URLs, workspace boundaries",
+            f"  configured denyPatterns: {len(user_deny)}",
+            f"  configured allowPatterns: {len(user_allow)}",
+        ]
+        if user_deny:
+            lines.append("  denyPatterns:")
+            lines.extend(f"    - {pattern}" for pattern in user_deny)
+        if user_allow:
+            lines.append("  allowPatterns:")
+            lines.extend(f"    - {pattern}" for pattern in user_allow)
+        content = "\n".join(lines)
+
+    else:
+        content = "Usage: /permission [show]"
+
+    return OutboundMessage(
+        channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
+    )
+
+
 def register_builtin_commands(router: CommandRouter) -> None:
     """Register the default set of slash commands."""
     router.priority("/stop", cmd_stop)
@@ -649,3 +690,5 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.exact("/help", cmd_help)
     router.exact("/pairing", cmd_pairing)
     router.prefix("/pairing ", cmd_pairing)
+    router.exact("/permission", cmd_permission)
+    router.prefix("/permission ", cmd_permission)

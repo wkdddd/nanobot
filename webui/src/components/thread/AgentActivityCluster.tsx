@@ -48,11 +48,15 @@ export function AgentActivityCluster({
   const { t } = useTranslation();
   const reasoningSteps = messages.filter(isReasoningOnlyAssistant).length;
   const toolCalls = countToolCalls(messages);
+  const hasStreamingReasoning = messages.some(
+    (m) => isReasoningOnlyAssistant(m) && !!m.reasoningStreaming,
+  );
+  const hasToolTrace = messages.some((m) => m.kind === "trace");
 
   const [userToggledOuter, setUserToggledOuter] = useState(false);
   const [outerOpenLocal, setOuterOpenLocal] = useState(false);
-  /** Collapsed by default during “Working…” and after the turn; user expands to inspect traces. */
-  const outerExpanded = userToggledOuter ? outerOpenLocal : false;
+  /** Keep live reasoning visible; finished activity stays compact until the user expands it. */
+  const outerExpanded = userToggledOuter ? outerOpenLocal : hasStreamingReasoning;
 
   const headerBusy = isTurnStreaming;
 
@@ -83,6 +87,17 @@ export function AgentActivityCluster({
     setUserToggledOuter(true);
     setOuterOpenLocal((v) => (userToggledOuter ? !v : !outerExpanded));
   };
+
+  if (!hasToolTrace && messages.length === 1 && isReasoningOnlyAssistant(messages[0])) {
+    const m = messages[0];
+    return (
+      <ReasoningBubble
+        text={m.reasoning ?? ""}
+        streaming={!!m.reasoningStreaming}
+        hasBodyBelow={hasBodyBelow}
+      />
+    );
+  }
 
   return (
     <div className={cn("w-full", hasBodyBelow && "mb-2")}>

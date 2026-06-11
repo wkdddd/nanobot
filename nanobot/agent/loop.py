@@ -191,7 +191,11 @@ class AgentLoop:
         unsplash_provider_config:ProviderConfig | None = None,
         unsplash_provider_configs:dict[str, ProviderConfig] | None = None,
     ):
-        from nanobot.config.schema import EmbeddingConfig, RerankConfig, ToolsConfig
+        from nanobot.config.schema import (
+            EmbeddingConfig,
+            RerankConfig,
+            ToolsConfig,
+        )
 
         _tc = tools_config or ToolsConfig()
         _embedding_config = (
@@ -292,6 +296,7 @@ class AgentLoop:
         # When a session has an active task, new messages for that session
         # are routed here instead of creating a new task.
         self._pending_queues: dict[str, asyncio.Queue] = {}
+        self._permission_futures: dict[str, asyncio.Future[bool]] = {}
         # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
         _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
         self._concurrency_gate: asyncio.Semaphore | None = (
@@ -792,6 +797,34 @@ class AgentLoop:
         active_session_key = session.key if session else session_key
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
         try:
+            from nanobot.agent.tools.permissions import resolve_policy
+            _session_meta = session.metadata if session is not None else {}
+            permission_policy = resolve_policy(
+                getattr(self, "permissions_config", None),
+                _session_meta,
+            )
+
+            async def _permission_request_cb(
+                request_id: str,
+                payload: dict[str, Any],
+                future: asyncio.Future[bool],
+            ) -> bool:
+                self._permission_futures[request_id] = future
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel=channel,
+                        chat_id=chat_id,
+                        content="",
+                        metadata={"_permission_request": payload},
+                    )
+                )
+                try:
+                    return await asyncio.wait_for(future, timeout=300)
+                except asyncio.TimeoutError:
+                    return False
+                finally:
+                    self._permission_futures.pop(request_id, None)
+
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=initial_messages,
                 tools=self.tools,
@@ -818,6 +851,8 @@ class AgentLoop:
                     session.key if session is not None else session_key,
                     metadata=(session.metadata if session is not None else None),
                 ),
+                permission_policy=permission_policy,
+                permission_request_callback=_permission_request_cb,
             ))
         finally:
             reset_file_states(file_state_token)
@@ -870,6 +905,14 @@ class AgentLoop:
                 continue
 
             raw = msg.content.strip()
+            if msg.metadata.get("_permission_response"):
+                resp = msg.metadata["_permission_response"]
+                req_id = resp.get("request_id")
+                approved = resp.get("approved", False)
+                fut = self._permission_futures.pop(req_id, None)
+                if fut and not fut.done():
+                    fut.set_result(bool(approved))
+                continue
             if self.commands.is_priority(raw):
                 await self._dispatch_command_inline(
                     msg, msg.session_key, raw,

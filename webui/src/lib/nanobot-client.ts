@@ -302,6 +302,23 @@ export class NanobotClient {
     this.queueSend(frame);
   }
 
+  sendPermissionResponse(chatId: string, requestId: string, approved: boolean): void {
+    this.queueSend({
+      type: "permission_response",
+      chat_id: chatId,
+      request_id: requestId,
+      approved,
+    });
+  }
+
+  sendSetSessionPermission(chatId: string, approvalEnabled: boolean): void {
+    this.queueSend({
+      type: "set_session_permission",
+      chat_id: chatId,
+      approval_enabled: approvalEnabled,
+    });
+  }
+
   // -- internals ---------------------------------------------------------
 
   private setStatus(status: ConnectionStatus): void {

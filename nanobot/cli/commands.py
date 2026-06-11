@@ -1129,24 +1129,34 @@ def agent(
                 bot_name=config.agents.defaults.bot_name,
                 bot_icon=config.agents.defaults.bot_icon,
             )
-            response = await agent_loop.process_direct(
-                message, session_id,
-                on_progress=_make_progress(renderer),
-                on_stream=renderer.on_delta,
-                on_stream_end=renderer.on_end,
-            )
-            if not renderer.streamed:
-                await renderer.close()
-                print_kwargs: dict[str, Any] = {}
-                if renderer.header_printed:
-                    print_kwargs["show_header"] = False
-                _print_agent_response(
-                    response.content if response else "",
-                    render_markdown=markdown,
-                    metadata=response.metadata if response else None,
-                    **print_kwargs,
+            if ":" in session_id:
+                direct_channel, direct_chat_id = session_id.split(":", 1)
+            else:
+                direct_channel, direct_chat_id = "cli", session_id
+
+            try:
+                response = await agent_loop.process_direct(
+                    message,
+                    session_id,
+                    channel=direct_channel,
+                    chat_id=direct_chat_id,
+                    on_progress=_make_progress(renderer),
+                    on_stream=renderer.on_delta,
+                    on_stream_end=renderer.on_end,
                 )
-            await agent_loop.close_mcp()
+                if not renderer.streamed:
+                    await renderer.close()
+                    print_kwargs: dict[str, Any] = {}
+                    if renderer.header_printed:
+                        print_kwargs["show_header"] = False
+                    _print_agent_response(
+                        response.content if response else "",
+                        render_markdown=markdown,
+                        metadata=response.metadata if response else None,
+                        **print_kwargs,
+                    )
+            finally:
+                await agent_loop.close_mcp()
 
         asyncio.run(run_once())
     else:

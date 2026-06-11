@@ -379,5 +379,16 @@
       "title": "Message too large",
       "body": "The server rejected your last message because it exceeded the size limit. Remove some images or try smaller files, then send again."
     }
+  },
+  "permission": {
+    "panelTitle": "Tool Approvals",
+    "recordCount": "{{count}} approval(s)",
+    "title": "Permission Required",
+    "approve": "Approve",
+    "deny": "Deny",
+    "approved": "Approved",
+    "denied": "Denied",
+    "toggleOn": "Enable tool approval for this session",
+    "toggleOff": "Disable tool approval for this session"
   }
 }

@@ -98,6 +98,7 @@ export function ThreadShell({
   const [booting, setBooting] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [heroImageMode, setHeroImageMode] = useState(false);
+  const [newChatApprovalEnabled, setNewChatApprovalEnabled] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
   const pendingFirstRef = useRef<PendingFirstMessage | null>(null);
   const messageCacheRef = useRef<Map<string, UIMessage[]>>(new Map());
@@ -124,6 +125,10 @@ export function ThreadShell({
     send,
     stop,
     setMessages,
+    permissionRecords,
+    sessionApprovalEnabled,
+    setSessionApproval,
+    respondToPermission,
     streamError,
     dismissStreamError,
   } = useNanobotStream(chatId, initial, hasPendingToolCalls, handleTurnEnd);
@@ -226,10 +231,14 @@ export function ThreadShell({
     const pending = pendingFirstRef.current;
     if (!pending) return;
     pendingFirstRef.current = null;
+    if (newChatApprovalEnabled) {
+      setSessionApproval(true);
+      setNewChatApprovalEnabled(false);
+    }
     setScrollToBottomSignal((value) => value + 1);
     send(pending.content, pending.images, pending.options);
     setBooting(false);
-  }, [chatId, send]);
+  }, [chatId, newChatApprovalEnabled, send, setSessionApproval]);
 
   useEffect(() => {
     let cancelled = false;
@@ -336,6 +345,10 @@ export function ThreadShell({
           onStop={stop}
           runStartedAt={runStartedAt}
           goalState={goalState}
+          sessionApprovalEnabled={sessionApprovalEnabled}
+          onSessionApprovalChange={setSessionApproval}
+          permissionRecords={permissionRecords}
+          onPermissionRespond={respondToPermission}
         />
       ) : (
         <ThreadComposer
@@ -354,6 +367,8 @@ export function ThreadShell({
           onImageModeChange={setHeroImageMode}
           runStartedAt={runStartedAt}
           goalState={goalState}
+          sessionApprovalEnabled={newChatApprovalEnabled}
+          onSessionApprovalChange={setNewChatApprovalEnabled}
         />
       )}
       {showHeroComposer ? quickActions : null}

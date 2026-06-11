@@ -1136,12 +1136,16 @@ MCP tools are automatically discovered and registered on startup. The LLM can us
 > [!TIP]
 > For production deployments, set `"restrictToWorkspace": true` and `"tools.exec.sandbox": "bwrap"` in your config to sandbox the agent.
 
+Tool execution uses a deny-list policy. Tools and shell commands are allowed by default unless they match an explicit block rule: built-in dangerous shell patterns, user-configured `tools.exec.denyPatterns`, SSRF/internal URL guards, workspace boundary checks, or `tools.exec.allowPatterns` when you intentionally configure an allowlist.
+
 | Option | Default | Description |
 |--------|---------|-------------|
 | `tools.restrictToWorkspace` | `false` | When `true`, restricts **all** agent tools (shell, file read/write/edit, list) to the workspace directory. Prevents path traversal and out-of-scope access. |
 | `tools.exec.sandbox` | `""` | Sandbox backend for shell commands. Set to `"bwrap"` to wrap exec calls in a [bubblewrap](https://github.com/containers/bubblewrap) sandbox — the process can only see the workspace (read-write) and media directory (read-only); config files and API keys are hidden. Automatically enables `restrictToWorkspace` for file tools. **Linux only** — requires `bwrap` installed (`apt install bubblewrap`; pre-installed in the Docker image). Not available on macOS or Windows (bwrap depends on Linux kernel namespaces). |
 | `tools.exec.enable` | `true` | When `false`, the shell `exec` tool is not registered at all. Use this to completely disable shell command execution. |
 | `tools.exec.pathAppend` | `""` | Extra directories to append to `PATH` when running shell commands (e.g. `/usr/sbin` for `ufw`). |
+| `tools.exec.denyPatterns` | `[]` | Additional regular expressions for shell commands to block. These are combined with nanobot's built-in dangerous-command deny-list. |
+| `tools.exec.allowPatterns` | `[]` | Optional regular expressions for an explicit shell allowlist. When non-empty, commands that do not match are blocked; matching commands are allowed before deny-pattern checks. |
 | `channels.*.allowFrom` | omitted | Access control per channel. Omit to use pairing-only mode; set `["*"]` to allow everyone; or list specific user IDs. See [Pairing](#pairing) for details. |
 
 **Docker security**: The official Docker image runs as a non-root user (`nanobot`, UID 1000) with bubblewrap pre-installed. When using `docker-compose.yml`, the container drops all Linux capabilities except `SYS_ADMIN` (required for bwrap's namespace isolation).
