@@ -72,11 +72,6 @@ class ChannelManager:
         """Initialize channels discovered via pkgutil scan + entry_points plugins."""
         from nanobot.channels.registry import discover_all
 
-        transcription_provider = self.config.channels.transcription_provider
-        transcription_key = self._resolve_transcription_key(transcription_provider)
-        transcription_base = self._resolve_transcription_base(transcription_provider)
-        transcription_language = self.config.channels.transcription_language
-
         for name, cls in discover_all().items():
             section = getattr(self.config.channels, name, None)
             if section is None:
@@ -101,10 +96,6 @@ class ChannelManager:
                     if self._webui_runtime_model_name is not None:
                         kwargs["runtime_model_name"] = self._webui_runtime_model_name
                 channel = cls(section, self.bus, **kwargs)
-                channel.transcription_provider = transcription_provider
-                channel.transcription_api_key = transcription_key
-                channel.transcription_api_base = transcription_base
-                channel.transcription_language = transcription_language
                 channel.send_progress = self._resolve_bool_override(
                     section, "send_progress", self.config.channels.send_progress,
                 )
@@ -120,24 +111,6 @@ class ChannelManager:
                 logger.warning("{} channel not available: {}", name, e)
 
         self._validate_allow_from()
-
-    def _resolve_transcription_key(self, provider: str) -> str:
-        """Pick the API key for the configured transcription provider."""
-        try:
-            if provider == "openai":
-                return self.config.providers.openai.api_key
-            return self.config.providers.groq.api_key
-        except AttributeError:
-            return ""
-
-    def _resolve_transcription_base(self, provider: str) -> str:
-        """Pick the API base URL for the configured transcription provider."""
-        try:
-            if provider == "openai":
-                return self.config.providers.openai.api_base or ""
-            return self.config.providers.groq.api_base or ""
-        except AttributeError:
-            return ""
 
     def _validate_allow_from(self) -> None:
         for name, ch in self.channels.items():

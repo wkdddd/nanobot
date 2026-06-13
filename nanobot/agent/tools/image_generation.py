@@ -16,11 +16,19 @@ from nanobot.agent.tools.schema import (
 )
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
-from nanobot.providers.image_generation import (
-    AIHubMixImageGenerationClient,
-    ImageGenerationError,
-    OpenRouterImageGenerationClient,
-)
+
+try:
+    from nanobot.providers.image_generation import (
+        AIHubMixImageGenerationClient,
+        ImageGenerationError,
+        OpenRouterImageGenerationClient,
+    )
+except ImportError:
+    AIHubMixImageGenerationClient = None  # type: ignore[assignment,misc]
+    OpenRouterImageGenerationClient = None  # type: ignore[assignment,misc]
+
+    class ImageGenerationError(Exception):  # type: ignore[no-redef]
+        pass
 from nanobot.utils.artifacts import (
     ArtifactError,
     generated_image_tool_result,

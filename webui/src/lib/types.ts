@@ -253,6 +253,11 @@ export type InboundEvent =
       chat_id: string;
       approval_enabled: boolean;
     }
+  | {
+      event: "review_mode_updated";
+      chat_id: string;
+      enabled: boolean;
+    }
   | { event: "error"; chat_id?: string; detail?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
@@ -314,4 +319,9 @@ export type Outbound =
       type: "set_session_permission";
       chat_id: string;
       approval_enabled: boolean;
+    }
+  | {
+      type: "set_review_mode";
+      chat_id: string;
+      enabled: boolean;
     };

@@ -99,6 +99,7 @@ export function ThreadShell({
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [heroImageMode, setHeroImageMode] = useState(false);
   const [newChatApprovalEnabled, setNewChatApprovalEnabled] = useState(false);
+  const [newChatReviewEnabled, setNewChatReviewEnabled] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
   const pendingFirstRef = useRef<PendingFirstMessage | null>(null);
   const messageCacheRef = useRef<Map<string, UIMessage[]>>(new Map());
@@ -127,6 +128,8 @@ export function ThreadShell({
     setMessages,
     sessionApprovalEnabled,
     setSessionApproval,
+    reviewModeEnabled,
+    setReviewMode,
     respondToPermission,
     streamError,
     dismissStreamError,
@@ -234,10 +237,14 @@ export function ThreadShell({
       setSessionApproval(true);
       setNewChatApprovalEnabled(false);
     }
+    if (newChatReviewEnabled) {
+      setReviewMode(true);
+      setNewChatReviewEnabled(false);
+    }
     setScrollToBottomSignal((value) => value + 1);
     send(pending.content, pending.images, pending.options);
     setBooting(false);
-  }, [chatId, newChatApprovalEnabled, send, setSessionApproval]);
+  }, [chatId, newChatApprovalEnabled, newChatReviewEnabled, send, setSessionApproval, setReviewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -346,6 +353,8 @@ export function ThreadShell({
           goalState={goalState}
           sessionApprovalEnabled={sessionApprovalEnabled}
           onSessionApprovalChange={setSessionApproval}
+          reviewModeEnabled={reviewModeEnabled}
+          onReviewModeChange={setReviewMode}
         />
       ) : (
         <ThreadComposer
@@ -366,6 +375,8 @@ export function ThreadShell({
           goalState={goalState}
           sessionApprovalEnabled={newChatApprovalEnabled}
           onSessionApprovalChange={setNewChatApprovalEnabled}
+          reviewModeEnabled={newChatReviewEnabled}
+          onReviewModeChange={setNewChatReviewEnabled}
         />
       )}
       {showHeroComposer ? quickActions : null}

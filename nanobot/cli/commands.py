@@ -1053,8 +1053,69 @@ def _run_gateway(
 # ============================================================================
 # Agent Commands
 # ============================================================================
+from nanobot.agent.review.runner import ReviewResult, ReviewRunSpec, run_review
+from  nanobot.bus.queue import MessageBus
+@app.command()
+def review(
+    target: str = typer.Argument(..., help="Local repository path or GitHub repository URL"),
+    focus: str | None = typer.Option(
+        None,
+        "--focus",
+        "-f",
+        help="Comma-separated review focus, e.g. security,tests,architecture,performance",
+    ),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
+    markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render output as Markdown"),
+    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show runtime logs"),
+    output: str | None = typer.Option(None, "--output", "-o", help="Save report to file"),
+):
+    """Review a local or GitHub repository with CodeReviewAgent."""
+    from nanobot.cli.stream import StreamRenderer
 
+    loaded = _load_runtime_config(config, workspace)
+    sync_workspace_templates(loaded.workspace_path)
 
+    if logs:
+        logger.enable("nanobot")
+    else:
+        logger.disable("nanobot")
+
+    bus = MessageBus()
+    agent_loop = AgentLoop.from_config(loaded, bus)
+
+    renderer = StreamRenderer(
+        render_markdown=markdown,
+        bot_name="CodeReviewAgent",
+    )
+
+    async def run_once() -> None:
+        try:
+            try:
+                result = await run_review(
+                    config=loaded,
+                    agent_loop=agent_loop,
+                    spec=ReviewRunSpec(target=target, focus=focus),
+                    on_stream=renderer.on_delta,
+                    on_stream_end=renderer.on_end,
+                )
+            except ValueError as exc:
+                console.print(f"[red]Error: {exc}[/red]")
+                raise typer.Exit(1) from exc
+
+            if not renderer.streamed:
+                _print_agent_response(result.to_markdown(), render_markdown=markdown)
+
+            if output:
+                _save_review_report(output, result)
+
+            if result.has_critical():
+                raise typer.Exit(2)
+
+        finally:
+            await agent_loop.close_mcp()
+
+    asyncio.run(run_once())
 @app.command()
 def agent(
     message: str = typer.Option(None, "--message", "-m", help="Message to send to the agent"),
@@ -1307,6 +1368,21 @@ def agent(
         asyncio.run(run_interactive())
 
 
+def _save_review_report(output_path: str, result: ReviewResult) -> None:
+    """Save review report to file. Format determined by extension."""
+    path = Path(output_path).expanduser()
+
+    if not path.suffix:
+        path = path.with_suffix(".md")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.suffix == ".json":
+        path.write_text(result.to_json(), encoding="utf-8")
+    else:
+        path.write_text(result.to_markdown(), encoding="utf-8")
+
+    console.print(f"[green]Report saved to {path}[/green]")
 # ============================================================================
 # Channel Commands
 # ============================================================================
@@ -1432,6 +1508,8 @@ def plugins_list():
 # ============================================================================
 
 
+
+
 @app.command()
 def status():
     """Show nanobot status."""
@@ -1483,7 +1561,6 @@ _LOGOUT_HANDLERS: dict[str, Callable[[], None]] = {}
 
 _PROVIDER_DISPLAY: dict[str, str] = {
     "openai_codex": "OpenAI Codex",
-    "github_copilot": "GitHub Copilot",
 }
 
 
@@ -1586,19 +1663,6 @@ def _logout_openai_codex() -> None:
     _delete_oauth_files(storage.get_token_path(), _PROVIDER_DISPLAY["openai_codex"])
 
 
-@_register_logout("github_copilot")
-def _logout_github_copilot() -> None:
-    """Clear local OAuth credentials for GitHub Copilot."""
-    try:
-        from nanobot.providers.github_copilot_provider import get_storage
-    except ImportError:
-        console.print("[red]GitHub Copilot provider unavailable. Ensure oauth-cli-kit is installed.[/red]")
-        raise typer.Exit(1)
-
-    storage = get_storage()
-    _delete_oauth_files(storage.get_token_path(), _PROVIDER_DISPLAY["github_copilot"])
-
-
 def _delete_oauth_files(token_path: Path, provider_label: str) -> None:
     """Delete OAuth token and lock files, reporting the result."""
     removed_paths: list[Path] = []
@@ -1623,23 +1687,6 @@ def _delete_oauth_files(token_path: Path, provider_label: str) -> None:
             console.print(f"[dim]Removed: {path}[/dim]")
     for path, exc in skipped:
         console.print(f"[yellow]! Could not remove {path}: {exc}[/yellow]")
-
-
-@_register_login("github_copilot")
-def _login_github_copilot() -> None:
-    try:
-        from nanobot.providers.github_copilot_provider import login_github_copilot
-
-        console.print("[cyan]Starting GitHub Copilot device flow...[/cyan]\n")
-        token = login_github_copilot(
-            print_fn=lambda s: console.print(s),
-            prompt_fn=lambda s: typer.prompt(s),
-        )
-        account = token.account_id or "GitHub"
-        console.print(f"[green]✓ Authenticated with GitHub Copilot[/green]  [dim]{account}[/dim]")
-    except Exception as e:
-        console.print(f"[red]Authentication error: {e}[/red]")
-        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

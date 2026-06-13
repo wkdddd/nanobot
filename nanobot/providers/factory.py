@@ -43,10 +43,7 @@ def _make_provider_core(
     spec = find_by_name(provider_name) if provider_name else None
     backend = spec.backend if spec else "openai_compat"
 
-    if backend == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            raise ValueError("Azure OpenAI requires api_key and api_base in config.")
-    elif backend == "openai_compat" and not model.startswith("bedrock/"):
+    if backend == "openai_compat":
         needs_key = not (p and p.api_key)
         exempt = spec and (spec.is_oauth or spec.is_local or spec.is_direct)
         if needs_key and not exempt:
@@ -56,18 +53,6 @@ def _make_provider_core(
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
 
         provider = OpenAICodexProvider(default_model=model)
-    elif backend == "azure_openai":
-        from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
-
-        provider = AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
-            default_model=model,
-        )
-    elif backend == "github_copilot":
-        from nanobot.providers.github_copilot_provider import GitHubCopilotProvider
-
-        provider = GitHubCopilotProvider(default_model=model)
     elif backend == "anthropic":
         from nanobot.providers.anthropic_provider import AnthropicProvider
 
@@ -76,17 +61,6 @@ def _make_provider_core(
             api_base=config.get_api_base(model, preset=resolved),
             default_model=model,
             extra_headers=p.extra_headers if p else None,
-        )
-    elif backend == "bedrock":
-        from nanobot.providers.bedrock_provider import BedrockProvider
-
-        provider = BedrockProvider(
-            api_key=p.api_key if p else None,
-            api_base=p.api_base if p else None,
-            default_model=model,
-            region=getattr(p, "region", None) if p else None,
-            profile=getattr(p, "profile", None) if p else None,
-            extra_body=p.extra_body if p else None,
         )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider

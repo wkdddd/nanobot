@@ -45,7 +45,6 @@ IMAP_PASSWORD=your-password-here
 ## Providers
 
 > [!TIP]
-> - **Voice transcription**: Voice messages (Telegram, WhatsApp) are automatically transcribed using Whisper. By default Groq is used (free tier). Set `"transcriptionProvider": "openai"` under `channels` to use OpenAI Whisper instead, and optionally set `"transcriptionLanguage": "en"` (or another ISO-639-1 code) for more accurate transcription. The API key is picked from the matching provider config.
 > - **MiniMax Coding Plan**: Exclusive discount links for the nanobot community: [Overseas](https://platform.minimax.io/subscribe/coding-plan?code=9txpdXw04g&source=link) · [Mainland China](https://platform.minimaxi.com/subscribe/token-plan?code=GILTJpMTqZ&source=link)
 > - **MiniMax (Mainland China)**: If your API key is from MiniMax's mainland China platform (minimaxi.com), set `"apiBase": "https://api.minimaxi.com/v1"` in your minimax provider config.
 > - **MiniMax thinking mode**: Use `providers.minimaxAnthropic` when you want `reasoningEffort` / thinking mode. MiniMax exposes that capability through its Anthropic-compatible endpoint, so nanobot keeps it as a separate provider instead of guessing MiniMax-specific thinking parameters on the generic OpenAI-compatible `minimax` endpoint. It uses the same `MINIMAX_API_KEY`. Default Anthropic-compatible base URL: `https://api.minimax.io/anthropic`; for mainland China use `https://api.minimaxi.com/anthropic`.
@@ -63,11 +62,9 @@ IMAP_PASSWORD=your-password-here
 | `volcengine` | LLM (VolcEngine, pay-per-use) | [Coding Plan](https://www.volcengine.com/activity/codingplan?utm_campaign=nanobot&utm_content=nanobot&utm_medium=devrel&utm_source=OWO&utm_term=nanobot) · [volcengine.com](https://www.volcengine.com) |
 | `byteplus` | LLM (VolcEngine international, pay-per-use) | [Coding Plan](https://www.byteplus.com/en/activity/codingplan?utm_campaign=nanobot&utm_content=nanobot&utm_medium=devrel&utm_source=OWO&utm_term=nanobot) · [byteplus.com](https://www.byteplus.com) |
 | `anthropic` | LLM (Claude direct) | [console.anthropic.com](https://console.anthropic.com) |
-| `azure_openai` | LLM (Azure OpenAI) | [portal.azure.com](https://portal.azure.com) |
-| `bedrock` | LLM (AWS Bedrock Converse, Claude/Nova/Llama/etc.) | [aws.amazon.com/bedrock](https://aws.amazon.com/bedrock/) |
-| `openai` | LLM + Voice transcription (Whisper) | [platform.openai.com](https://platform.openai.com) |
+| `openai` | LLM | [platform.openai.com](https://platform.openai.com) |
 | `deepseek` | LLM (DeepSeek direct) | [platform.deepseek.com](https://platform.deepseek.com) |
-| `groq` | LLM + Voice transcription (Whisper, default) | [console.groq.com](https://console.groq.com) |
+| `groq` | LLM | [console.groq.com](https://console.groq.com) |
 | `minimax` | LLM (MiniMax direct) | [platform.minimaxi.com](https://platform.minimaxi.com) |
 | `minimax_anthropic` | LLM (MiniMax Anthropic-compatible endpoint, thinking mode) | [platform.minimaxi.com](https://platform.minimaxi.com) |
 | `gemini` | LLM (Gemini direct) | [aistudio.google.com](https://aistudio.google.com) |
@@ -86,186 +83,7 @@ IMAP_PASSWORD=your-password-here
 | `ovms` | LLM (local, OpenVINO Model Server) | [docs.openvino.ai](https://docs.openvino.ai/2026/model-server/ovms_docs_llm_quickstart.html) |
 | `vllm` | LLM (local, any OpenAI-compatible server) | — |
 | `openai_codex` | LLM (Codex, OAuth) | `nanobot provider login openai-codex` |
-| `github_copilot` | LLM (GitHub Copilot, OAuth) | `nanobot provider login github-copilot` |
 | `qianfan` | LLM (Baidu Qianfan) | [cloud.baidu.com](https://cloud.baidu.com/doc/qianfan/s/Hmh4suq26) |
-
-<details>
-<summary><b>AWS Bedrock (Converse API)</b></summary>
-
-Bedrock uses the native `bedrock-runtime` Converse API, so it can call Bedrock model IDs such as Claude Opus 4.7, Claude Sonnet, Amazon Nova, Meta Llama, Mistral, Qwen, and other models that support Converse. It supports normal chat, streaming, tool calling, tool results, token usage, and Bedrock error metadata.
-
-This provider is for Bedrock's native Converse API, not Bedrock's OpenAI-compatible `/openai/v1` endpoint. For OpenAI-compatible Bedrock models, you can still use `custom` if you specifically want that API surface.
-
-**1. Configure credentials**
-
-Use the normal AWS credential chain (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, an AWS profile, or an IAM role). The IAM identity needs:
-
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "bedrock:InvokeModel",
-    "bedrock:InvokeModelWithResponseStream"
-  ],
-  "Resource": "*"
-}
-```
-
-You can also set `providers.bedrock.apiKey` to a Bedrock API key; nanobot exports it as `AWS_BEARER_TOKEN_BEDROCK` for the AWS SDK.
-
-Credential options:
-
-- **AWS CLI/default profile**: leave `apiKey` and `profile` empty, then run `aws configure` or provide `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
-- **Named AWS profile**: set `profile` to a profile from `~/.aws/config` or `~/.aws/credentials`.
-- **IAM role**: on EC2/ECS/Lambda, leave `apiKey` and `profile` empty and attach a role with Bedrock permissions.
-- **Bedrock API key**: set `apiKey` or `AWS_BEARER_TOKEN_BEDROCK`; `profile` can stay `null`.
-
-**2. Minimal config**
-
-For a non-Anthropic model such as Amazon Nova:
-
-```json
-{
-  "providers": {
-    "bedrock": {
-      "region": "us-east-1"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "provider": "bedrock",
-      "model": "bedrock/amazon.nova-lite-v1:0",
-      "reasoningEffort": null
-    }
-  }
-}
-```
-
-With a Bedrock API key:
-
-```json
-{
-  "providers": {
-    "bedrock": {
-      "region": "us-east-1",
-      "apiKey": "${AWS_BEARER_TOKEN_BEDROCK}"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "provider": "bedrock",
-      "model": "bedrock/amazon.nova-lite-v1:0",
-      "reasoningEffort": null
-    }
-  }
-}
-```
-
-With a named AWS profile:
-
-```json
-{
-  "providers": {
-    "bedrock": {
-      "region": "us-east-1",
-      "profile": "my-bedrock-profile"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "provider": "bedrock",
-      "model": "bedrock/amazon.nova-lite-v1:0"
-    }
-  }
-}
-```
-
-**3. Claude Opus 4.7 example**
-
-```json
-{
-  "providers": {
-    "bedrock": {
-      "region": "us-east-1"
-    }
-  },
-  "agents": {
-    "defaults": {
-      "provider": "bedrock",
-      "model": "bedrock/global.anthropic.claude-opus-4-7",
-      "reasoningEffort": "medium",
-      "maxTokens": 8192
-    }
-  }
-}
-```
-
-For regional routing, use one of Bedrock's inference IDs, for example `bedrock/us.anthropic.claude-opus-4-7`, `bedrock/eu.anthropic.claude-opus-4-7`, or `bedrock/jp.anthropic.claude-opus-4-7`.
-
-Claude Opus 4.7 does not accept `temperature`, `top_p`, or `top_k`; nanobot omits `temperature` automatically for this model. If `reasoningEffort` is set to `low`, `medium`, `high`, `max`, or `adaptive`, nanobot sends Bedrock's adaptive thinking parameter.
-
-Anthropic models on Bedrock can also require Anthropic use-case registration and are subject to Anthropic-supported country/region restrictions. If Claude fails with a `ValidationException` about unsupported countries or regions, try a non-Anthropic Bedrock model such as Amazon Nova to verify the provider setup.
-
-**4. Model IDs**
-
-Use Bedrock model IDs or inference profile IDs with a `bedrock/` prefix in nanobot config. nanobot removes the prefix before calling AWS.
-
-Examples:
-
-- `bedrock/amazon.nova-micro-v1:0`
-- `bedrock/amazon.nova-lite-v1:0`
-- `bedrock/global.anthropic.claude-opus-4-7`
-- `bedrock/us.anthropic.claude-opus-4-7`
-- `bedrock/openai.gpt-oss-20b-1:0`
-- `bedrock/meta.llama...`
-- `bedrock/mistral...`
-
-Check the Bedrock console for the exact model ID and region availability. Some models require cross-region inference profile IDs such as `us.*`, `eu.*`, or `global.*`.
-
-**5. Advanced model fields**
-
-Model-specific fields can be supplied with `extraBody`; nanobot merges it into Converse `additionalModelRequestFields`:
-
-```json
-{
-  "providers": {
-    "bedrock": {
-      "region": "us-east-1",
-      "extraBody": {
-        "thinking": {
-          "type": "adaptive",
-          "effort": "medium",
-          "display": "summarized"
-        }
-      }
-    }
-  }
-}
-```
-
-Use `apiBase` only for a custom Bedrock Runtime endpoint URL, such as a VPC endpoint or proxy. It is not needed for normal AWS regions.
-
-Current scope: nanobot passes `messages`, `system`, `inferenceConfig`, `toolConfig`, and `additionalModelRequestFields`. Bedrock Prompt Management, Guardrails, `serviceTier`, and other top-level Converse options are not first-class config fields yet.
-
-**6. Quick checks**
-
-```bash
-# For AWS credential-chain usage:
-aws sts get-caller-identity
-
-# For API-key usage:
-export AWS_BEARER_TOKEN_BEDROCK="your-bedrock-api-key"
-export AWS_REGION="us-east-1"
-```
-
-Then run:
-
-```bash
-nanobot agent -m "Reply with one short sentence."
-```
-
-</details>
-
 
 <details>
 <summary><b>OpenAI Codex (OAuth)</b></summary>
@@ -284,44 +102,6 @@ nanobot provider login openai-codex
   "agents": {
     "defaults": {
       "model": "openai-codex/gpt-5.1-codex"
-    }
-  }
-}
-```
-
-**3. Chat:**
-```bash
-nanobot agent -m "Hello!"
-
-# Target a specific workspace/config locally
-nanobot agent -c ~/.nanobot-telegram/config.json -m "Hello!"
-
-# One-off workspace override on top of that config
-nanobot agent -c ~/.nanobot-telegram/config.json -w /tmp/nanobot-telegram-test -m "Hello!"
-```
-
-> Docker users: use `docker run -it` for interactive OAuth login.
-
-</details>
-
-
-<details>
-<summary><b>GitHub Copilot (OAuth)</b></summary>
-
-GitHub Copilot uses OAuth instead of API keys. Requires a [GitHub account with a plan](https://github.com/features/copilot/plans) configured.
-No `providers.githubCopilot` block is needed in `config.json`; `nanobot provider login` stores the OAuth session outside config.
-
-**1. Login:**
-```bash
-nanobot provider login github-copilot
-```
-
-**2. Set model** (merge into `~/.nanobot/config.json`):
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": "github-copilot/gpt-4.1"
     }
   }
 }
@@ -394,28 +174,6 @@ Connects directly to any OpenAI-compatible endpoint — llama.cpp, Together AI, 
 > For local servers that don't require authentication, set `apiKey` to `null`.
 >
 > `custom` is the right choice for providers that expose an OpenAI-compatible **chat completions** API. It does **not** force third-party endpoints onto the OpenAI/Azure **Responses API**.
->
-> If your proxy or gateway is specifically Responses-API-compatible, use the `azure_openai` provider shape instead and point `apiBase` at that endpoint:
->
-> ```json
-> {
->   "providers": {
->     "azure_openai": {
->       "apiKey": "your-api-key",
->       "apiBase": "https://api.your-provider.com",
->       "defaultModel": "your-model-name"
->     }
->   },
->   "agents": {
->     "defaults": {
->       "provider": "azure_openai",
->       "model": "your-model-name"
->     }
->   }
-> }
-> ```
->
-> In short: **chat-completions-compatible endpoint → `custom`**; **Responses-compatible endpoint → `azure_openai`**.
 
 Some OpenAI-compatible gateways expose request-body extensions such as vLLM guided decoding or local sampling controls. Put those under `extraBody`; nanobot merges them into the chat-completions request body after its provider defaults:
 
@@ -798,8 +556,6 @@ Global settings that apply to all channels. Configure under the `channels` secti
     "sendProgress": true,
     "sendToolHints": false,
     "sendMaxRetries": 3,
-    "transcriptionProvider": "groq",
-    "transcriptionLanguage": null,
     "telegram": { ... }
   }
 }
@@ -811,8 +567,6 @@ Global settings that apply to all channels. Configure under the `channels` secti
 | `sendToolHints` | `false` | Stream tool-call hints (e.g. `read_file("…")`) |
 | `showReasoning` | `true` | Allow channels to surface model reasoning/thinking content (DeepSeek-R1 `reasoning_content`, Anthropic `thinking_blocks`, inline `<think>` tags). Reasoning flows as a dedicated stream with `_reasoning_delta` / `_reasoning_end` markers — channels override `send_reasoning_delta` / `send_reasoning_end` to render in-place updates. Even with `true`, channels without those overrides stay no-op silently. Currently surfaced on CLI and WebSocket/WebUI (italic shimmer header, auto-collapses after the stream ends); Telegram / Slack / Discord / Feishu / WeChat / Matrix keep the base no-op until their bubble UI is adapted. Independent of `sendProgress`. |
 | `sendMaxRetries` | `3` | Max delivery attempts per outbound message, including the initial send (0-10 configured, minimum 1 actual attempt) |
-| `transcriptionProvider` | `"groq"` | Voice transcription backend: `"groq"` (free tier, default) or `"openai"`. API key is auto-resolved from the matching provider config. |
-| `transcriptionLanguage` | `null` | Optional ISO-639-1 language hint for audio transcription, e.g. `"en"`, `"ko"`, `"ja"`. |
 
 `sendProgress` and `sendToolHints` can also be overridden per channel. The
 global values stay as defaults for channels that do not set their own value:

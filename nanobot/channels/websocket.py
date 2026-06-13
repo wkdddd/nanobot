@@ -1618,6 +1618,25 @@ class WebSocketChannel(BaseChannel):
                 approval_enabled=approval_enabled,
             )
             return
+        if t == "set_review_mode":
+            cid = envelope.get("chat_id")
+            enabled = bool(envelope.get("enabled", False))
+            if not _is_valid_chat_id(cid):
+                await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            logger.info("session websocket:{} review mode: {}", cid, "enabled" if enabled else "disabled")
+            if self._session_manager is not None:
+                session_key = f"websocket:{cid}"
+                session = self._session_manager.get_or_create(session_key)
+                session.metadata["review_mode"] = enabled
+                self._session_manager.save(session)
+            await self._send_event(
+                connection,
+                "review_mode_updated",
+                chat_id=cid,
+                enabled=enabled,
+            )
+            return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
 
     async def stop(self) -> None:

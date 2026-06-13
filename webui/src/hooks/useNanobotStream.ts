@@ -225,6 +225,10 @@ export function useNanobotStream(
   sessionApprovalEnabled: boolean;
   /** Toggle session-level tool approval. */
   setSessionApproval: (enabled: boolean) => void;
+  /** Whether review mode is enabled for this session. */
+  reviewModeEnabled: boolean;
+  /** Toggle session-level review mode. */
+  setReviewMode: (enabled: boolean) => void;
   /** Respond to a permission request (approve/deny). */
   respondToPermission: (requestId: string, approved: boolean) => void;
   /** Latest transport-level fault raised since the last ``dismissStreamError``.
@@ -252,6 +256,12 @@ export function useNanobotStream(
     if (!chatId) return false;
     try {
       return window.localStorage.getItem(`nanobot:approval:${chatId}`) === "1";
+    } catch { return false; }
+  });
+  const [reviewModeEnabled, setReviewModeEnabled] = useState(() => {
+    if (!chatId) return false;
+    try {
+      return window.localStorage.getItem(`nanobot:review:${chatId}`) === "1";
     } catch { return false; }
   });
   const buffer = useRef<StreamBuffer | null>(null);
@@ -287,6 +297,12 @@ export function useNanobotStream(
       if (!chatId) return false;
       try {
         return window.localStorage.getItem(`nanobot:approval:${chatId}`) === "1";
+      } catch { return false; }
+    });
+    setReviewModeEnabled(() => {
+      if (!chatId) return false;
+      try {
+        return window.localStorage.getItem(`nanobot:review:${chatId}`) === "1";
       } catch { return false; }
     });
     setRunStartedAt(chatId ? client.getRunStartedAt(chatId) : null);
@@ -636,6 +652,22 @@ export function useNanobotStream(
     [chatId, client],
   );
 
+  const setReviewMode = useCallback(
+    (enabled: boolean) => {
+      if (!chatId) return;
+      setReviewModeEnabled(enabled);
+      try {
+        if (enabled) {
+          window.localStorage.setItem(`nanobot:review:${chatId}`, "1");
+        } else {
+          window.localStorage.removeItem(`nanobot:review:${chatId}`);
+        }
+      } catch { /* ignore storage errors */ }
+      client.sendSetReviewMode(chatId, enabled);
+    },
+    [chatId, client],
+  );
+
   return {
     messages,
     isStreaming,
@@ -647,6 +679,8 @@ export function useNanobotStream(
     permissionRecords,
     sessionApprovalEnabled,
     setSessionApproval,
+    reviewModeEnabled,
+    setReviewMode,
     respondToPermission,
     streamError,
     dismissStreamError,

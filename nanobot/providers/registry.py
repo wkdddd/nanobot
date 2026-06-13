@@ -34,7 +34,7 @@ class ProviderSpec:
     display_name: str = ""  # shown in `nanobot status`
 
     # which provider implementation to use
-    # "openai_compat" | "anthropic" | "azure_openai" | "openai_codex" | "github_copilot" | "bedrock"
+    # "openai_compat" | "anthropic" | "openai_codex"
     backend: str = "openai_compat"
 
     # extra env vars, e.g. (("ZHIPUAI_API_KEY", "{api_key}"),)
@@ -96,38 +96,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_direct=True,
     ),
 
-    # === Azure OpenAI (direct API calls with API version 2024-10-21) =====
-    ProviderSpec(
-        name="azure_openai",
-        keywords=("azure", "azure-openai"),
-        env_key="",
-        display_name="Azure OpenAI",
-        backend="azure_openai",
-        is_direct=True,
-    ),
-    # === AWS Bedrock (native Converse API via bedrock-runtime) =============
-    ProviderSpec(
-        name="bedrock",
-        keywords=(
-            "bedrock",
-            "anthropic.claude",
-            "amazon.nova",
-            "meta.",
-            "mistral.",
-            "cohere.",
-            "qwen.",
-            "deepseek.",
-            "openai.gpt-oss",
-            "ai21.",
-            "moonshot.",
-            "writer.",
-            "zai.",
-        ),
-        env_key="AWS_BEARER_TOKEN_BEDROCK",
-        display_name="AWS Bedrock",
-        backend="bedrock",
-        is_direct=True,
-    ),
     # === Gateways (detected by api_key / api_base, not model name) =========
     # Gateways can route any model, so they win in fallback.
     # OpenRouter: global gateway, keys start with "sk-or-"
@@ -266,18 +234,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="codex",
         default_api_base="https://chatgpt.com/backend-api",
         is_oauth=True,
-    ),
-    # GitHub Copilot: OAuth-based
-    ProviderSpec(
-        name="github_copilot",
-        keywords=("github_copilot", "copilot"),
-        env_key="",
-        display_name="Github Copilot",
-        backend="github_copilot",
-        default_api_base="https://api.githubcopilot.com",
-        strip_model_prefix=True,
-        is_oauth=True,
-        supports_max_completion_tokens=True,
     ),
     # DeepSeek: OpenAI-compatible at api.deepseek.com
     ProviderSpec(

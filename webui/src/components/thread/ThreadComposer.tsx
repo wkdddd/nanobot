@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleHelp,
+  FileSearch,
   History,
   ImageIcon,
   Loader2,
@@ -73,6 +74,8 @@ interface ThreadComposerProps {
   goalState?: GoalStateWsPayload;
   sessionApprovalEnabled?: boolean;
   onSessionApprovalChange?: (enabled: boolean) => void;
+  reviewModeEnabled?: boolean;
+  onReviewModeChange?: (enabled: boolean) => void;
 }
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
@@ -382,6 +385,8 @@ export function ThreadComposer({
   goalState,
   sessionApprovalEnabled = false,
   onSessionApprovalChange,
+  reviewModeEnabled = false,
+  onReviewModeChange,
 }: ThreadComposerProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
@@ -890,6 +895,27 @@ export function ThreadComposer({
                   <ShieldAlert className={cn("mr-1.5", isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
                 )}
                 {t("permission.panelTitle")}
+              </Button>
+            ) : null}
+            {onReviewModeChange ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={disabled}
+                aria-pressed={reviewModeEnabled}
+                aria-label={reviewModeEnabled ? "Disable review mode" : "Enable review mode"}
+                title={reviewModeEnabled ? "Disable review mode" : "Enable review mode"}
+                onClick={() => onReviewModeChange(!reviewModeEnabled)}
+                className={cn(
+                  "rounded-full border border-border/55 px-2.5 font-medium shadow-[0_2px_8px_rgba(15,23,42,0.04)]",
+                  isHero ? "h-9 text-[12px]" : "h-7.5 text-[10.5px]",
+                  reviewModeEnabled
+                    ? "border-blue-500/30 bg-blue-500/10 text-blue-700 hover:bg-blue-500/12 dark:text-blue-300"
+                    : "bg-card text-muted-foreground hover:bg-card hover:text-foreground",
+                )}
+              >
+                <FileSearch className={cn("mr-1.5", isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
+                Review
               </Button>
             ) : null}
             <div ref={aspectControlRef} className="relative flex items-center gap-1">

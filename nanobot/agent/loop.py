@@ -638,7 +638,7 @@ class AgentLoop:
         pending_summary: str | None,
     ) -> list[dict[str, Any]]:
         """Build the initial message list for the LLM turn."""
-        return self.context.build_messages(
+        messages = self.context.build_messages(
             history=history,
             current_message=image_generation_prompt(msg.content, msg.metadata),
             media=msg.media if msg.media else None,
@@ -648,6 +648,16 @@ class AgentLoop:
             session_summary=pending_summary,
             session_metadata=session.metadata,
         )
+        if session.metadata.get("review_mode", False):
+            from nanobot.agent.review.prompts import _REPORTING_INSTRUCTIONS
+            messages.insert(0, {
+                "role": "system",
+                "content": (
+                    "You are in review mode. Use the report_finding and report_summary "
+                    "tools to structure your findings.\n" + _REPORTING_INSTRUCTIONS
+                ),
+            })
+        return messages
 
     async def _dispatch_command_inline(
         self,
@@ -797,6 +807,7 @@ class AgentLoop:
 
         active_session_key = session.key if session else session_key
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
+        _review_mode_active = False
         try:
             from nanobot.agent.tools.permissions import resolve_policy
             _session_meta = session.metadata if session is not None else {}
@@ -804,6 +815,23 @@ class AgentLoop:
                 getattr(self, "permissions_config", None),
                 _session_meta,
             )
+
+            # Review mode: inject structured reporting tools when enabled
+            if _session_meta.get("review_mode", False):
+                from nanobot.agent.review.tools import (
+                    ReportFindingTool,
+                    ReportSummaryTool,
+                    ReviewReport,
+                    clear_active_report,
+                    set_active_report,
+                )
+                _review_report = ReviewReport()
+                set_active_report(_review_report)
+                if not self.tools.has("report_finding"):
+                    self.tools.register(ReportFindingTool())
+                if not self.tools.has("report_summary"):
+                    self.tools.register(ReportSummaryTool())
+                _review_mode_active = True
 
             async def _permission_request_cb(
                 request_id: str,
@@ -856,6 +884,11 @@ class AgentLoop:
                 permission_request_callback=_permission_request_cb,
             ))
         finally:
+            if _review_mode_active:
+                self.tools.unregister("report_finding")
+                self.tools.unregister("report_summary")
+                from nanobot.agent.review.tools import clear_active_report
+                clear_active_report()
             reset_file_states(file_state_token)
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
@@ -1262,8 +1295,6 @@ class AgentLoop:
         )
         content = final_content or "Background task completed."
         outbound_metadata: dict[str, Any] = {}
-        if channel == "slack" and key.startswith("slack:") and key.count(":") >= 2:
-            outbound_metadata["slack"] = {"thread_ts": key.split(":", 2)[2]}
         if origin_message_id := msg.metadata.get("origin_message_id"):
             outbound_metadata["origin_message_id"] = origin_message_id
         return OutboundMessage(

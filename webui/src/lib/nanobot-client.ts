@@ -319,6 +319,14 @@ export class NanobotClient {
     });
   }
 
+  sendSetReviewMode(chatId: string, enabled: boolean): void {
+    this.queueSend({
+      type: "set_review_mode",
+      chat_id: chatId,
+      enabled,
+    });
+  }
+
   // -- internals ---------------------------------------------------------
 
   private setStatus(status: ConnectionStatus): void {
