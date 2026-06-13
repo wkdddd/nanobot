@@ -1053,8 +1053,7 @@ def _run_gateway(
 # ============================================================================
 # Agent Commands
 # ============================================================================
-from nanobot.agent.review.runner import ReviewResult, ReviewRunSpec, run_review
-from  nanobot.bus.queue import MessageBus
+from nanobot.bus.queue import MessageBus
 @app.command()
 def review(
     target: str = typer.Argument(..., help="Local repository path or GitHub repository URL"),
@@ -1072,6 +1071,8 @@ def review(
 ):
     """Review a local or GitHub repository with CodeReviewAgent."""
     from nanobot.cli.stream import StreamRenderer
+    from nanobot.agent.review.prompts import build_review_prompt
+    from nanobot.agent.review.roles import normalize_focus
 
     loaded = _load_runtime_config(config, workspace)
     sync_workspace_templates(loaded.workspace_path)
@@ -1091,26 +1092,42 @@ def review(
 
     async def run_once() -> None:
         try:
-            try:
-                result = await run_review(
-                    config=loaded,
-                    agent_loop=agent_loop,
-                    spec=ReviewRunSpec(target=target, focus=focus),
-                    on_stream=renderer.on_delta,
-                    on_stream_end=renderer.on_end,
-                )
-            except ValueError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-                raise typer.Exit(1) from exc
+            roles, forced = normalize_focus(focus)
+            review_prompt = build_review_prompt(
+                target_url=target,
+                target_name=target,
+                roles=roles,
+                max_subagents=4,
+                forced=forced,
+            )
 
-            if not renderer.streamed:
-                _print_agent_response(result.to_markdown(), render_markdown=markdown)
+            session_key = "cli:review"
+            session = agent_loop.sessions.get_or_create(session_key)
+            session.metadata["review_mode"] = True
+            session.metadata["review_prompt"] = review_prompt
+            agent_loop.sessions.save(session)
+
+            collected: list[str] = []
+
+            async def _on_stream(delta: str) -> None:
+                collected.append(delta)
+                await renderer.on_delta(delta)
+
+            async def _on_stream_end(**kwargs) -> None:
+                await renderer.on_end(**kwargs)
+
+            await agent_loop.process_direct(
+                content=f"Review {target}",
+                session_key=session_key,
+                channel="cli",
+                chat_id="review",
+                on_stream=_on_stream,
+                on_stream_end=_on_stream_end,
+            )
 
             if output:
-                _save_review_report(output, result)
-
-            if result.has_critical():
-                raise typer.Exit(2)
+                full_output = "".join(collected)
+                _save_review_report(output, full_output)
 
         finally:
             await agent_loop.close_mcp()
@@ -1368,19 +1385,15 @@ def agent(
         asyncio.run(run_interactive())
 
 
-def _save_review_report(output_path: str, result: ReviewResult) -> None:
-    """Save review report to file. Format determined by extension."""
+def _save_review_report(output_path: str, content: str) -> None:
+    """Save review report to file."""
     path = Path(output_path).expanduser()
 
     if not path.suffix:
         path = path.with_suffix(".md")
 
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    if path.suffix == ".json":
-        path.write_text(result.to_json(), encoding="utf-8")
-    else:
-        path.write_text(result.to_markdown(), encoding="utf-8")
+    path.write_text(content, encoding="utf-8")
 
     console.print(f"[green]Report saved to {path}[/green]")
 # ============================================================================

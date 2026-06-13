@@ -9,15 +9,21 @@ nanobot is a lightweight, open-source AI agent framework written in Python with 
 ## Development Commands
 
 ```bash
+# Setup
+pip install -e ".[dev]"
+
 # Python: run single test / lint
 pytest tests/test_openai_api.py::test_function -v
 ruff check nanobot/
 
+# Format ONLY files you changed (never the whole codebase — see Gotchas)
+ruff format <files-you-changed>
+
 # WebUI: dev server (proxies API/WS to gateway :8765), build, test
-# Build outputs to ../nanobot/web/dist (bundled into the Python wheel)
 cd webui && bun run dev      # or NANOBOT_API_URL=... bun run dev
 cd webui && bun run build
 cd webui && bun run test
+cd webui && bun run lint
 
 # Gateway
 nanobot gateway
@@ -36,49 +42,61 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 ### Key Subsystems
 
-- **Agent Loop** (`nanobot/agent/loop.py`, `runner.py`): The core processing engine. `AgentLoop` manages session keys, hooks, and context building. `AgentRunner` executes the multi-turn LLM conversation with tool execution.
-- **LLM Providers** (`nanobot/providers/`): Provider implementations (Anthropic, OpenAI-compatible, OpenAI Responses API, Azure, Bedrock, GitHub Copilot, OpenAI Codex, etc.) built on a common base (`base.py`). Includes image generation (`image_generation.py`) and audio transcription (`transcription.py`). `factory.py` and `registry.py` handle instantiation and model discovery.
-- **Channels** (`nanobot/channels/`): Platform integrations (Telegram, Discord, Slack, Feishu, Matrix, WhatsApp, QQ, WeChat, WeCom, DingTalk, Email, MoChat, MS Teams, WebSocket). `manager.py` discovers and coordinates them. Channels are auto-discovered via `pkgutil` scan + entry-point plugins.
-- **Tools** (`nanobot/agent/tools/`): Agent capabilities exposed to the LLM: filesystem (read/write/edit/list), shell execution (with sandbox backends), web search/fetch, MCP servers, cron, notebook editing, subagent spawning, long-running tasks / sustained goals (`long_task.py`), image generation, and self-modification. Tools are auto-discovered via `pkgutil` scan + entry-point plugins.
-- **Memory** (`nanobot/agent/memory.py`): Session history persistence with Dream two-phase memory consolidation. Uses atomic writes with fsync for durability.
-- **Session Management** (`nanobot/session/`): Per-session history, context compaction, TTL-based auto-compaction (`manager.py`), and sustained goal state tracking (`goal_state.py`).
-- **Config** (`nanobot/config/schema.py`, `loader.py`): Pydantic-based configuration loaded from `~/.nanobot/config.json`. Supports camelCase aliases for JSON compatibility.
-- **Bridge** (`bridge/`): TypeScript services (e.g. WhatsApp bridge) bundled into the wheel via `pyproject.toml` `force-include`.
-- **WebUI** (`webui/`): Vite-based React SPA that talks to the gateway over a WebSocket multiplex protocol. The dev server proxies `/api`, `/webui`, `/auth`, and WebSocket traffic to the gateway.
-- **API Server** (`nanobot/api/server.py`): OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`) for programmatic access.
-- **Command Router** (`nanobot/command/`): Slash command routing and built-in command handlers.
-- **Heartbeat** (`nanobot/heartbeat/`): Periodic agent wake-up service for scheduled task checking.
-- **Pairing** (`nanobot/pairing/`): DM sender approval store with persistent pairing codes per channel.
-- **Skills** (`nanobot/skills/`): Built-in skill definitions (long-goal, cron, github, image-generation, etc.) loaded into agent context.
-- **Security** (`nanobot/security/`): PTH file guard and other security measures activated at CLI entry.
+- **Agent Core** (`nanobot/agent/loop.py`, `runner.py`): The critical path. `AgentLoop` manages session keys, hooks, and context building. `AgentRunner` executes the multi-turn LLM conversation with tool execution. Changes here should be minimal and justified.
+- **LLM Providers** (`nanobot/providers/`): Provider implementations built on a common base (`base.py`). `factory.py` and `registry.py` handle instantiation and model discovery.
+- **Channels** (`nanobot/channels/`): Platform integrations auto-discovered via `pkgutil` scan + entry-point plugins. `manager.py` discovers and coordinates them. Each channel file should be self-contained.
+- **Tools** (`nanobot/agent/tools/`): Agent capabilities exposed to the LLM, auto-discovered via `pkgutil` scan + entry-point plugins.
+- **Memory** (`nanobot/agent/memory.py`): Session history persistence with atomic writes (temp file + fsync + rename). Do not replace with plain `open(..., "w")`.
+- **Session Management** (`nanobot/session/`): Per-session history, context compaction, TTL-based auto-compaction, and sustained goal state tracking.
+- **Config** (`nanobot/config/schema.py`, `loader.py`): Pydantic-based configuration loaded from `~/.nanobot/config.json`. Supports `${VAR}` env-var substitution (no default-value syntax; missing var raises `ValueError`).
+- **Prompt Templates** (`nanobot/templates/`): Jinja2 markdown files that define agent behavior. Changes here alter agent behavior as directly as changing Python code.
+- **Skills** (`nanobot/skills/`): Built-in skill definitions (markdown + YAML frontmatter). Agent know-how should be added as skills, not hardcoded into the agent loop.
+- **WebUI** (`webui/`): Vite + React + Tailwind SPA. Build outputs to `nanobot/web/dist/` (bundled into the Python wheel, git-ignored).
+- **API Server** (`nanobot/api/server.py`): OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`).
 
 ### Entry Points
 
 - **CLI**: `nanobot/cli/commands.py`
 - **Python SDK**: `nanobot/nanobot.py`
 
-## Project-Specific Notes
+## Design Constraints
 
-- Architecture constraints: [`.agent/design.md`](.agent/design.md)
-- Security boundaries: [`.agent/security.md`](.agent/security.md)
-- Common gotchas: [`.agent/gotchas.md`](.agent/gotchas.md)
+- **Core stays small; extend at the edges.** New capabilities go in `channels/`, `tools/`, skills, or MCP servers — not inlined into `agent/loop.py` or `runner.py`.
+- **Prefer duplication over premature abstraction.** Channels and providers may repeat similar logic. Do not introduce complex base classes just to DRY them.
+- **Explicit over magical.** Config must be declared in Pydantic models. Provider resolution must be traceable from factory to concrete class.
+- **Minimal change that solves the real problem.** Do not bundle unrelated refactors into a bugfix.
+
+## Security Rules
+
+- All filesystem tools must resolve paths through `_resolve_path` (`agent/tools/filesystem.py`) which enforces workspace boundaries.
+- All outbound HTTP from tools must pass through `validate_url_target` (`security/network.py`) — blocks private addresses and cloud metadata endpoints. Do not add direct `httpx.get`/`requests.get` in tools.
+- Shell execution respects `restrict_to_workspace`; if enabled, commands outside workspace are rejected before execution.
+
+## Gotchas
+
+- **Do NOT run `ruff format` on the whole codebase.** It destroys git blame history. Only format files you actually changed.
+- **Windows compatibility is required.** `ExecTool` uses `cmd /c` on Windows. CLI forces UTF-8 stdout/stderr. MCP paths are normalized. Always use `pathlib.Path`; do not assume `/` separators.
+- **Prompt templates are runtime code.** Changes to `nanobot/templates/*.md` alter agent behavior directly. Treat them like code: keep changes narrow, add regression tests.
+- **Context pollution persists.** Anything written into memory/session history can be replayed into future LLM calls. Sanitize metadata before it becomes a model example.
+- **Heartbeat uses virtual tool calls.** The heartbeat service injects a structured `heartbeat` tool (`action: skip | run`), not free-text parsing. Follow this pattern for new periodic checks.
+- **Atomic session writes.** `agent/memory.py` uses temp file + fsync + rename for crash safety. Do not simplify to plain file writes.
 
 ## Branching Strategy
 
-See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full two-branch model (`main` vs `nightly`) and PR guidelines.
+| Your Change | Target Branch |
+|-------------|---------------|
+| New feature | `nightly` |
+| Bug fix | `main` |
+| Documentation | `main` |
+| Refactoring | `nightly` |
+| Unsure | `nightly` |
+
+See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for details on the two-branch model and cherry-pick workflow.
 
 ## Code Style
 
 - Python 3.11+, asyncio throughout.
 - Line length: 100.
-- Linting: `ruff` with rules E, F, I, N, W (E501 ignored).
+- Linting: `ruff check` with rules E, F, I, N, W (E501 ignored).
 - pytest with `asyncio_mode = "auto"`.
-
-## Common File Locations
-
-- Config schema: `nanobot/config/schema.py`
-- Provider base / new provider template: `nanobot/providers/base.py`
-- Channel base / new channel template: `nanobot/channels/base.py`
-- Tool registry: `nanobot/agent/tools/registry.py`
-- WebUI dev proxy config: `webui/vite.config.ts`
 - Tests mirror the `nanobot/` package structure.

@@ -648,16 +648,47 @@ class AgentLoop:
             session_summary=pending_summary,
             session_metadata=session.metadata,
         )
-        if session.metadata.get("review_mode", False):
-            from nanobot.agent.review.prompts import _REPORTING_INSTRUCTIONS
-            messages.insert(0, {
-                "role": "system",
-                "content": (
-                    "You are in review mode. Use the report_finding and report_summary "
-                    "tools to structure your findings.\n" + _REPORTING_INSTRUCTIONS
-                ),
-            })
         return messages
+
+    async def _resolve_review_context(
+        self, initial_messages: list[dict], session_meta: dict
+    ) -> str | None:
+        """Build review system prompt based on session metadata and user message."""
+        import re
+
+        from nanobot.agent.review.prompts import build_review_prompt, build_review_fallback_prompt
+        from nanobot.agent.review.roles import normalize_focus
+
+        # CLI pre-built prompt takes priority
+        if session_meta.get("review_prompt"):
+            return session_meta["review_prompt"]
+
+        # Extract user message to detect target
+        user_content = ""
+        for m in reversed(initial_messages):
+            if m.get("role") == "user":
+                c = m.get("content", "")
+                user_content = c if isinstance(c, str) else str(c)
+                break
+
+        # Detect GitHub URL in user message
+        github_match = re.search(
+            r'https://github\.com/([^/\s]+)/([^/\s.,;!?)]+)', user_content
+        )
+        if github_match:
+            owner, repo = github_match.group(1), github_match.group(2)
+            target_url = f"https://github.com/{owner}/{repo}"
+            focus_raw = session_meta.get("review_focus")
+            roles, forced = normalize_focus(focus_raw)
+            return build_review_prompt(
+                target_url=target_url,
+                target_name=f"{owner}/{repo}",
+                roles=roles,
+                max_subagents=4,
+                forced=forced,
+            )
+
+        return build_review_fallback_prompt()
 
     async def _dispatch_command_inline(
         self,
@@ -807,7 +838,6 @@ class AgentLoop:
 
         active_session_key = session.key if session else session_key
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
-        _review_mode_active = False
         try:
             from nanobot.agent.tools.permissions import resolve_policy
             _session_meta = session.metadata if session is not None else {}
@@ -816,22 +846,13 @@ class AgentLoop:
                 _session_meta,
             )
 
-            # Review mode: inject structured reporting tools when enabled
+            # Review mode: resolve target and inject full review prompt
             if _session_meta.get("review_mode", False):
-                from nanobot.agent.review.tools import (
-                    ReportFindingTool,
-                    ReportSummaryTool,
-                    ReviewReport,
-                    clear_active_report,
-                    set_active_report,
+                _review_prompt = await self._resolve_review_context(
+                    initial_messages, _session_meta
                 )
-                _review_report = ReviewReport()
-                set_active_report(_review_report)
-                if not self.tools.has("report_finding"):
-                    self.tools.register(ReportFindingTool())
-                if not self.tools.has("report_summary"):
-                    self.tools.register(ReportSummaryTool())
-                _review_mode_active = True
+                if _review_prompt:
+                    initial_messages.insert(0, {"role": "system", "content": _review_prompt})
 
             async def _permission_request_cb(
                 request_id: str,
@@ -884,11 +905,6 @@ class AgentLoop:
                 permission_request_callback=_permission_request_cb,
             ))
         finally:
-            if _review_mode_active:
-                self.tools.unregister("report_finding")
-                self.tools.unregister("report_summary")
-                from nanobot.agent.review.tools import clear_active_report
-                clear_active_report()
             reset_file_states(file_state_token)
         self._last_usage = result.usage
         if result.stop_reason == "max_iterations":
