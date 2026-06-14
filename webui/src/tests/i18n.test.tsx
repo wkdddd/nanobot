@@ -7,7 +7,6 @@ import { ThreadComposer } from "@/components/thread/ThreadComposer";
 import { resources } from "@/i18n";
 
 const QUICK_ACTION_KEYS = ["plan", "analyze", "brainstorm", "code", "summarize", "more"];
-const IMAGE_QUICK_ACTION_KEYS = ["icon", "sticker", "poster", "product", "portrait", "edit"];
 const SETTINGS_NAV_KEYS = ["general", "byok"];
 
 describe("webui i18n", () => {
@@ -56,11 +55,7 @@ describe("webui i18n", () => {
         expect(action.title).toBeTruthy();
         expect(action.prompt).toBeTruthy();
       }
-      for (const key of IMAGE_QUICK_ACTION_KEYS) {
-        const action = empty.imageQuickActions[key as keyof typeof empty.imageQuickActions];
-        expect(action.title).toBeTruthy();
-        expect(action.prompt).toBeTruthy();
-      }
+      expect("imageQuickActions" in empty).toBe(false);
     }
   });
 

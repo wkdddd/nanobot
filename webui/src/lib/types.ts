@@ -257,6 +257,13 @@ export type InboundEvent =
       event: "review_mode_updated";
       chat_id: string;
       enabled: boolean;
+      math_qa_enabled?: boolean;
+    }
+  | {
+      event: "math_qa_mode_updated";
+      chat_id: string;
+      enabled: boolean;
+      review_enabled?: boolean;
     }
   | { event: "error"; chat_id?: string; detail?: string };
 
@@ -322,6 +329,11 @@ export type Outbound =
     }
   | {
       type: "set_review_mode";
+      chat_id: string;
+      enabled: boolean;
+    }
+  | {
+      type: "set_math_qa_mode";
       chat_id: string;
       enabled: boolean;
     };

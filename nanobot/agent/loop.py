@@ -18,6 +18,7 @@ from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
+from nanobot.agent.math_qa import MATH_QA_MODE_KEY, MathKnowledgeBase, build_math_qa_prompt
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
@@ -656,7 +657,7 @@ class AgentLoop:
         """Build review system prompt based on session metadata and user message."""
         import re
 
-        from nanobot.agent.review.prompts import build_review_prompt, build_review_fallback_prompt
+        from nanobot.agent.review.prompts import build_review_fallback_prompt, build_review_prompt
         from nanobot.agent.review.roles import normalize_focus
 
         # CLI pre-built prompt takes priority
@@ -689,6 +690,35 @@ class AgentLoop:
             )
 
         return build_review_fallback_prompt()
+
+    async def _resolve_math_qa_context(
+        self, initial_messages: list[dict], session_meta: dict
+    ) -> str | None:
+        """Build the math QA system prompt with best-effort local KB retrieval."""
+        if session_meta.get("math_qa_prompt"):
+            return session_meta["math_qa_prompt"]
+
+        user_content = ""
+        for m in reversed(initial_messages):
+            if m.get("role") != "user":
+                continue
+            c = m.get("content", "")
+            if isinstance(c, str):
+                user_content = c
+            elif isinstance(c, list):
+                parts = [
+                    str(block.get("text", ""))
+                    for block in c
+                    if isinstance(block, dict) and block.get("type") == "text"
+                ]
+                user_content = "\n".join(parts)
+            else:
+                user_content = str(c)
+            break
+
+        kb = MathKnowledgeBase(self.workspace)
+        hits = kb.search(user_content, limit=4)
+        return build_math_qa_prompt(hits)
 
     async def _dispatch_command_inline(
         self,
@@ -846,13 +876,20 @@ class AgentLoop:
                 _session_meta,
             )
 
-            # Review mode: resolve target and inject full review prompt
+            # Mutually exclusive specialist modes: review takes precedence for
+            # legacy sessions that somehow have both flags set.
             if _session_meta.get("review_mode", False):
                 _review_prompt = await self._resolve_review_context(
                     initial_messages, _session_meta
                 )
                 if _review_prompt:
                     initial_messages.insert(0, {"role": "system", "content": _review_prompt})
+            elif _session_meta.get(MATH_QA_MODE_KEY, False):
+                _math_prompt = await self._resolve_math_qa_context(
+                    initial_messages, _session_meta
+                )
+                if _math_prompt:
+                    initial_messages.insert(0, {"role": "system", "content": _math_prompt})
 
             async def _permission_request_cb(
                 request_id: str,

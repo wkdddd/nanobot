@@ -772,7 +772,7 @@ describe("ThreadShell", () => {
     expect(screen.getByRole("option", { name: /\/history/i })).toBeInTheDocument();
   });
 
-  it("switches welcome quick actions when image mode is enabled", async () => {
+  it("does not expose the removed image generation mode in the welcome composer", async () => {
     const client = makeClient();
     render(
       wrap(
@@ -789,11 +789,7 @@ describe("ThreadShell", () => {
 
     expect(screen.getByText("Write code")).toBeInTheDocument();
     expect(screen.queryByText("Design an app icon")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Toggle image generation mode" }));
-
-    expect(screen.getByText("Design an app icon")).toBeInTheDocument();
-    expect(screen.queryByText("Write code")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
   });
 
   it("surfaces a dismissible banner when the stream reports message_too_big", async () => {

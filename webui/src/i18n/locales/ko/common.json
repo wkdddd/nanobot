@@ -180,32 +180,6 @@
           "title": "더 보기",
           "prompt": "이 워크스페이스에서 도와줄 수 있는 유용한 방법을 몇 가지 보여 주세요."
         }
-      },
-      "imageQuickActions": {
-        "icon": {
-          "title": "앱 아이콘 디자인",
-          "prompt": "nanobot을 위한 깔끔한 1:1 앱 아이콘을 생성해 주세요. 친근한 로봇, 단순한 벡터 스타일, 부드러운 파란색과 흰색 팔레트, 텍스트 없음."
-        },
-        "sticker": {
-          "title": "스티커 만들기",
-          "prompt": "작은 로봇 도우미의 귀여운 스티커 스타일 이미지를 생성해 주세요. 투명해 보이는 배경, 표정이 풍부하고 장난스러운 느낌."
-        },
-        "poster": {
-          "title": "포스터 만들기",
-          "prompt": "개인 AI 도우미를 위한 세련된 포스터 콘셉트를 생성해 주세요. 현대적인 구성, 강한 시각적 계층, 랜딩 페이지에 어울리는 스타일."
-        },
-        "product": {
-          "title": "제품 목업",
-          "prompt": "대화형 AI 웹 앱을 위한 깔끔한 제품 목업 이미지를 생성해 주세요. 미니멀한 인터페이스, 고급스러운 조명, 현실적인 기기 프레임."
-        },
-        "portrait": {
-          "title": "스타일화된 초상화",
-          "prompt": "친근한 AI 동반자의 스타일화된 초상화를 생성해 주세요. 부드러운 조명, 세밀하지만 다가가기 쉬운 분위기, 현대적인 일러스트 스타일."
-        },
-        "edit": {
-          "title": "이미지 편집",
-          "prompt": "이미지 편집을 도와주세요. 먼저 편집할 이미지를 업로드하거나 지정하게 한 뒤, 편집된 결과를 생성해 주세요."
-        }
       }
     },
     "header": {
@@ -225,33 +199,6 @@
       "goalStateSheetTitle": "목표",
       "send": "메시지 보내기",
       "stop": "응답 중지",
-      "attachImage": "이미지 첨부",
-      "imageMode": {
-        "label": "이미지 생성",
-        "toggle": "이미지 생성 모드 전환",
-        "placeholder": "이미지를 설명하거나 편집하세요…",
-        "aspectAria": "이미지 화면 비율",
-        "aspectLabel": "이미지 비율",
-        "aspect": {
-          "auto": "자동",
-          "1_1": "정사각형 1:1",
-          "3_4": "세로 3:4",
-          "9_16": "스토리 9:16",
-          "4_3": "가로 4:3",
-          "16_9": "와이드 16:9"
-        }
-      },
-      "encoding": "처리 중…",
-      "remove": "첨부 제거",
-      "normalizedSizeHint": "{{orig}} → {{current}} (자동 압축)",
-      "imageRejected": {
-        "unsupported_type": "지원하지 않는 파일 형식입니다",
-        "too_many_images": "메시지당 최대 {{max}}장까지 가능합니다",
-        "magic_mismatch": "이미지 파일이 아닌 것 같습니다",
-        "decode_failed": "이 이미지를 디코딩할 수 없습니다",
-        "too_large": "이미지가 너무 큽니다. 더 작은 걸로 시도해 주세요",
-        "io": "이 파일을 읽을 수 없습니다"
-      },
       "slash": {
         "ariaLabel": "슬래시 명령",
         "label": "명령",
@@ -301,7 +248,19 @@
           }
         }
       },
-      "goalStateCloseAria": "목표 닫기"
+      "goalStateCloseAria": "목표 닫기",
+      "attachImage": "이미지 첨부",
+      "encoding": "처리 중…",
+      "remove": "첨부 제거",
+      "normalizedSizeHint": "{{orig}} → {{current}} (자동 압축)",
+      "imageRejected": {
+        "unsupported_type": "지원하지 않는 파일 형식입니다",
+        "too_many_images": "메시지당 최대 {{max}}장까지 가능합니다",
+        "magic_mismatch": "이미지 파일이 아닌 것 같습니다",
+        "decode_failed": "이 이미지를 디코딩할 수 없습니다",
+        "too_large": "이미지가 너무 큽니다. 더 작은 걸로 시도해 주세요",
+        "io": "이 파일을 읽을 수 없습니다"
+      }
     },
     "scrollToBottom": "맨 아래로 스크롤"
   },

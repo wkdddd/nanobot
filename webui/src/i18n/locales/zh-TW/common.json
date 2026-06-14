@@ -180,32 +180,6 @@
           "title": "更多",
           "prompt": "展示幾個你在這個工作區裡可以幫我的實用方式。"
         }
-      },
-      "imageQuickActions": {
-        "icon": {
-          "title": "設計應用程式圖示",
-          "prompt": "生成一個乾淨的 1:1 nanobot 應用程式圖示：友善的機器人、簡潔向量風格、柔和藍白配色，不要文字。"
-        },
-        "sticker": {
-          "title": "製作貼圖",
-          "prompt": "生成一張可愛貼圖風格的小型機器人助理圖片，背景像透明貼紙，表情活潑有趣。"
-        },
-        "poster": {
-          "title": "建立海報",
-          "prompt": "生成一張個人 AI 助理的精緻海報概念圖，現代構圖、清楚的視覺層級，適合登陸頁展示。"
-        },
-        "product": {
-          "title": "產品樣機",
-          "prompt": "生成一張對話式 AI Web 應用的乾淨產品樣機圖，極簡介面、高級光影、真實裝置邊框。"
-        },
-        "portrait": {
-          "title": "風格化頭像",
-          "prompt": "生成一個友善 AI 夥伴的風格化頭像，柔和光線、細節豐富但親切，現代插畫風格。"
-        },
-        "edit": {
-          "title": "編輯圖片",
-          "prompt": "幫我編輯一張圖片。先請我上傳或指定要編輯的圖片，然後生成編輯後的結果。"
-        }
       }
     },
     "header": {
@@ -225,33 +199,6 @@
       "goalStateSheetTitle": "目標",
       "send": "送出訊息",
       "stop": "停止回覆",
-      "attachImage": "附加圖片",
-      "imageMode": {
-        "label": "圖片生成",
-        "toggle": "切換圖片生成模式",
-        "placeholder": "描述或編輯圖片…",
-        "aspectAria": "圖片畫幅",
-        "aspectLabel": "圖片畫幅",
-        "aspect": {
-          "auto": "自動",
-          "1_1": "方形 1:1",
-          "3_4": "直式 3:4",
-          "9_16": "故事版 9:16",
-          "4_3": "橫式 4:3",
-          "16_9": "寬螢幕 16:9"
-        }
-      },
-      "encoding": "處理中…",
-      "remove": "移除附件",
-      "normalizedSizeHint": "{{orig}} → {{current}}（已自動壓縮）",
-      "imageRejected": {
-        "unsupported_type": "不支援的檔案類型",
-        "too_many_images": "每則訊息最多 {{max}} 張圖片",
-        "magic_mismatch": "檔案看起來不像真正的圖片",
-        "decode_failed": "無法解碼這張圖片",
-        "too_large": "圖片太大，請換一張小一點的",
-        "io": "無法讀取這個檔案"
-      },
       "slash": {
         "ariaLabel": "斜線命令",
         "label": "命令",
@@ -301,7 +248,19 @@
           }
         }
       },
-      "goalStateCloseAria": "關閉目標"
+      "goalStateCloseAria": "關閉目標",
+      "attachImage": "附加圖片",
+      "encoding": "處理中…",
+      "remove": "移除附件",
+      "normalizedSizeHint": "{{orig}} → {{current}}（已自動壓縮）",
+      "imageRejected": {
+        "unsupported_type": "不支援的檔案類型",
+        "too_many_images": "每則訊息最多 {{max}} 張圖片",
+        "magic_mismatch": "檔案看起來不像真正的圖片",
+        "decode_failed": "無法解碼這張圖片",
+        "too_large": "圖片太大，請換一張小一點的",
+        "io": "無法讀取這個檔案"
+      }
     },
     "scrollToBottom": "捲動到底部"
   },

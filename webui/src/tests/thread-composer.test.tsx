@@ -85,6 +85,7 @@ describe("ThreadComposer", () => {
     expect(input.parentElement?.className).toContain("rounded-[22px]");
     expect(input.parentElement?.className).toContain("shadow-[0_12px_30px_rgba(15,23,42,0.07)]");
     expect(screen.getByRole("button", { name: "Attach image" }).className).toContain("bg-card");
+    expect(screen.queryByRole("button", { name: "Toggle image generation mode" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send message" }).className).toContain("bg-foreground");
   });
 
@@ -212,29 +213,6 @@ describe("ThreadComposer", () => {
     expect(screen.queryByRole("listbox", { name: "Slash commands" })).not.toBeInTheDocument();
   });
 
-  it("sends image generation mode with automatic aspect ratio", () => {
-    const onSend = vi.fn();
-    render(
-      <ThreadComposer
-        onSend={onSend}
-        placeholder="Type your message..."
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Toggle image generation mode" }));
-    expect(screen.getByPlaceholderText("Describe or edit an image…")).toBeInTheDocument();
-
-    const input = screen.getByLabelText("Message input");
-    fireEvent.change(input, { target: { value: "Draw a friendly robot" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(onSend).toHaveBeenCalledWith(
-      "Draw a friendly robot",
-      undefined,
-      { imageGeneration: { enabled: true, aspect_ratio: null } },
-    );
-  });
-
   it("shows a stop button while streaming", () => {
     const onStop = vi.fn();
     render(
@@ -268,75 +246,28 @@ describe("ThreadComposer", () => {
     expect(onSessionApprovalChange).toHaveBeenCalledWith(true);
   });
 
-  it("lets users select a concrete image aspect ratio", () => {
-    const onSend = vi.fn();
-    render(
-      <ThreadComposer
-        onSend={onSend}
-        placeholder="Type your message..."
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "Toggle image generation mode" }));
-    fireEvent.click(screen.getByRole("button", { name: "Image aspect ratio" }));
-    expect(screen.getByRole("listbox", { name: "Image aspect ratio" }).className).toContain(
-      "bottom-full",
-    );
-    fireEvent.mouseDown(screen.getByRole("option", { name: "Wide 16:9" }));
-
-    const input = screen.getByLabelText("Message input");
-    fireEvent.change(input, { target: { value: "Draw a banner" } });
-    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
-
-    expect(onSend).toHaveBeenCalledWith(
-      "Draw a banner",
-      undefined,
-      { imageGeneration: { enabled: true, aspect_ratio: "16:9" } },
-    );
-  });
-
-  it("opens the hero image aspect menu downward", () => {
+  it("groups mutually exclusive Review and QA modes in one control", () => {
+    const onReviewModeChange = vi.fn();
+    const onMathQaModeChange = vi.fn();
     render(
       <ThreadComposer
         onSend={vi.fn()}
-        placeholder="Ask anything..."
-        variant="hero"
-        imageMode
+        placeholder="Type your message..."
+        reviewModeEnabled
+        onReviewModeChange={onReviewModeChange}
+        mathQaModeEnabled={false}
+        onMathQaModeChange={onMathQaModeChange}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Image aspect ratio" }));
+    const group = screen.getByRole("group", { name: "Assistance mode" });
+    expect(group).toContainElement(screen.getByRole("button", { name: "Disable review mode" }));
+    expect(group).toContainElement(screen.getByRole("button", { name: "Enable math QA mode" }));
 
-    expect(screen.getByRole("listbox", { name: "Image aspect ratio" }).className).toContain(
-      "top-full",
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Enable math QA mode" }));
+
+    expect(onReviewModeChange).toHaveBeenCalledWith(false);
+    expect(onMathQaModeChange).toHaveBeenCalledWith(true);
   });
 
-  it("dismisses the image aspect menu on outside click, escape, and wheel", () => {
-    render(
-      <div>
-        <button type="button">outside</button>
-        <ThreadComposer
-          onSend={vi.fn()}
-          placeholder="Type your message..."
-          imageMode
-        />
-      </div>,
-    );
-
-    const aspectButton = screen.getByRole("button", { name: "Image aspect ratio" });
-    fireEvent.click(aspectButton);
-    expect(screen.getByRole("listbox", { name: "Image aspect ratio" })).toBeInTheDocument();
-
-    fireEvent.pointerDown(screen.getByRole("button", { name: "outside" }));
-    expect(screen.queryByRole("listbox", { name: "Image aspect ratio" })).not.toBeInTheDocument();
-
-    fireEvent.click(aspectButton);
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("listbox", { name: "Image aspect ratio" })).not.toBeInTheDocument();
-
-    fireEvent.click(aspectButton);
-    fireEvent.wheel(screen.getByRole("listbox", { name: "Image aspect ratio" }), { deltaY: 120 });
-    expect(screen.queryByRole("listbox", { name: "Image aspect ratio" })).not.toBeInTheDocument();
-  });
 });

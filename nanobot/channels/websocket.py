@@ -30,6 +30,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
+from nanobot.agent.math_qa import MATH_QA_MODE_KEY
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -567,11 +568,41 @@ class WebSocketChannel(BaseChannel):
                 approval_enabled=approval_enabled,
             )
 
+    async def _maybe_push_specialist_modes(self, chat_id: str) -> None:
+        """Replay mutually exclusive mode toggles after subscribe."""
+        if self._session_manager is None:
+            return
+        row = self._session_manager.read_session_file(f"websocket:{chat_id}")
+        meta = row.get("metadata", {}) if isinstance(row, dict) else {}
+        if not isinstance(meta, dict):
+            return
+        review_enabled = bool(meta.get("review_mode", False))
+        math_enabled = False if review_enabled else bool(meta.get(MATH_QA_MODE_KEY, False))
+        if not review_enabled and not math_enabled:
+            return
+        conns = list(self._subs.get(chat_id, ()))
+        for conn in conns:
+            await self._send_event(
+                conn,
+                "review_mode_updated",
+                chat_id=chat_id,
+                enabled=review_enabled,
+                math_qa_enabled=math_enabled,
+            )
+            await self._send_event(
+                conn,
+                "math_qa_mode_updated",
+                chat_id=chat_id,
+                enabled=math_enabled,
+                review_enabled=review_enabled,
+            )
+
     async def _hydrate_after_subscribe(self, chat_id: str) -> None:
         """Replay goal/run strip state after subscribe (same-process refresh)."""
         await self._maybe_push_active_goal_state(chat_id)
         await self._maybe_push_turn_run_wall_clock(chat_id)
         await self._maybe_push_session_approval_state(chat_id)
+        await self._maybe_push_specialist_modes(chat_id)
 
     async def _send_event(self, connection: Any, event: str, **fields: Any) -> None:
         """Send a control event (attached, error, ...) to a single connection."""
@@ -1625,16 +1656,45 @@ class WebSocketChannel(BaseChannel):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
             logger.info("session websocket:{} review mode: {}", cid, "enabled" if enabled else "disabled")
+            math_enabled = False
             if self._session_manager is not None:
                 session_key = f"websocket:{cid}"
                 session = self._session_manager.get_or_create(session_key)
                 session.metadata["review_mode"] = enabled
+                if enabled:
+                    session.metadata[MATH_QA_MODE_KEY] = False
+                math_enabled = bool(session.metadata.get(MATH_QA_MODE_KEY, False))
                 self._session_manager.save(session)
             await self._send_event(
                 connection,
                 "review_mode_updated",
                 chat_id=cid,
                 enabled=enabled,
+                math_qa_enabled=math_enabled,
+            )
+            return
+        if t == "set_math_qa_mode":
+            cid = envelope.get("chat_id")
+            enabled = bool(envelope.get("enabled", False))
+            if not _is_valid_chat_id(cid):
+                await self._send_event(connection, "error", detail="invalid chat_id")
+                return
+            logger.info("session websocket:{} math QA mode: {}", cid, "enabled" if enabled else "disabled")
+            review_enabled = False
+            if self._session_manager is not None:
+                session_key = f"websocket:{cid}"
+                session = self._session_manager.get_or_create(session_key)
+                session.metadata[MATH_QA_MODE_KEY] = enabled
+                if enabled:
+                    session.metadata["review_mode"] = False
+                review_enabled = bool(session.metadata.get("review_mode", False))
+                self._session_manager.save(session)
+            await self._send_event(
+                connection,
+                "math_qa_mode_updated",
+                chat_id=cid,
+                enabled=enabled,
+                review_enabled=review_enabled,
             )
             return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")

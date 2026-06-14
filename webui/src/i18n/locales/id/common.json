@@ -180,32 +180,6 @@
           "title": "Lainnya",
           "prompt": "Tunjukkan beberapa cara berguna Anda dapat membantu di workspace ini."
         }
-      },
-      "imageQuickActions": {
-        "icon": {
-          "title": "Desain ikon aplikasi",
-          "prompt": "Buat ikon aplikasi 1:1 yang bersih untuk nanobot: robot ramah, gaya vektor sederhana, palet biru dan putih lembut, tanpa teks."
-        },
-        "sticker": {
-          "title": "Buat stiker",
-          "prompt": "Buat gambar gaya stiker yang lucu dari asisten robot kecil, latar terlihat transparan, ekspresif dan menyenangkan."
-        },
-        "poster": {
-          "title": "Buat poster",
-          "prompt": "Buat konsep poster yang rapi untuk asisten AI pribadi, komposisi modern, hierarki visual kuat, cocok untuk landing page."
-        },
-        "product": {
-          "title": "Mockup produk",
-          "prompt": "Buat gambar mockup produk yang bersih untuk aplikasi web AI percakapan, antarmuka minimal, pencahayaan premium, bingkai perangkat realistis."
-        },
-        "portrait": {
-          "title": "Potret bergaya",
-          "prompt": "Buat potret bergaya dari pendamping AI yang ramah, pencahayaan lembut, detail tetapi tetap mudah didekati, gaya ilustrasi modern."
-        },
-        "edit": {
-          "title": "Edit gambar",
-          "prompt": "Bantu saya mengedit gambar. Minta saya mengunggah atau menyebutkan gambar terlebih dahulu, lalu buat hasil editnya."
-        }
       }
     },
     "header": {
@@ -225,33 +199,6 @@
       "goalStateSheetTitle": "Tujuan",
       "send": "Kirim pesan",
       "stop": "Hentikan respons",
-      "attachImage": "Lampirkan gambar",
-      "imageMode": {
-        "label": "Buat gambar",
-        "toggle": "Alihkan mode pembuatan gambar",
-        "placeholder": "Deskripsikan atau edit gambar…",
-        "aspectAria": "Rasio aspek gambar",
-        "aspectLabel": "Rasio gambar",
-        "aspect": {
-          "auto": "Otomatis",
-          "1_1": "Persegi 1:1",
-          "3_4": "Potret 3:4",
-          "9_16": "Story 9:16",
-          "4_3": "Lanskap 4:3",
-          "16_9": "Lebar 16:9"
-        }
-      },
-      "encoding": "Memproses…",
-      "remove": "Hapus lampiran",
-      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
-      "imageRejected": {
-        "unsupported_type": "Tipe file tidak didukung",
-        "too_many_images": "Maksimal {{max}} gambar per pesan",
-        "magic_mismatch": "File ini tampaknya bukan gambar asli",
-        "decode_failed": "Tidak dapat mendekode gambar ini",
-        "too_large": "Gambar terlalu besar — coba yang lebih kecil",
-        "io": "Tidak dapat membaca file ini"
-      },
       "slash": {
         "ariaLabel": "Perintah slash",
         "label": "perintah",
@@ -301,7 +248,19 @@
           }
         }
       },
-      "goalStateCloseAria": "Tutup tujuan"
+      "goalStateCloseAria": "Tutup tujuan",
+      "attachImage": "Lampirkan gambar",
+      "encoding": "Memproses…",
+      "remove": "Hapus lampiran",
+      "normalizedSizeHint": "{{orig}} → {{current}} (auto)",
+      "imageRejected": {
+        "unsupported_type": "Tipe file tidak didukung",
+        "too_many_images": "Maksimal {{max}} gambar per pesan",
+        "magic_mismatch": "File ini tampaknya bukan gambar asli",
+        "decode_failed": "Tidak dapat mendekode gambar ini",
+        "too_large": "Gambar terlalu besar — coba yang lebih kecil",
+        "io": "Tidak dapat membaca file ini"
+      }
     },
     "scrollToBottom": "Gulir ke bawah"
   },

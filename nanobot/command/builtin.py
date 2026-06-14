@@ -74,6 +74,20 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
         "[n]",
     ),
     BuiltinCommandSpec(
+        "/math-kb",
+        "Manage math knowledge base",
+        "List or add local math knowledge files.",
+        "book-open",
+        "[list|add <path>]",
+    ),
+    BuiltinCommandSpec(
+        "/mistake-add",
+        "Add to mistake book",
+        "Save the latest math QA turn to the mistake book.",
+        "square-pen",
+        "[reason]",
+    ),
+    BuiltinCommandSpec(
         "/goal",
         "Start long-running goal",
         "Tell the agent to treat the request as a long-running goal.",
@@ -561,6 +575,104 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
     )
 
 
+async def cmd_math_kb(ctx: CommandContext) -> OutboundMessage:
+    """List or add files for the lightweight math knowledge base."""
+    from pathlib import Path
+
+    from nanobot.agent.math_qa import MathKnowledgeBase
+
+    kb = MathKnowledgeBase(ctx.loop.workspace)
+    args = ctx.args.strip()
+    metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
+    if not args or args.lower() == "list":
+        files = kb.list_files()
+        if not files:
+            content = (
+                "Math knowledge base is empty.\n"
+                "Add UTF-8 Markdown/TXT/JSON/JSONL files with `/math-kb add <path>`.\n"
+                f"Storage: `{kb.base_dir}`"
+            )
+        else:
+            lines = ["Math knowledge base files:"]
+            for path in files:
+                try:
+                    label = path.relative_to(ctx.loop.workspace).as_posix()
+                except ValueError:
+                    label = str(path)
+                lines.append(f"- `{label}`")
+            content = "\n".join(lines)
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=content,
+            metadata=metadata,
+        )
+
+    parts = args.split(maxsplit=1)
+    if parts[0].lower() != "add" or len(parts) != 2:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="Usage: `/math-kb [list|add <path>]`",
+            metadata=metadata,
+        )
+
+    raw_path = parts[1].strip().strip('"')
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = (ctx.loop.workspace / path).resolve()
+    try:
+        target = kb.add_file(path)
+    except Exception as exc:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content=f"Could not add knowledge file: {exc}",
+            metadata=metadata,
+        )
+    try:
+        label = target.relative_to(ctx.loop.workspace).as_posix()
+    except ValueError:
+        label = str(target)
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=f"Added knowledge file: `{label}`",
+        metadata=metadata,
+    )
+
+
+async def cmd_mistake_add(ctx: CommandContext) -> OutboundMessage:
+    """Save the latest math QA turn to the mistake book."""
+    from nanobot.agent.math_qa import append_mistake_record
+
+    session = ctx.session or ctx.loop.sessions.get_or_create(ctx.key)
+    reason = ctx.args.strip()
+    metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
+    try:
+        record = append_mistake_record(
+            ctx.loop.workspace,
+            session,
+            error_reason=reason,
+        )
+    except Exception as exc:
+        content = f"Could not add to mistake book: {exc}"
+    else:
+        tags = ", ".join(record.get("knowledge_tags") or []) or "未提取"
+        content = (
+            "Added the latest question to the mistake book.\n"
+            f"- 掌握状态：{record['mastery_status']}\n"
+            f"- 错误原因：{record['error_reason'] or '未填写'}\n"
+            f"- 知识点标签：{tags}"
+        )
+    return OutboundMessage(
+        channel=ctx.msg.channel,
+        chat_id=ctx.msg.chat_id,
+        content=content,
+        metadata=metadata,
+    )
+
+
 _GOAL_PROMPT_TEMPLATE = """The user declared a sustained objective for this thread.
 
 Inspect or clarify if needed, then call `long_task` with the refined objective (and optional short ui_summary). Work proceeds as normal assistant turns using your usual tools. When the objective is fully done and verified, call `complete_goal` with a brief recap. If the user later cancels or changes direction, still call `complete_goal` with an honest recap (then `long_task` again only after there is no active goal). Do not use `long_task` / `complete_goal` for trivial one-shot answers.
@@ -680,6 +792,10 @@ def register_builtin_commands(router: CommandRouter) -> None:
     router.prefix("/model ", cmd_model)
     router.exact("/history", cmd_history)
     router.prefix("/history ", cmd_history)
+    router.exact("/math-kb", cmd_math_kb)
+    router.prefix("/math-kb ", cmd_math_kb)
+    router.exact("/mistake-add", cmd_mistake_add)
+    router.prefix("/mistake-add ", cmd_mistake_add)
     router.exact("/goal", cmd_goal)
     router.prefix("/goal ", cmd_goal)
     router.exact("/dream", cmd_dream)

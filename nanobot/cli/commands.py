@@ -1063,6 +1063,10 @@ def review(
         "-f",
         help="Comma-separated review focus, e.g. security,tests,architecture,performance",
     ),
+    mode: str = typer.Option("full", "--mode", help="Review mode: quick, deep, or full"),
+    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
+    max_subagents: int | None = typer.Option(None, "--max-subagents", help="Maximum concurrent subagents"),
+    fail_on: str | None = typer.Option(None, "--fail-on", help="Exit non-zero if findings at or above: critical|high|medium|low"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render output as Markdown"),
@@ -1073,6 +1077,16 @@ def review(
     from nanobot.cli.stream import StreamRenderer
     from nanobot.agent.review.prompts import build_review_prompt
     from nanobot.agent.review.roles import normalize_focus
+
+    if mode not in ("quick", "deep", "full"):
+        console.print(f"[red]Invalid mode '{mode}'. Must be: quick, deep, or full[/red]")
+        raise typer.Exit(1)
+    if format not in ("markdown", "json"):
+        console.print(f"[red]Invalid format '{format}'. Must be: markdown or json[/red]")
+        raise typer.Exit(1)
+    if fail_on and fail_on not in ("critical", "high", "medium", "low"):
+        console.print(f"[red]Invalid --fail-on '{fail_on}'. Must be: critical, high, medium, or low[/red]")
+        raise typer.Exit(1)
 
     loaded = _load_runtime_config(config, workspace)
     sync_workspace_templates(loaded.workspace_path)
@@ -1093,12 +1107,15 @@ def review(
     async def run_once() -> None:
         try:
             roles, forced = normalize_focus(focus)
+            effective_max_subagents = max_subagents or loaded.review.max_subagents
             review_prompt = build_review_prompt(
                 target_url=target,
                 target_name=target,
                 roles=roles,
-                max_subagents=4,
+                max_subagents=effective_max_subagents,
                 forced=forced,
+                mode=mode,
+                output_format=format,
             )
 
             session_key = "cli:review"
@@ -1125,9 +1142,15 @@ def review(
                 on_stream_end=_on_stream_end,
             )
 
+            full_output = "".join(collected)
+
             if output:
-                full_output = "".join(collected)
-                _save_review_report(output, full_output)
+                _save_review_report(output, full_output, format)
+
+            if fail_on:
+                exit_code = _check_fail_on(full_output, fail_on, format)
+                if exit_code != 0:
+                    raise typer.Exit(exit_code)
 
         finally:
             await agent_loop.close_mcp()
@@ -1385,17 +1408,44 @@ def agent(
         asyncio.run(run_interactive())
 
 
-def _save_review_report(output_path: str, content: str) -> None:
+def _save_review_report(output_path: str, content: str, format: str = "markdown") -> None:
     """Save review report to file."""
     path = Path(output_path).expanduser()
 
     if not path.suffix:
-        path = path.with_suffix(".md")
+        path = path.with_suffix(".json" if format == "json" else ".md")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
     console.print(f"[green]Report saved to {path}[/green]")
+
+
+def _check_fail_on(report_content: str, threshold: str, format: str) -> int:
+    """Return non-zero exit code if findings meet or exceed the severity threshold."""
+    import json
+    import re
+
+    from nanobot.agent.review.format import SEVERITY_ORDER
+
+    threshold_idx = SEVERITY_ORDER.index(threshold)
+    target_severities = set(SEVERITY_ORDER[: threshold_idx + 1])
+
+    if format == "json":
+        try:
+            data = json.loads(report_content)
+            findings = data.get("findings", [])
+            for f in findings:
+                if f.get("severity") in target_severities:
+                    return 1
+        except (json.JSONDecodeError, TypeError):
+            return 0
+    else:
+        content_lower = report_content.lower()
+        for sev in target_severities:
+            if re.search(rf"(#{2,4}\s.*{sev}|severity:\s*{sev})", content_lower):
+                return 1
+    return 0
 # ============================================================================
 # Channel Commands
 # ============================================================================

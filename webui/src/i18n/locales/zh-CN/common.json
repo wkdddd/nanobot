@@ -191,32 +191,6 @@
           "title": "更多",
           "prompt": "展示几个你在这个工作区里可以帮我的实用方式。"
         }
-      },
-      "imageQuickActions": {
-        "icon": {
-          "title": "设计应用图标",
-          "prompt": "生成一个干净的 1:1 nanobot 应用图标：友好的机器人，简洁矢量风格，蓝白柔和配色，不要文字。"
-        },
-        "sticker": {
-          "title": "制作贴纸",
-          "prompt": "生成一张可爱的贴纸风小机器人助手图片，背景像透明贴纸，表情活泼有趣。"
-        },
-        "poster": {
-          "title": "创建海报",
-          "prompt": "生成一张个人 AI 助手的精致海报概念图，现代构图，视觉层级清晰，适合落地页展示。"
-        },
-        "product": {
-          "title": "产品样机",
-          "prompt": "生成一张对话式 AI Web 应用的干净产品样机图，极简界面，高级光影，真实设备边框。"
-        },
-        "portrait": {
-          "title": "风格化头像",
-          "prompt": "生成一个友好的 AI 伙伴风格化头像，柔和光线，细节丰富但亲切，现代插画风格。"
-        },
-        "edit": {
-          "title": "编辑图片",
-          "prompt": "帮我编辑一张图片。先让我上传或指定要编辑的图片，然后生成编辑后的结果。"
-        }
       }
     },
     "header": {
@@ -239,21 +213,11 @@
       "goalStateSheetTitle": "目标",
       "send": "发送消息",
       "stop": "停止响应",
-      "attachImage": "添加图片",
-      "imageMode": {
-        "label": "图片生成",
-        "toggle": "切换图片生成模式",
-        "placeholder": "描述或编辑图片…",
-        "aspectAria": "图片画幅",
-        "aspectLabel": "图片画幅",
-        "aspect": {
-          "auto": "自动",
-          "1_1": "方形 1:1",
-          "3_4": "竖版 3:4",
-          "9_16": "故事版 9:16",
-          "4_3": "横版 4:3",
-          "16_9": "宽屏 16:9"
-        }
+      "mathQa": {
+        "label": "答疑",
+        "enable": "开启数学答疑模式",
+        "disable": "关闭数学答疑模式",
+        "placeholder": "输入或上传一道考研数学题..."
       },
       "tools": {
         "search": "搜索",
@@ -310,6 +274,8 @@
           }
         }
       },
+      "goalStateCloseAria": "关闭目标",
+      "attachImage": "添加图片",
       "encoding": "处理中…",
       "remove": "移除附件",
       "normalizedSizeHint": "{{orig}} → {{current}}（已自动压缩）",
@@ -320,8 +286,7 @@
         "decode_failed": "无法解码这张图片",
         "too_large": "图片太大，请换一张小一点的",
         "io": "无法读取该文件"
-      },
-      "goalStateCloseAria": "关闭目标"
+      }
     },
     "scrollToBottom": "滚动到底部"
   },

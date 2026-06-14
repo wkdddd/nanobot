@@ -305,6 +305,19 @@ class ToolsConfig(Base):
         default_factory=lambda:_lazy_default("nanobot.agent.tools.unsplash","UnsplashSearchToolConfig")
     )
 
+
+class ReviewConfig(Base):
+    """Code review configuration defaults."""
+
+    default_mode: str = "full"
+    default_focus: list[str] = Field(default_factory=lambda: [
+        "security", "tests", "architecture", "performance"
+    ])
+    max_subagents: int = Field(default=4, ge=1, le=10)
+    output_format: str = "markdown"
+    fail_on: str | None = None
+
+
 class Config(BaseSettings):
     """Root configuration for nanobot."""
 
@@ -316,6 +329,7 @@ class Config(BaseSettings):
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    review: ReviewConfig = Field(default_factory=ReviewConfig)
     model_presets: dict[str, ModelPresetConfig] = Field(
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),

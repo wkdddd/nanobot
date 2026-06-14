@@ -4,12 +4,9 @@ import {
   BookOpen,
   ChevronRight,
   Code2,
-  ImageIcon,
   LayoutGrid,
   Lightbulb,
   MoreHorizontal,
-  Palette,
-  Sparkles,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
@@ -17,7 +14,7 @@ import { ThreadComposer } from "@/components/thread/ThreadComposer";
 import { ThreadHeader } from "@/components/thread/ThreadHeader";
 import { StreamErrorNotice } from "@/components/thread/StreamErrorNotice";
 import { ThreadViewport } from "@/components/thread/ThreadViewport";
-import { useNanobotStream, type SendImage, type SendOptions } from "@/hooks/useNanobotStream";
+import { useNanobotStream, type SendImage } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
 import { listSlashCommands } from "@/lib/api";
 import type { ChatSummary, SlashCommand, UIMessage } from "@/lib/types";
@@ -59,19 +56,9 @@ const QUICK_ACTION_KEYS = [
   { key: "more", icon: MoreHorizontal, tone: "text-muted-foreground/65" },
 ] as const;
 
-const IMAGE_QUICK_ACTION_KEYS = [
-  { key: "icon", icon: ImageIcon, tone: "text-[#4f9de8]" },
-  { key: "sticker", icon: Sparkles, tone: "text-[#f25b8f]" },
-  { key: "poster", icon: Palette, tone: "text-[#eba45d]" },
-  { key: "product", icon: LayoutGrid, tone: "text-[#53c59d]" },
-  { key: "portrait", icon: ImageIcon, tone: "text-[#a877e7]" },
-  { key: "edit", icon: MoreHorizontal, tone: "text-muted-foreground/65" },
-] as const;
-
 interface PendingFirstMessage {
   content: string;
   images?: SendImage[];
-  options?: SendOptions;
 }
 
 export function ThreadShell({
@@ -97,9 +84,9 @@ export function ThreadShell({
   const { client, modelName, token } = useClient();
   const [booting, setBooting] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
-  const [heroImageMode, setHeroImageMode] = useState(false);
   const [newChatApprovalEnabled, setNewChatApprovalEnabled] = useState(false);
   const [newChatReviewEnabled, setNewChatReviewEnabled] = useState(false);
+  const [newChatMathQaEnabled, setNewChatMathQaEnabled] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
   const pendingFirstRef = useRef<PendingFirstMessage | null>(null);
   const messageCacheRef = useRef<Map<string, UIMessage[]>>(new Map());
@@ -130,6 +117,8 @@ export function ThreadShell({
     setSessionApproval,
     reviewModeEnabled,
     setReviewMode,
+    mathQaModeEnabled,
+    setMathQaMode,
     respondToPermission,
     streamError,
     dismissStreamError,
@@ -241,10 +230,23 @@ export function ThreadShell({
       setReviewMode(true);
       setNewChatReviewEnabled(false);
     }
+    if (newChatMathQaEnabled) {
+      setMathQaMode(true);
+      setNewChatMathQaEnabled(false);
+    }
     setScrollToBottomSignal((value) => value + 1);
-    send(pending.content, pending.images, pending.options);
+    send(pending.content, pending.images);
     setBooting(false);
-  }, [chatId, newChatApprovalEnabled, newChatReviewEnabled, send, setSessionApproval, setReviewMode]);
+  }, [
+    chatId,
+    newChatApprovalEnabled,
+    newChatReviewEnabled,
+    newChatMathQaEnabled,
+    send,
+    setSessionApproval,
+    setReviewMode,
+    setMathQaMode,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -262,10 +264,10 @@ export function ThreadShell({
   }, [token]);
 
   const handleWelcomeSend = useCallback(
-    async (content: string, images?: SendImage[], options?: SendOptions) => {
+    async (content: string, images?: SendImage[]) => {
       if (booting) return;
       setBooting(true);
-      pendingFirstRef.current = { content, images, options };
+      pendingFirstRef.current = { content, images };
       const newId = await onCreateChat?.();
       if (!newId) {
         pendingFirstRef.current = null;
@@ -276,36 +278,29 @@ export function ThreadShell({
   );
 
   const handleThreadSend = useCallback(
-    (content: string, images?: SendImage[], options?: SendOptions) => {
+    (content: string, images?: SendImage[]) => {
       setScrollToBottomSignal((value) => value + 1);
-      send(content, images, options);
+      send(content, images);
     },
     [send],
   );
 
   const handleQuickAction = useCallback(
     (prompt: string) => {
-      const options: SendOptions | undefined = heroImageMode
-        ? { imageGeneration: { enabled: true, aspect_ratio: null } }
-        : undefined;
       if (session) {
-        handleThreadSend(prompt, undefined, options);
+        handleThreadSend(prompt);
         return;
       }
-      void handleWelcomeSend(prompt, undefined, options);
+      void handleWelcomeSend(prompt);
     },
-    [handleThreadSend, handleWelcomeSend, heroImageMode, session],
+    [handleThreadSend, handleWelcomeSend, session],
   );
 
-  const quickActionItems = heroImageMode ? IMAGE_QUICK_ACTION_KEYS : QUICK_ACTION_KEYS;
-  const quickActionPrefix = heroImageMode
-    ? "thread.empty.imageQuickActions"
-    : "thread.empty.quickActions";
   const quickActions = (
     <div className="mx-auto grid w-full max-w-[58rem] grid-cols-2 gap-3 pt-4 sm:grid-cols-3 lg:grid-cols-6 lg:gap-4">
-      {quickActionItems.map(({ key, icon: Icon, tone }) => {
-        const title = t(`${quickActionPrefix}.${key}.title`);
-        const prompt = t(`${quickActionPrefix}.${key}.prompt`);
+      {QUICK_ACTION_KEYS.map(({ key, icon: Icon, tone }) => {
+        const title = t(`thread.empty.quickActions.${key}.title`);
+        const prompt = t(`thread.empty.quickActions.${key}.prompt`);
         return (
           <button
             key={key}
@@ -346,8 +341,6 @@ export function ThreadShell({
           modelLabel={toModelBadgeLabel(modelName)}
           variant={showHeroComposer ? "hero" : "thread"}
           slashCommands={slashCommands}
-          imageMode={showHeroComposer ? heroImageMode : undefined}
-          onImageModeChange={showHeroComposer ? setHeroImageMode : undefined}
           onStop={stop}
           runStartedAt={runStartedAt}
           goalState={goalState}
@@ -355,6 +348,8 @@ export function ThreadShell({
           onSessionApprovalChange={setSessionApproval}
           reviewModeEnabled={reviewModeEnabled}
           onReviewModeChange={setReviewMode}
+          mathQaModeEnabled={mathQaModeEnabled}
+          onMathQaModeChange={setMathQaMode}
         />
       ) : (
         <ThreadComposer
@@ -369,14 +364,20 @@ export function ThreadShell({
           modelLabel={toModelBadgeLabel(modelName)}
           variant="hero"
           slashCommands={slashCommands}
-          imageMode={heroImageMode}
-          onImageModeChange={setHeroImageMode}
           runStartedAt={runStartedAt}
           goalState={goalState}
           sessionApprovalEnabled={newChatApprovalEnabled}
           onSessionApprovalChange={setNewChatApprovalEnabled}
           reviewModeEnabled={newChatReviewEnabled}
-          onReviewModeChange={setNewChatReviewEnabled}
+          onReviewModeChange={(enabled) => {
+            setNewChatReviewEnabled(enabled);
+            if (enabled) setNewChatMathQaEnabled(false);
+          }}
+          mathQaModeEnabled={newChatMathQaEnabled}
+          onMathQaModeChange={(enabled) => {
+            setNewChatMathQaEnabled(enabled);
+            if (enabled) setNewChatReviewEnabled(false);
+          }}
         />
       )}
       {showHeroComposer ? quickActions : null}
