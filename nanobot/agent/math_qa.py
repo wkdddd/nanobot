@@ -5,15 +5,27 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import asyncio
+import hashlib
+import logging
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from nanobot.agent.rag.utils import ChunkKey, IndexedHit
+
+logger = logging.getLogger(__name__)
+
 MATH_QA_MODE_KEY = "math_qa_mode"
 KNOWLEDGE_DIR = ".nanobot/math_knowledge"
 MISTAKE_BOOK_PATH = ".nanobot/math_mistakes.jsonl"
 SUPPORTED_KNOWLEDGE_SUFFIXES = {".md", ".markdown", ".txt", ".json", ".jsonl"}
+SUPPORTED_SOURCE_SUFFIXES = SUPPORTED_KNOWLEDGE_SUFFIXES | {
+    ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff",
+}
 
 
 @dataclass(frozen=True)
@@ -125,12 +137,105 @@ def _hit_from_dict(raw: dict[str, Any], source: str) -> KnowledgeHit | None:
     )
 
 
-class MathKnowledgeBase:
-    """Small file-backed knowledge base for the MVP math QA mode."""
+def _elapsed_ms(start: float) -> int:
+    return int((time.perf_counter() - start) * 1000)
 
-    def __init__(self, workspace: Path):
+
+def _hit_key(hit: IndexedHit) -> ChunkKey:
+    chunk = hit.chunk
+    return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
+
+
+def _rrf_merge(
+    bm25_hits: list[IndexedHit],
+    dense_hits: list[IndexedHit],
+    *,
+    limit: int,
+    k: int = 60,
+) -> list[IndexedHit]:
+    scores: dict[ChunkKey, float] = {}
+    chunks: dict[ChunkKey, Any] = {}
+    reasons: dict[ChunkKey, list[str]] = {}
+
+    for source_reason, hits in (("bm25", bm25_hits), ("dense", dense_hits)):
+        for rank, hit in enumerate(hits, 1):
+            key = _hit_key(hit)
+            chunks[key] = hit.chunk
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            bucket = reasons.setdefault(key, [])
+            for reason in [source_reason, *hit.reason]:
+                if reason not in bucket:
+                    bucket.append(reason)
+
+    merged = [
+        IndexedHit(
+            chunk=chunks[key],
+            score=score,
+            reason=["hybrid", *reasons.get(key, [])],
+        )
+        for key, score in scores.items()
+    ]
+    merged.sort(key=lambda hit: -hit.score)
+    return merged[:limit]
+
+
+def _qdrant_sync_fingerprint(
+    chunks: list[Any],
+    *,
+    collection: str,
+    embedding_model: str,
+    dimensions: int,
+) -> str:
+    rows = [
+        [
+            chunk.path,
+            int(chunk.start_line),
+            int(chunk.end_line),
+            chunk.kind,
+            chunk.content_hash,
+        ]
+        for chunk in chunks
+    ]
+    payload = {
+        "collection": collection,
+        "embedding_model": embedding_model,
+        "dimensions": dimensions,
+        "chunks": rows,
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _index_meta_get(index: Any, key: str) -> str:
+    with index._connect() as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _index_meta_set(index: Any, key: str, value: str) -> None:
+    with index._connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+            (key, value),
+        )
+
+
+class MathKnowledgeBase:
+    """File-backed math knowledge base with RAG indexing and lexical fallback."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        embedding_config: Any | None = None,
+        rerank_config: Any | None = None,
+        qdrant_config: Any | None = None,
+    ):
         self.workspace = workspace.expanduser().resolve()
         self.base_dir = self.workspace / KNOWLEDGE_DIR
+        self.embedding_config = embedding_config
+        self.rerank_config = rerank_config
+        self.qdrant_config = qdrant_config
 
     def ensure_dir(self) -> Path:
         self.base_dir.mkdir(parents=True, exist_ok=True)
@@ -140,9 +245,9 @@ class MathKnowledgeBase:
         source_path = source_path.expanduser().resolve()
         if not source_path.is_file():
             raise FileNotFoundError(str(source_path))
-        if source_path.suffix.lower() not in SUPPORTED_KNOWLEDGE_SUFFIXES:
+        if source_path.suffix.lower() not in SUPPORTED_SOURCE_SUFFIXES:
             raise ValueError(
-                "Only Markdown, TXT, JSON and JSONL files are supported for the MVP knowledge base."
+                "Only Markdown, TXT, JSON, JSONL, PDF and image files are supported."
             )
         target_dir = self.ensure_dir()
         target = target_dir / source_path.name
@@ -164,8 +269,37 @@ class MathKnowledgeBase:
             return []
         return sorted(
             p for p in self.base_dir.rglob("*")
+            if p.is_file() and p.suffix.lower() in SUPPORTED_SOURCE_SUFFIXES
+        )
+
+    def list_text_files(self) -> list[Path]:
+        if not self.base_dir.exists():
+            return []
+        return sorted(
+            p for p in self.base_dir.rglob("*")
             if p.is_file() and p.suffix.lower() in SUPPORTED_KNOWLEDGE_SUFFIXES
         )
+
+    def list_index_files(self) -> list[Path]:
+        if not self.base_dir.exists():
+            return []
+        markdown_dir = self.base_dir / "_markdown"
+        preferred = (
+            sorted(
+                p for p in markdown_dir.rglob("*")
+                if p.is_file() and p.suffix.lower() in SUPPORTED_KNOWLEDGE_SUFFIXES
+            )
+            if markdown_dir.exists() else []
+        )
+        direct = sorted(
+            p for p in self.base_dir.rglob("*")
+            if (
+                p.is_file()
+                and p.suffix.lower() in SUPPORTED_KNOWLEDGE_SUFFIXES
+                and "_markdown" not in p.relative_to(self.base_dir).parts
+            )
+        )
+        return preferred + direct
 
     def _load_hits_from_file(self, path: Path) -> list[KnowledgeHit]:
         rel = path.relative_to(self.workspace).as_posix()
@@ -205,7 +339,7 @@ class MathKnowledgeBase:
             return []
 
         scored: list[KnowledgeHit] = []
-        for path in self.list_files():
+        for path in self.list_text_files():
             for hit in self._load_hits_from_file(path):
                 haystack = "\n".join([
                     hit.title,
@@ -226,6 +360,368 @@ class MathKnowledgeBase:
         scored.sort(key=lambda item: item.score, reverse=True)
         return scored[:limit]
 
+    def sync_index(self, *, trace_id: str | None = None) -> None:
+        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE, chunk_math_file
+        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.agent.rag.rerank import create_rerank_client_from_config
+
+        t0 = time.perf_counter()
+        files = self.list_index_files()
+        embedding_client = create_embedding_client_from_config(self.embedding_config)
+        rerank_client = create_rerank_client_from_config(self.rerank_config)
+        index = RAGIndex(
+            self.workspace,
+            embedding_client=embedding_client,
+            rerank_client=rerank_client,
+            dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
+        )
+
+        def chunker(path: Path, text: str):
+            rel = path.relative_to(self.workspace)
+            return chunk_math_file(rel, text)
+
+        index.sync_files(
+            source_type=MATH_SOURCE_TYPE,
+            files=files,
+            chunker=chunker,
+            max_file_chars=2_000_000,
+        )
+        logger.info(
+            "✓ MathRAG index sync rag=math trace=%s files=%s chunks=%s elapsed_ms=%s",
+            trace_id or "-",
+            len(files),
+            index.count(MATH_SOURCE_TYPE),
+            _elapsed_ms(t0),
+        )
+
+    async def async_sync_index(self, *, trace_id: str | None = None) -> None:
+        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
+        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.agent.rag.qdrant_store import (
+            QdrantMathVectorStore,
+            chunk_key,
+            stable_point_id,
+        )
+
+        await asyncio.to_thread(self.sync_index, trace_id=trace_id)
+        embedding_client = create_embedding_client_from_config(self.embedding_config)
+        if embedding_client is None:
+            logger.info(
+                "⚠ MathRAG dense fallback rag=math trace=%s reason=embedding_disabled",
+                trace_id or "-",
+            )
+            return
+
+        vector_store = QdrantMathVectorStore.from_config(
+            self.qdrant_config,
+            dimensions=getattr(embedding_client, "dimensions", 1024),
+        )
+        if vector_store is None:
+            logger.info(
+                "⚠ MathRAG dense fallback rag=math trace=%s reason=qdrant_disabled",
+                trace_id or "-",
+            )
+            return
+
+        t0 = time.perf_counter()
+        try:
+            index = RAGIndex(self.workspace)
+            chunks = index.list_chunks(MATH_SOURCE_TYPE)
+            dimensions = getattr(embedding_client, "dimensions", 1024)
+            fingerprint = _qdrant_sync_fingerprint(
+                chunks,
+                collection=vector_store.collection,
+                embedding_model=getattr(embedding_client, "model", ""),
+                dimensions=dimensions,
+            )
+            meta_key = f"math_qdrant_sync:{vector_store.collection}:{dimensions}"
+            if _index_meta_get(index, meta_key) == fingerprint:
+                logger.info(
+                    "✓ MathRAG dense sync rag=math trace=%s collection=%s chunks=%s status=current elapsed_ms=%s",
+                    trace_id or "-",
+                    vector_store.collection,
+                    len(chunks),
+                    _elapsed_ms(t0),
+                )
+                return
+            vectors = await embedding_client.embed_texts([chunk.text for chunk in chunks])
+            upserted = await asyncio.to_thread(
+                vector_store.upsert_chunks,
+                source_type=MATH_SOURCE_TYPE,
+                chunks=chunks,
+                vectors=vectors,
+            )
+            keep_ids = {
+                stable_point_id(MATH_SOURCE_TYPE, chunk_key(chunk))
+                for chunk in chunks
+            }
+            pruned = await asyncio.to_thread(
+                vector_store.prune_missing,
+                source_type=MATH_SOURCE_TYPE,
+                keep_point_ids=keep_ids,
+            )
+            _index_meta_set(index, meta_key, fingerprint)
+            logger.info(
+                "✓ MathRAG dense sync rag=math trace=%s collection=%s chunks=%s upserted=%s pruned=%s elapsed_ms=%s",
+                trace_id or "-",
+                vector_store.collection,
+                len(chunks),
+                upserted,
+                pruned,
+                _elapsed_ms(t0),
+            )
+        except Exception as exc:
+            logger.warning(
+                "⚠ MathRAG dense sync fallback rag=math trace=%s reason=%s elapsed_ms=%s",
+                trace_id or "-",
+                exc,
+                _elapsed_ms(t0),
+            )
+
+    async def async_search(self, query: str, *, limit: int = 4) -> list[KnowledgeHit]:
+        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
+        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.agent.rag.qdrant_store import QdrantMathVectorStore
+        from nanobot.agent.rag.rerank import create_rerank_client_from_config
+
+        trace_id = uuid.uuid4().hex[:8]
+        total_t0 = time.perf_counter()
+        logger.info(
+            "🔎 MathRAG start rag=math trace=%s query_chars=%s limit=%s",
+            trace_id,
+            len(query),
+            limit,
+        )
+        embedding_client = create_embedding_client_from_config(self.embedding_config)
+        rerank_client = create_rerank_client_from_config(self.rerank_config)
+        index = RAGIndex(
+            self.workspace,
+            embedding_client=embedding_client,
+            rerank_client=rerank_client,
+            dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
+        )
+        try:
+            await self.async_sync_index(trace_id=trace_id)
+        except Exception as exc:
+            logger.warning(
+                "⚠ MathRAG index sync skipped rag=math trace=%s reason=%s",
+                trace_id,
+                exc,
+            )
+
+        bm25_t0 = time.perf_counter()
+        bm25_hits = index.lexical_search(MATH_SOURCE_TYPE, query, limit=80)
+        logger.info(
+            "✓ MathRAG bm25 recall rag=math trace=%s hits=%s elapsed_ms=%s",
+            trace_id,
+            len(bm25_hits),
+            _elapsed_ms(bm25_t0),
+        )
+
+        dense_hits: list[IndexedHit] = []
+        vector_store = QdrantMathVectorStore.from_config(
+            self.qdrant_config,
+            dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
+        )
+        if vector_store is None:
+            logger.info(
+                "⚠ MathRAG dense fallback rag=math trace=%s reason=qdrant_disabled",
+                trace_id,
+            )
+        elif embedding_client is None:
+            logger.info(
+                "⚠ MathRAG dense fallback rag=math trace=%s reason=embedding_disabled",
+                trace_id,
+            )
+        else:
+            dense_t0 = time.perf_counter()
+            try:
+                query_vec = await embedding_client.embed_query(query)
+                if query_vec is None:
+                    logger.info(
+                        "⚠ MathRAG dense fallback rag=math trace=%s reason=query_embedding_failed",
+                        trace_id,
+                    )
+                else:
+                    qdrant_hits = await asyncio.to_thread(
+                        vector_store.search,
+                        source_type=MATH_SOURCE_TYPE,
+                        query_vector=query_vec,
+                        top_k=80,
+                    )
+                    chunks_by_key = index._load_chunks_by_keys(
+                        {hit.key for hit in qdrant_hits},
+                        source_type=MATH_SOURCE_TYPE,
+                    )
+                    dense_hits = [
+                        IndexedHit(
+                            chunk=chunks_by_key[hit.key],
+                            score=hit.score,
+                            reason=["dense"],
+                        )
+                        for hit in qdrant_hits
+                        if hit.key in chunks_by_key
+                    ]
+                    logger.info(
+                        "✓ MathRAG dense recall rag=math trace=%s collection=%s hits=%s elapsed_ms=%s",
+                        trace_id,
+                        vector_store.collection,
+                        len(dense_hits),
+                        _elapsed_ms(dense_t0),
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "⚠ MathRAG dense fallback rag=math trace=%s reason=%s elapsed_ms=%s",
+                    trace_id,
+                    exc,
+                    _elapsed_ms(dense_t0),
+                )
+
+        hybrid_hits = _rrf_merge(bm25_hits, dense_hits, limit=30)
+        logger.info(
+            "✓ MathRAG hybrid merge rag=math trace=%s bm25=%s dense=%s merged=%s",
+            trace_id,
+            len(bm25_hits),
+            len(dense_hits),
+            len(hybrid_hits),
+        )
+
+        if rerank_client and hybrid_hits:
+            rerank_t0 = time.perf_counter()
+            try:
+                reranked = await index.rerank(query, hybrid_hits, max(limit * 3, 8))
+                hits = [
+                    IndexedHit(
+                        chunk=hit.chunk,
+                        score=hit.score,
+                        reason=list(dict.fromkeys([*hit.reason, "rerank"])),
+                    )
+                    for hit in reranked
+                ]
+                logger.info(
+                    "✓ MathRAG rerank rag=math trace=%s model=%s input=%s output=%s elapsed_ms=%s",
+                    trace_id,
+                    getattr(rerank_client, "model", "unknown"),
+                    len(hybrid_hits),
+                    len(hits),
+                    _elapsed_ms(rerank_t0),
+                )
+            except Exception as exc:
+                hits = hybrid_hits[: max(limit * 3, 8)]
+                logger.warning(
+                    "⚠ MathRAG rerank fallback rag=math trace=%s reason=%s elapsed_ms=%s",
+                    trace_id,
+                    exc,
+                    _elapsed_ms(rerank_t0),
+                )
+        else:
+            hits = hybrid_hits[: max(limit * 3, 8)]
+            logger.info(
+                "⚠ MathRAG rerank fallback rag=math trace=%s reason=rerank_disabled input=%s",
+                trace_id,
+                len(hybrid_hits),
+            )
+
+        if not hits:
+            logger.info(
+                "⚠ MathRAG lexical file fallback rag=math trace=%s reason=no_index_hits",
+                trace_id,
+            )
+            fallback_hits = self.search(query, limit=limit)
+            logger.info(
+                "✓ MathRAG done rag=math trace=%s final_hits=%s elapsed_ms=%s",
+                trace_id,
+                len(fallback_hits),
+                _elapsed_ms(total_t0),
+            )
+            return fallback_hits
+
+        expand_t0 = time.perf_counter()
+        expanded = self._expand_example_hits(hits)
+        final_hits = expanded[:limit]
+        logger.info(
+            "✓ MathRAG example expand rag=math trace=%s input=%s output=%s elapsed_ms=%s",
+            trace_id,
+            len(hits),
+            len(expanded),
+            _elapsed_ms(expand_t0),
+        )
+        logger.info(
+            "✓ MathRAG done rag=math trace=%s final_hits=%s elapsed_ms=%s",
+            trace_id,
+            len(final_hits),
+            _elapsed_ms(total_t0),
+        )
+        for i, hit in enumerate(final_hits, 1):
+            logger.debug(
+                "MathRAG hit rag=math trace=%s rank=%s score=%.4f source=%s title=%s",
+                trace_id,
+                i,
+                hit.score,
+                hit.source,
+                hit.title,
+            )
+        return final_hits
+
+    def _expand_example_hits(self, hits: list[Any]) -> list[KnowledgeHit]:
+        converted: list[KnowledgeHit] = []
+        seen: set[tuple[str, int, int, str]] = set()
+        for hit in hits:
+            chunk = hit.chunk
+            key = (chunk.path, chunk.start_line, chunk.end_line, chunk.kind)
+            if key in seen:
+                continue
+            seen.add(key)
+            converted.append(_knowledge_hit_from_indexed_hit(hit))
+
+            example_id = _symbol_value(chunk.symbols, "example_id:")
+            if example_id:
+                for sibling in self._load_example_siblings(example_id, exclude=key):
+                    sibling_key = (
+                        sibling.chunk.path,
+                        sibling.chunk.start_line,
+                        sibling.chunk.end_line,
+                        sibling.chunk.kind,
+                    )
+                    if sibling_key in seen:
+                        continue
+                    seen.add(sibling_key)
+                    converted.append(_knowledge_hit_from_indexed_hit(sibling, score=hit.score * 0.92))
+        converted.sort(key=lambda item: item.score, reverse=True)
+        return converted
+
+    def _load_example_siblings(self, example_id: str, *, exclude: tuple[str, int, int, str]) -> list[Any]:
+        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
+        from nanobot.agent.rag import RAGIndex
+        from nanobot.agent.rag.utils import IndexedHit, chunk_from_row
+
+        index = RAGIndex(self.workspace)
+        siblings: list[IndexedHit] = []
+        with index._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_type, path, start_line, end_line, kind, text, symbols,
+                       title, url, query, fetched_at, mtime, content_hash
+                FROM chunks
+                WHERE source_type = ? AND symbols LIKE ?
+                ORDER BY
+                  CASE kind
+                    WHEN 'example_question' THEN 1
+                    WHEN 'example_solution' THEN 2
+                    WHEN 'example_answer' THEN 3
+                    ELSE 4
+                  END
+                """,
+                (MATH_SOURCE_TYPE, f"%example_id:{example_id}%"),
+            ).fetchall()
+        for row in rows:
+            chunk = chunk_from_row(row)
+            key = (chunk.path, chunk.start_line, chunk.end_line, chunk.kind)
+            if key == exclude:
+                continue
+            siblings.append(IndexedHit(chunk=chunk, score=0.0, reason=["example_sibling"]))
+        return siblings
+
 
 def format_knowledge_context(hits: list[KnowledgeHit]) -> str:
     if not hits:
@@ -245,6 +741,35 @@ def format_knowledge_context(hits: list[KnowledgeHit]) -> str:
             f"- 内容：{content}"
         )
     return "\n\n".join(blocks)
+
+
+def _symbol_value(symbols: list[str], prefix: str) -> str:
+    for symbol in symbols:
+        if symbol.startswith(prefix):
+            return symbol[len(prefix):]
+    return ""
+
+
+def _knowledge_hit_from_indexed_hit(hit: Any, *, score: float | None = None) -> KnowledgeHit:
+    chunk = hit.chunk
+    chapter = _symbol_value(chunk.symbols, "chapter:")
+    block_type = _symbol_value(chunk.symbols, "block_type:") or chunk.kind
+    tags = tuple(
+        symbol.removeprefix("tag:")
+        for symbol in chunk.symbols
+        if symbol.startswith("tag:")
+    )
+    problem_types = (block_type,)
+    return KnowledgeHit(
+        title=chunk.title or Path(chunk.path).stem,
+        content=chunk.text,
+        source=f"{chunk.path}:{chunk.start_line}",
+        subject="数学",
+        chapter=chapter,
+        tags=tags,
+        problem_types=problem_types,
+        score=float(hit.score if score is None else score),
+    )
 
 
 def build_math_qa_prompt(knowledge_hits: list[KnowledgeHit]) -> str:
@@ -275,6 +800,35 @@ def build_math_qa_prompt(knowledge_hits: list[KnowledgeHit]) -> str:
 本地知识库检索结果：
 {knowledge_context}
 """
+
+
+async def resolve_math_qa_context(
+    initial_messages: list[dict[str, Any]],
+    session_meta: dict[str, Any],
+    *,
+    workspace: Path,
+    embedding_config: Any | None = None,
+    rerank_config: Any | None = None,
+    qdrant_config: Any | None = None,
+) -> str | None:
+    """Build the math QA system prompt with best-effort local KB retrieval."""
+    if session_meta.get("math_qa_prompt"):
+        return session_meta["math_qa_prompt"]
+
+    user_content = ""
+    for message in reversed(initial_messages):
+        if message.get("role") == "user":
+            user_content = _text_from_message_content(message.get("content"))
+            break
+
+    kb = MathKnowledgeBase(
+        workspace,
+        embedding_config=embedding_config,
+        rerank_config=rerank_config,
+        qdrant_config=qdrant_config,
+    )
+    hits = await kb.async_search(user_content, limit=4)
+    return build_math_qa_prompt(hits)
 
 
 def extract_last_user_and_answer(session: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:

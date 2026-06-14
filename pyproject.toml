@@ -83,6 +83,19 @@ langsmith = [
 pdf = [
     "pymupdf>=1.25.0",
 ]
+mathrag = [
+    "pymupdf>=1.25.0",
+    "pymupdf4llm>=0.0.17",
+    "paddleocr>=2.8.0",
+    "pix2tex>=0.1.2",
+    "pillow>=10.0.0",
+]
+mathrag-chunker = [
+    "chonkie>=1.0.0",
+]
+mathrag-qdrant = [
+    "qdrant-client>=1.12.0,<2.0.0",
+]
 olostep = [
     "olostep>=0.1.0",
 ]

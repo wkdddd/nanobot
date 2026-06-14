@@ -28,6 +28,19 @@ def _cosine_sim(a: list[float], b: list[float], a_norm: float) -> float:
     return dot / (a_norm * b_norm)
 
 
+def _rerank_document_text(hit: IndexedHit) -> str:
+    chunk = hit.chunk
+    symbols = ", ".join(chunk.symbols)
+    parts = [
+        f"标题: {chunk.title}" if chunk.title else "",
+        f"来源: {chunk.path}:{chunk.start_line}-{chunk.end_line}",
+        f"类型: {chunk.kind}",
+        f"符号: {symbols}" if symbols else "",
+        chunk.text,
+    ]
+    return "\n".join(part for part in parts if part).strip()
+
+
 class RAGIndex:
     """Unified RAG index: SQLite storage + FTS5 lexical search + hnswlib ANN."""
 
@@ -96,6 +109,22 @@ class RAGIndex:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def list_chunks(self, source_type: str) -> list[IndexedChunk]:
+        """Load all chunks for a source type in deterministic order."""
+        self._ensure_schema()
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_type, path, start_line, end_line, kind, text, symbols,
+                       title, url, query, fetched_at, mtime, content_hash
+                FROM chunks
+                WHERE source_type = ?
+                ORDER BY path, start_line, end_line, kind
+                """,
+                (source_type,),
+            ).fetchall()
+        return [chunk_from_row(row) for row in rows]
+
     # ─── Retrieval ───────────────────────────────────────────────────────
 
     async def search(
@@ -140,6 +169,19 @@ class RAGIndex:
         return candidates
 
     # ─── FTS5 lexical search ─────────────────────────────────────────────
+
+    def lexical_search(
+        self, source_type: str, query: str, *, limit: int = 100
+    ) -> list[IndexedHit]:
+        scores = self._fts5_search(source_type, query, limit=limit)
+        chunks_by_key = self._load_chunks_by_keys(set(scores), source_type=source_type)
+        hits = [
+            IndexedHit(chunk=chunk, score=scores[key], reason=["bm25"])
+            for key, chunk in chunks_by_key.items()
+            if key in scores
+        ]
+        hits.sort(key=lambda h: -h.score)
+        return hits
 
     def _fts5_search(
         self, source_type: str, query: str, *, limit: int = 100
@@ -311,31 +353,52 @@ class RAGIndex:
 
         return hits
 
-    def _load_chunks_by_keys(self, keys: set[ChunkKey]) -> dict[ChunkKey, IndexedChunk]:
+    def _load_chunks_by_keys(
+        self, keys: set[ChunkKey], *, source_type: str | None = None
+    ) -> dict[ChunkKey, IndexedChunk]:
         if not keys:
             return {}
         result: dict[ChunkKey, IndexedChunk] = {}
         with self._connect() as conn:
             for key in keys:
-                row = conn.execute(
-                    """
-                    SELECT source_type, path, start_line, end_line, kind, text, symbols,
-                           title, url, query, fetched_at, mtime, content_hash
-                    FROM chunks
-                    WHERE path = ? AND start_line = ? AND end_line = ? AND kind = ?
-                    """,
-                    (key[0], key[1], key[2], key[3]),
-                ).fetchone()
+                if source_type is None:
+                    row = conn.execute(
+                        """
+                        SELECT source_type, path, start_line, end_line, kind, text, symbols,
+                               title, url, query, fetched_at, mtime, content_hash
+                        FROM chunks
+                        WHERE path = ? AND start_line = ? AND end_line = ? AND kind = ?
+                        """,
+                        (key[0], key[1], key[2], key[3]),
+                    ).fetchone()
+                else:
+                    row = conn.execute(
+                        """
+                        SELECT source_type, path, start_line, end_line, kind, text, symbols,
+                               title, url, query, fetched_at, mtime, content_hash
+                        FROM chunks
+                        WHERE source_type = ? AND path = ? AND start_line = ?
+                          AND end_line = ? AND kind = ?
+                        """,
+                        (source_type, key[0], key[1], key[2], key[3]),
+                    ).fetchone()
                 if row:
                     result[key] = chunk_from_row(row)
         return result
 
     # ─── Rerank ──────────────────────────────────────────────────────────
 
+    async def rerank(
+        self, query: str, candidates: list[IndexedHit], max_hits: int
+    ) -> list[IndexedHit]:
+        if self.rerank_client and candidates:
+            return await self._rerank(query, candidates, max_hits)
+        return candidates[:max_hits]
+
     async def _rerank(
         self, query: str, candidates: list[IndexedHit], max_hits: int
     ) -> list[IndexedHit]:
-        docs = [c.chunk.text for c in candidates]
+        docs = [_rerank_document_text(c) for c in candidates]
         ranked = await self.rerank_client.rerank(query, docs, top_n=max_hits)
         if not ranked:
             return candidates[:max_hits]

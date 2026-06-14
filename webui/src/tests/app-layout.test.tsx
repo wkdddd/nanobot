@@ -170,6 +170,28 @@ describe("App layout", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/usage")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              scope: "process",
+              usage: {
+                prompt_tokens: 12000,
+                completion_tokens: 3000,
+                total_tokens: 15000,
+                cached_tokens: 2000,
+              },
+              last_usage: {
+                prompt_tokens: 1000,
+                completion_tokens: 250,
+                total_tokens: 1250,
+              },
+              started_at: 1710000000,
+              note: "Subagent usage is not additionally included in the global total.",
+            }),
+          };
+        }
         if (String(input).includes("/api/settings")) {
           return {
             ok: true,
@@ -233,6 +255,9 @@ describe("App layout", () => {
     expect(within(settingsNav).getByRole("button", { name: "BYOK" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
     expect(screen.getByText("AI")).toBeInTheDocument();
+    expect(screen.getByText("Token usage")).toBeInTheDocument();
+    expect(screen.getByText("15,000")).toBeInTheDocument();
+    expect(screen.getByText("Note: subagent usage is not additionally included in the global total.")).toBeInTheDocument();
     expect(screen.getByDisplayValue("openai/gpt-4o")).toBeInTheDocument();
     fireEvent.click(within(settingsNav).getByRole("button", { name: "BYOK" }));
     expect(screen.getByRole("tab", { name: "LLM" })).toHaveAttribute("aria-selected", "true");

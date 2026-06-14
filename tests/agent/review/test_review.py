@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from nanobot.agent.review.prompts import build_review_prompt
+from nanobot.agent.review.prompts import build_review_prompt, resolve_review_context
 from nanobot.agent.review.roles import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
@@ -125,3 +125,36 @@ def test_build_review_prompt_quick_caps_subagents() -> None:
         mode="quick",
     )
     assert "up to 2 total" in prompt
+
+
+@pytest.mark.asyncio
+async def test_resolve_review_context_prefers_prebuilt_prompt() -> None:
+    prompt = await resolve_review_context(
+        [{"role": "user", "content": "review https://github.com/test/repo"}],
+        {"review_prompt": "prebuilt"},
+    )
+
+    assert prompt == "prebuilt"
+
+
+@pytest.mark.asyncio
+async def test_resolve_review_context_detects_github_target() -> None:
+    prompt = await resolve_review_context(
+        [{"role": "user", "content": "please review https://github.com/test/repo."}],
+        {},
+    )
+
+    assert prompt is not None
+    assert "- Name: test/repo" in prompt
+    assert "- URL: https://github.com/test/repo" in prompt
+
+
+@pytest.mark.asyncio
+async def test_resolve_review_context_returns_fallback_without_target() -> None:
+    prompt = await resolve_review_context(
+        [{"role": "user", "content": "how should I do a review?"}],
+        {},
+    )
+
+    assert prompt is not None
+    assert "Review mode is active" in prompt

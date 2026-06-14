@@ -1,7 +1,10 @@
 """Prompt construction for CodeReviewAgent mode."""
 from __future__ import annotations
 
-from nanobot.agent.review.roles import ReviewRole
+import re
+from typing import Any
+
+from nanobot.agent.review.roles import ReviewRole, normalize_focus
 
 _MARKDOWN_OUTPUT_SECTION = """\
 ## Output Format
@@ -195,3 +198,36 @@ You can also answer questions about code review methodology, explain findings,
 or discuss best practices.
 
 Provide a GitHub URL or local path to start a review."""
+
+
+async def resolve_review_context(
+    initial_messages: list[dict[str, Any]],
+    session_meta: dict[str, Any],
+) -> str | None:
+    """Build review system prompt based on session metadata and user message."""
+    if session_meta.get("review_prompt"):
+        return session_meta["review_prompt"]
+
+    user_content = ""
+    for message in reversed(initial_messages):
+        if message.get("role") == "user":
+            content = message.get("content", "")
+            user_content = content if isinstance(content, str) else str(content)
+            break
+
+    github_match = re.search(
+        r"https://github\.com/([^/\s]+)/([^/\s.,;!?)]+)", user_content
+    )
+    if github_match:
+        owner, repo = github_match.group(1), github_match.group(2)
+        target_url = f"https://github.com/{owner}/{repo}"
+        roles, forced = normalize_focus(session_meta.get("review_focus"))
+        return build_review_prompt(
+            target_url=target_url,
+            target_name=f"{owner}/{repo}",
+            roles=roles,
+            max_subagents=4,
+            forced=forced,
+        )
+
+    return build_review_fallback_prompt()

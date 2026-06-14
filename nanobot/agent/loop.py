@@ -18,9 +18,10 @@ from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
-from nanobot.agent.math_qa import MATH_QA_MODE_KEY, MathKnowledgeBase, build_math_qa_prompt
+from nanobot.agent.math_qa import MATH_QA_MODE_KEY, resolve_math_qa_context
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.progress_hook import AgentProgressHook
+from nanobot.agent.review.prompts import resolve_review_context
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
@@ -42,7 +43,6 @@ from nanobot.utils.artifacts import generated_image_paths_from_messages
 from nanobot.utils.document import extract_documents
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
-from nanobot.utils.image_generation_intent import image_generation_prompt
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 from nanobot.utils.session_attachments import merge_turn_media_into_last_assistant
 from nanobot.utils.webui_titles import mark_webui_session, maybe_generate_webui_title_after_turn
@@ -180,9 +180,7 @@ class AgentLoop:
         tools_config: ToolsConfig | None = None,
         embedding_config: Any | None = None,
         rerank_config: Any | None = None,
-        
-        image_generation_provider_config: ProviderConfig | None = None,
-        image_generation_provider_configs: dict[str, ProviderConfig] | None = None,
+        qdrant_config: Any | None = None,
         provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
         model_presets: dict[str, ModelPresetConfig] | None = None,
@@ -239,17 +237,9 @@ class AgentLoop:
         self.permissions_config = _tc
         self.embedding_config = _embedding_config
         self.rerank_config = _rerank_config
+        self.qdrant_config = qdrant_config
         self.web_config = _tc.web
         self.exec_config = _tc.exec
-        self._image_generation_provider_configs = dict(image_generation_provider_configs or {})
-        if (
-            image_generation_provider_config is not None
-            and "openrouter" not in self._image_generation_provider_configs
-        ):
-            self._image_generation_provider_configs["openrouter"] = image_generation_provider_config
-        #AI修改前
-        # 未保存 unsplash_provider_config，导致工具上下文拿不到 providers.unsplash 配置。
-        #AI修改后
         self._unsplash_provider_config = unsplash_provider_config
         if self._unsplash_provider_config is None and unsplash_provider_configs:
             self._unsplash_provider_config = unsplash_provider_configs.get("unsplash")
@@ -259,6 +249,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
+        self._total_usage: dict[str, int] = {}
         self._pending_turn_latency_ms: dict[str, int] = {}
         self._pending_turn_traces: dict[str, list[dict[str, Any]]] = {}
         self._extra_hooks: list[AgentHook] = hooks or []
@@ -385,6 +376,7 @@ class AgentLoop:
             tools_config=config.tools,
             embedding_config=config.embedding,
             rerank_config=config.rerank,
+            qdrant_config=config.qdrant,
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
@@ -486,7 +478,6 @@ class AgentLoop:
             cron_service=self.cron_service,
             sessions=self.sessions,
             provider_snapshot_loader=self._provider_snapshot_loader,
-            image_generation_provider_configs=self._image_generation_provider_configs,
             unsplash_provider_config=self._unsplash_provider_config,
             timezone=self.context.timezone or "UTC",
         )
@@ -641,7 +632,7 @@ class AgentLoop:
         """Build the initial message list for the LLM turn."""
         messages = self.context.build_messages(
             history=history,
-            current_message=image_generation_prompt(msg.content, msg.metadata),
+            current_message=msg.content,
             media=msg.media if msg.media else None,
             channel=msg.channel,
             chat_id=self._runtime_chat_id(msg),
@@ -650,75 +641,6 @@ class AgentLoop:
             session_metadata=session.metadata,
         )
         return messages
-
-    async def _resolve_review_context(
-        self, initial_messages: list[dict], session_meta: dict
-    ) -> str | None:
-        """Build review system prompt based on session metadata and user message."""
-        import re
-
-        from nanobot.agent.review.prompts import build_review_fallback_prompt, build_review_prompt
-        from nanobot.agent.review.roles import normalize_focus
-
-        # CLI pre-built prompt takes priority
-        if session_meta.get("review_prompt"):
-            return session_meta["review_prompt"]
-
-        # Extract user message to detect target
-        user_content = ""
-        for m in reversed(initial_messages):
-            if m.get("role") == "user":
-                c = m.get("content", "")
-                user_content = c if isinstance(c, str) else str(c)
-                break
-
-        # Detect GitHub URL in user message
-        github_match = re.search(
-            r'https://github\.com/([^/\s]+)/([^/\s.,;!?)]+)', user_content
-        )
-        if github_match:
-            owner, repo = github_match.group(1), github_match.group(2)
-            target_url = f"https://github.com/{owner}/{repo}"
-            focus_raw = session_meta.get("review_focus")
-            roles, forced = normalize_focus(focus_raw)
-            return build_review_prompt(
-                target_url=target_url,
-                target_name=f"{owner}/{repo}",
-                roles=roles,
-                max_subagents=4,
-                forced=forced,
-            )
-
-        return build_review_fallback_prompt()
-
-    async def _resolve_math_qa_context(
-        self, initial_messages: list[dict], session_meta: dict
-    ) -> str | None:
-        """Build the math QA system prompt with best-effort local KB retrieval."""
-        if session_meta.get("math_qa_prompt"):
-            return session_meta["math_qa_prompt"]
-
-        user_content = ""
-        for m in reversed(initial_messages):
-            if m.get("role") != "user":
-                continue
-            c = m.get("content", "")
-            if isinstance(c, str):
-                user_content = c
-            elif isinstance(c, list):
-                parts = [
-                    str(block.get("text", ""))
-                    for block in c
-                    if isinstance(block, dict) and block.get("type") == "text"
-                ]
-                user_content = "\n".join(parts)
-            else:
-                user_content = str(c)
-            break
-
-        kb = MathKnowledgeBase(self.workspace)
-        hits = kb.search(user_content, limit=4)
-        return build_math_qa_prompt(hits)
 
     async def _dispatch_command_inline(
         self,
@@ -876,20 +798,20 @@ class AgentLoop:
                 _session_meta,
             )
 
-            # Mutually exclusive specialist modes: review takes precedence for
-            # legacy sessions that somehow have both flags set.
+            specialist_prompt: str | None = None
             if _session_meta.get("review_mode", False):
-                _review_prompt = await self._resolve_review_context(
-                    initial_messages, _session_meta
-                )
-                if _review_prompt:
-                    initial_messages.insert(0, {"role": "system", "content": _review_prompt})
+                specialist_prompt = await resolve_review_context(initial_messages, _session_meta)
             elif _session_meta.get(MATH_QA_MODE_KEY, False):
-                _math_prompt = await self._resolve_math_qa_context(
-                    initial_messages, _session_meta
+                specialist_prompt = await resolve_math_qa_context(
+                    initial_messages,
+                    _session_meta,
+                    workspace=self.workspace,
+                    embedding_config=self.embedding_config,
+                    rerank_config=self.rerank_config,
+                    qdrant_config=self.qdrant_config,
                 )
-                if _math_prompt:
-                    initial_messages.insert(0, {"role": "system", "content": _math_prompt})
+            if specialist_prompt:
+                initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
             async def _permission_request_cb(
                 request_id: str,
@@ -944,6 +866,7 @@ class AgentLoop:
         finally:
             reset_file_states(file_state_token)
         self._last_usage = result.usage
+        self._accumulate_total_usage(result.usage)
         if result.stop_reason == "max_iterations":
             logger.warning("Max iterations ({}) reached", self.max_iterations)
             # Push final content through stream so streaming channels (e.g. Feishu)
@@ -954,6 +877,19 @@ class AgentLoop:
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
         return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
+
+    def _accumulate_total_usage(self, usage: dict[str, int]) -> None:
+        for key, value in usage.items():
+            if key == "total_tokens":
+                continue
+            try:
+                amount = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            self._total_usage[key] = self._total_usage.get(key, 0) + amount
+        prompt = self._total_usage.get("prompt_tokens", 0)
+        completion = self._total_usage.get("completion_tokens", 0)
+        self._total_usage["total_tokens"] = prompt + completion
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop.

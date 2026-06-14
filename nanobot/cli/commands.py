@@ -585,10 +585,6 @@ def serve(
         agent_loop = AgentLoop.from_config(
             runtime_config, bus,
             session_manager=session_manager,
-            image_generation_provider_configs={
-                "openrouter": runtime_config.providers.openrouter,
-                "aihubmix": runtime_config.providers.aihubmix,
-            },
         )
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -698,10 +694,6 @@ def _run_gateway(
         context_window_tokens=provider_snapshot.context_window_tokens,
         cron_service=cron,
         session_manager=session_manager,
-        image_generation_provider_configs={
-            "openrouter": config.providers.openrouter,
-            "aihubmix": config.providers.aihubmix,
-        },
         provider_snapshot_loader=load_provider_snapshot,
         runtime_model_publisher=lambda model, preset: publish_runtime_model_update(
             bus,
@@ -836,6 +828,13 @@ def _run_gateway(
             return stripped or None
         return None
 
+    def _webui_runtime_usage() -> dict[str, Any]:
+        return {
+            "usage": dict(getattr(agent, "_total_usage", {}) or {}),
+            "last_usage": dict(getattr(agent, "_last_usage", {}) or {}),
+            "started_at": getattr(agent, "_start_time", None),
+        }
+
     # Create channel manager (forwards SessionManager so the WebSocket channel
     # can serve the embedded webui's REST surface).
     channels = ChannelManager(
@@ -843,6 +842,7 @@ def _run_gateway(
         bus,
         session_manager=session_manager,
         webui_runtime_model_name=_webui_runtime_model_name,
+        webui_runtime_usage=_webui_runtime_usage,
     )
 
     def _pick_heartbeat_target() -> tuple[str, str]:

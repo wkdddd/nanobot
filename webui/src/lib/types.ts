@@ -139,6 +139,26 @@ export interface SettingsPayload {
   requires_restart: boolean;
 }
 
+export interface UsagePayload {
+  scope: "process";
+  usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cached_tokens?: number;
+    [key: string]: number | undefined;
+  };
+  last_usage: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    cached_tokens?: number;
+    [key: string]: number | undefined;
+  };
+  started_at?: number | null;
+  note: string;
+}
+
 export interface SettingsUpdate {
   model?: string;
   provider?: string;

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   deleteSession,
+  fetchUsage,
   fetchWebuiThread,
   listSessions,
   listSlashCommands,
@@ -52,6 +53,17 @@ describe("webui API helpers", () => {
 
     expect(fetch).toHaveBeenCalledWith(
       "/api/settings/update?model=openrouter%2Ftest&provider=openrouter",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok" },
+      }),
+    );
+  });
+
+  it("fetches process token usage", async () => {
+    await fetchUsage("tok");
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/usage",
       expect.objectContaining({
         headers: { Authorization: "Bearer tok" },
       }),

@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
+  fetchUsage,
   fetchSettings,
   updateProviderSettings,
   updateSettings,
@@ -47,7 +48,7 @@ import {
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useClient } from "@/providers/ClientProvider";
-import type { SettingsPayload, WebSearchSettingsUpdate } from "@/lib/types";
+import type { SettingsPayload, UsagePayload, WebSearchSettingsUpdate } from "@/lib/types";
 
 type SettingsSectionKey = "general" | "byok";
 type ByokPaneKey = "llm" | "web-search";
@@ -74,6 +75,8 @@ export function SettingsView({
   const { t } = useTranslation();
   const { token } = useClient();
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
+  const [usage, setUsage] = useState<UsagePayload | null>(null);
+  const [usageError, setUsageError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [providerSaving, setProviderSaving] = useState<string | null>(null);
@@ -112,18 +115,27 @@ export function SettingsView({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetchSettings(token)
-      .then((payload) => {
-        if (!cancelled) {
-          applyPayload(payload);
+    Promise.allSettled([fetchSettings(token), fetchUsage(token)])
+      .then(([settingsResult, usageResult]) => {
+        if (cancelled) return;
+        if (settingsResult.status === "fulfilled") {
+          applyPayload(settingsResult.value);
           setError(null);
+        } else {
+          setError((settingsResult.reason as Error).message);
+        }
+        if (usageResult.status === "fulfilled") {
+          setUsage(usageResult.value);
+          setUsageError(null);
+        } else {
+          setUsage(null);
+          setUsageError((usageResult.reason as Error).message);
         }
       })
-      .catch((err) => {
-        if (!cancelled) setError((err as Error).message);
-      })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setLoading(false);
+        }
       });
     return () => {
       cancelled = true;
@@ -355,6 +367,8 @@ export function SettingsView({
                   form={form}
                   setForm={setForm}
                   settings={settings}
+                  usage={usage}
+                  usageError={usageError}
                   dirty={dirty}
                   saving={saving}
                   onSave={save}
@@ -488,6 +502,8 @@ function GeneralSettings({
   form,
   setForm,
   settings,
+  usage,
+  usageError,
   dirty,
   saving,
   onSave,
@@ -506,6 +522,8 @@ function GeneralSettings({
     provider: string;
   }>>;
   settings: SettingsPayload;
+  usage: UsagePayload | null;
+  usageError: string | null;
   dirty: boolean;
   saving: boolean;
   onSave: () => void;
@@ -604,10 +622,16 @@ function GeneralSettings({
         </SettingsGroup>
       </section>
 
-      {onRestart && (
-        <section>
-          <SettingsSectionTitle>{t("settings.sections.system")}</SettingsSectionTitle>
-          <SettingsGroup>
+      <section>
+        <SettingsSectionTitle>{t("settings.sections.system")}</SettingsSectionTitle>
+        <SettingsGroup>
+          <SettingsRow
+            title={t("settings.rows.tokenUsage")}
+            description={t("settings.help.tokenUsage")}
+          >
+            <UsageSummary usage={usage} error={usageError} />
+          </SettingsRow>
+          {onRestart ? (
             <SettingsRow
               title={t("settings.rows.restart")}
               description={t("app.system.restartHint")}
@@ -627,17 +651,67 @@ function GeneralSettings({
                 {isRestarting ? t("app.system.restarting") : t("app.system.restart")}
               </Button>
             </SettingsRow>
-            <SettingsRow
-              title={t("settings.rows.configPath")}
-              description={t("settings.help.configPath")}
-            >
-              <span className="max-w-[260px] truncate text-right text-[13px] text-muted-foreground">
-                {settings.runtime.config_path || t("settings.values.notAvailable")}
-              </span>
-            </SettingsRow>
-          </SettingsGroup>
-        </section>
-      )}
+          ) : null}
+          <SettingsRow
+            title={t("settings.rows.configPath")}
+            description={t("settings.help.configPath")}
+          >
+            <span className="max-w-[260px] truncate text-right text-[13px] text-muted-foreground">
+              {settings.runtime.config_path || t("settings.values.notAvailable")}
+            </span>
+          </SettingsRow>
+        </SettingsGroup>
+      </section>
+    </div>
+  );
+}
+
+function formatTokenCount(value: number | undefined): string {
+  return new Intl.NumberFormat().format(value ?? 0);
+}
+
+function UsageSummary({
+  usage,
+  error,
+}: {
+  usage: UsagePayload | null;
+  error: string | null;
+}) {
+  const { t } = useTranslation();
+  if (!usage) {
+    return (
+      <span className="text-[13px] text-muted-foreground">
+        {error ? t("settings.usage.unavailable") : t("settings.status.loading")}
+      </span>
+    );
+  }
+
+  const total = usage.usage.total_tokens;
+  const input = usage.usage.prompt_tokens;
+  const output = usage.usage.completion_tokens;
+  const cached = usage.usage.cached_tokens ?? 0;
+  const last = usage.last_usage.total_tokens;
+  return (
+    <div className="w-full max-w-[340px] space-y-2 text-right">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <UsageMetric label={t("settings.usage.total")} value={formatTokenCount(total)} />
+        <UsageMetric label={t("settings.usage.input")} value={formatTokenCount(input)} />
+        <UsageMetric label={t("settings.usage.output")} value={formatTokenCount(output)} />
+        <UsageMetric label={t("settings.usage.cached")} value={formatTokenCount(cached)} />
+        <UsageMetric label={t("settings.usage.lastTurn")} value={formatTokenCount(last)} />
+      </div>
+      <p className="text-[11.5px] leading-4 text-muted-foreground">
+        {t("settings.usage.subagentNote")}
+      </p>
+    </div>
+  );
+}
+
+function UsageMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[12px] border border-border/45 bg-background/70 px-2.5 py-2">
+      <div className="text-[11px] font-medium text-muted-foreground">{label}</div>
+      <div className="mt-0.5 text-[13px] font-semibold text-foreground">{value}</div>
     </div>
   );
 }

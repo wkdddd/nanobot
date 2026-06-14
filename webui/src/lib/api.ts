@@ -4,6 +4,7 @@ import type {
   SettingsPayload,
   SettingsUpdate,
   SlashCommand,
+  UsagePayload,
   WebSearchSettingsUpdate,
   WebuiThreadPersistedPayload,
 } from "./types";
@@ -100,6 +101,13 @@ export async function fetchSettings(
   base: string = "",
 ): Promise<SettingsPayload> {
   return request<SettingsPayload>(`${base}/api/settings`, token);
+}
+
+export async function fetchUsage(
+  token: string,
+  base: string = "",
+): Promise<UsagePayload> {
+  return request<UsagePayload>(`${base}/api/usage`, token);
 }
 
 export async function listSlashCommands(

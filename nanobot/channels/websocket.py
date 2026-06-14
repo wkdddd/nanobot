@@ -461,6 +461,7 @@ class WebSocketChannel(BaseChannel):
         session_manager: "SessionManager | None" = None,
         static_dist_path: Path | None = None,
         runtime_model_name: Callable[[], str | None] | None = None,
+        runtime_usage: Callable[[], dict[str, Any]] | None = None,
     ):
         if isinstance(config, dict):
             config = WebSocketConfig.model_validate(config)
@@ -483,6 +484,7 @@ class WebSocketChannel(BaseChannel):
             static_dist_path.resolve() if static_dist_path is not None else None
         )
         self._runtime_model_name = runtime_model_name
+        self._runtime_usage = runtime_usage
         # Process-local secret used to HMAC-sign media URLs. The signed URL is
         # the capability — anyone who holds a valid URL can fetch that one
         # file, nothing else. The secret regenerates on restart so links
@@ -708,6 +710,9 @@ class WebSocketChannel(BaseChannel):
         if got == "/api/settings":
             return self._handle_settings(request)
 
+        if got == "/api/usage":
+            return self._handle_usage(request)
+
         if got == "/api/commands":
             return self._handle_commands(request)
 
@@ -895,6 +900,37 @@ class WebSocketChannel(BaseChannel):
         if not self._check_api_token(request):
             return _http_error(401, "Unauthorized")
         return _http_json_response(self._settings_payload())
+
+    @staticmethod
+    def _normalize_usage_payload(usage: dict[str, Any] | None) -> dict[str, int]:
+        raw = usage or {}
+        normalized: dict[str, int] = {}
+        for key, value in raw.items():
+            try:
+                normalized[key] = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+        normalized["prompt_tokens"] = normalized.get("prompt_tokens", 0)
+        normalized["completion_tokens"] = normalized.get("completion_tokens", 0)
+        normalized["total_tokens"] = normalized["prompt_tokens"] + normalized["completion_tokens"]
+        return normalized
+
+    def _usage_payload(self) -> dict[str, Any]:
+        runtime = self._runtime_usage() if self._runtime_usage is not None else {}
+        total_usage = self._normalize_usage_payload(runtime.get("usage"))
+        last_usage = self._normalize_usage_payload(runtime.get("last_usage"))
+        return {
+            "scope": "process",
+            "usage": total_usage,
+            "last_usage": last_usage,
+            "started_at": runtime.get("started_at"),
+            "note": "Subagent usage is not additionally included in the global total.",
+        }
+
+    def _handle_usage(self, request: WsRequest) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        return _http_json_response(self._usage_payload())
 
     def _handle_commands(self, request: WsRequest) -> Response:
         if not self._check_api_token(request):
@@ -1590,13 +1626,6 @@ class WebSocketChannel(BaseChannel):
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
             if envelope.get("webui") is True:
                 metadata["webui"] = True
-            image_generation = envelope.get("image_generation")
-            if isinstance(image_generation, dict) and image_generation.get("enabled") is True:
-                aspect_ratio = image_generation.get("aspect_ratio")
-                metadata["image_generation"] = {
-                    "enabled": True,
-                    "aspect_ratio": aspect_ratio if isinstance(aspect_ratio, str) else None,
-                }
             await self._handle_message(
                 sender_id=client_id,
                 chat_id=cid,

@@ -76,9 +76,9 @@ BUILTIN_COMMAND_SPECS: tuple[BuiltinCommandSpec, ...] = (
     BuiltinCommandSpec(
         "/math-kb",
         "Manage math knowledge base",
-        "List or add local math knowledge files.",
+        "List, add or convert local math knowledge files.",
         "book-open",
-        "[list|add <path>]",
+        "[list|add <path>|convert]",
     ),
     BuiltinCommandSpec(
         "/mistake-add",
@@ -576,12 +576,17 @@ async def cmd_history(ctx: CommandContext) -> OutboundMessage:
 
 
 async def cmd_math_kb(ctx: CommandContext) -> OutboundMessage:
-    """List or add files for the lightweight math knowledge base."""
+    """List, add or convert files for the lightweight math knowledge base."""
     from pathlib import Path
 
     from nanobot.agent.math_qa import MathKnowledgeBase
 
-    kb = MathKnowledgeBase(ctx.loop.workspace)
+    kb = MathKnowledgeBase(
+        ctx.loop.workspace,
+        embedding_config=getattr(ctx.loop, "embedding_config", None),
+        rerank_config=getattr(ctx.loop, "rerank_config", None),
+        qdrant_config=getattr(ctx.loop, "qdrant_config", None),
+    )
     args = ctx.args.strip()
     metadata = {**dict(ctx.msg.metadata or {}), "render_as": "text"}
     if not args or args.lower() == "list":
@@ -589,7 +594,8 @@ async def cmd_math_kb(ctx: CommandContext) -> OutboundMessage:
         if not files:
             content = (
                 "Math knowledge base is empty.\n"
-                "Add UTF-8 Markdown/TXT/JSON/JSONL files with `/math-kb add <path>`.\n"
+                "Add UTF-8 Markdown/TXT/JSON/JSONL/PDF/image files with `/math-kb add <path>`.\n"
+                "Convert PDF/image files to Markdown with `/math-kb convert`.\n"
                 f"Storage: `{kb.base_dir}`"
             )
         else:
@@ -609,11 +615,59 @@ async def cmd_math_kb(ctx: CommandContext) -> OutboundMessage:
         )
 
     parts = args.split(maxsplit=1)
-    if parts[0].lower() != "add" or len(parts) != 2:
+    action = parts[0].lower()
+    if action == "convert":
+        try:
+            from nanobot.agent.mathrag.data_load import MathKnowledgeMarkdownConverter
+
+            converter = MathKnowledgeMarkdownConverter(ctx.loop.workspace)
+            results = converter.convert_all(write=True)
+        except Exception as exc:
+            return OutboundMessage(
+                channel=ctx.msg.channel,
+                chat_id=ctx.msg.chat_id,
+                content=f"Could not convert math knowledge files: {exc}",
+                metadata=metadata,
+            )
+
+        if not results:
+            content = (
+                "No math knowledge files found to convert.\n"
+                f"Storage: `{kb.base_dir}`"
+            )
+        else:
+            lines = ["Math knowledge conversion complete:"]
+            for result in results:
+                source = result.source_path.relative_to(ctx.loop.workspace).as_posix()
+                target = (
+                    result.markdown_path.relative_to(ctx.loop.workspace).as_posix()
+                    if result.markdown_path else "(not written)"
+                )
+                status = "ok" if result.ok else "warning"
+                suffix = f" ({len(result.warnings)} warning(s))" if result.warnings else ""
+                lines.append(f"- `{source}` -> `{target}` [{status}]{suffix}")
+                for warning in result.warnings[:3]:
+                    lines.append(f"  - {warning}")
+            try:
+                await kb.async_sync_index()
+                lines.append("")
+                lines.append("Math RAG index refreshed.")
+            except Exception as exc:
+                lines.append("")
+                lines.append(f"Math RAG index refresh skipped: {exc}")
+            content = "\n".join(lines)
         return OutboundMessage(
             channel=ctx.msg.channel,
             chat_id=ctx.msg.chat_id,
-            content="Usage: `/math-kb [list|add <path>]`",
+            content=content,
+            metadata=metadata,
+        )
+
+    if action != "add" or len(parts) != 2:
+        return OutboundMessage(
+            channel=ctx.msg.channel,
+            chat_id=ctx.msg.chat_id,
+            content="Usage: `/math-kb [list|add <path>|convert]`",
             metadata=metadata,
         )
 

@@ -11,7 +11,6 @@ from pydantic_settings import BaseSettings
 from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
-    from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
@@ -226,7 +225,7 @@ class EmbeddingConfig(Base):
         validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
         serialization_alias="baseUrl",
     )
-    model: str = "text-embedding-v3"
+    model: str = "BAAI/bge-m3"
     dimensions: int = 1024
     batch_size: int = 10
     max_input_chars: int = 2048
@@ -245,6 +244,20 @@ class RerankConfig(Base):
     )
     model: str = "qwen3-rerank"
     top_n: int = 20
+
+
+class QdrantConfig(Base):
+    """Qdrant vector store configuration for MathQA RAG."""
+
+    enable: bool = False
+    url: str = "http://localhost:6333"
+    api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("apiKey", "api_key"),
+        serialization_alias="apiKey",
+    )
+    collection: str = "nanobot_math_chunks"
+    timeout: float = 30.0
 
 
 class ApiConfig(Base):
@@ -294,9 +307,6 @@ class ToolsConfig(Base):
     web: WebToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig"))
     exec: ExecToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig"))
     my: MyToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.self", "MyToolConfig"))
-    image_generation: ImageGenerationToolConfig = Field(
-        default_factory=lambda: _lazy_default("nanobot.agent.tools.image_generation", "ImageGenerationToolConfig"),
-    )
     approval_enabled: bool = False  # require user approval before executing tools
     restrict_to_workspace: bool = False  # restrict all tool access to workspace directory
     mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
@@ -326,6 +336,7 @@ class Config(BaseSettings):
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     rerank: RerankConfig = Field(default_factory=RerankConfig)
+    qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -504,7 +515,6 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
-    from nanobot.agent.tools.image_generation import ImageGenerationToolConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
@@ -517,7 +527,6 @@ def _resolve_tool_config_refs() -> None:
     mod.WebSearchConfig = WebSearchConfig  # type: ignore[attr-defined]
     mod.WebFetchConfig = WebFetchConfig  # type: ignore[attr-defined]
     mod.MyToolConfig = MyToolConfig  # type: ignore[attr-defined]
-    mod.ImageGenerationToolConfig = ImageGenerationToolConfig  # type: ignore[attr-defined]
     mod.UnsplashSearchToolConfig = UnsplashSearchToolConfig
     ToolsConfig.model_rebuild()
     Config.model_rebuild()

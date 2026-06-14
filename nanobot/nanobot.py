@@ -61,13 +61,7 @@ class Nanobot:
                 Path(workspace).expanduser().resolve()
             )
 
-        loop = AgentLoop.from_config(
-            config,
-            image_generation_provider_configs={
-                "openrouter": config.providers.openrouter,
-                "aihubmix": config.providers.aihubmix,
-            },
-        )
+        loop = AgentLoop.from_config(config)
         return cls(loop)
 
     async def run(

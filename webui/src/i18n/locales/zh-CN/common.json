@@ -66,14 +66,16 @@
       "provider": "提供商",
       "model": "模型",
       "restart": "重启 nanobot",
-      "configPath": "配置路径"
+      "configPath": "配置路径",
+      "tokenUsage": "Token 用量"
     },
     "help": {
       "theme": "在浅色和深色外观之间切换。",
       "language": "选择 WebUI 使用的语言。",
       "provider": "选择新模型请求使用的服务提供商。",
       "model": "设置 nanobot 默认使用的模型名称。",
-      "configPath": "当前网关正在使用的配置文件。"
+      "configPath": "当前网关正在使用的配置文件。",
+      "tokenUsage": "当前 nanobot 进程启动以来的主 agent 累计 token 用量。"
     },
     "values": {
       "light": "浅色",
@@ -133,6 +135,15 @@
         "missingCredential": "填写所需凭证后才能保存。",
         "saveHint": "改动会应用到新的 web search 请求。"
       }
+    },
+    "usage": {
+      "total": "总量",
+      "input": "输入",
+      "output": "输出",
+      "cached": "缓存",
+      "lastTurn": "最近一轮",
+      "unavailable": "用量暂不可用",
+      "subagentNote": "提示：subagent 用量不额外并入全局总量。"
     }
   },
   "chat": {
