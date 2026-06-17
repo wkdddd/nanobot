@@ -229,10 +229,10 @@ export function useNanobotStream(
   reviewModeEnabled: boolean;
   /** Toggle session-level review mode. */
   setReviewMode: (enabled: boolean) => void;
-  /** Whether math QA mode is enabled for this session. */
-  mathQaModeEnabled: boolean;
-  /** Toggle session-level math QA mode. */
-  setMathQaMode: (enabled: boolean) => void;
+  /** Whether long-task mode is enabled for this session. */
+  longTaskModeEnabled: boolean;
+  /** Toggle session-level long-task mode. */
+  setLongTaskMode: (enabled: boolean) => void;
   /** Respond to a permission request (approve/deny). */
   respondToPermission: (requestId: string, approved: boolean) => void;
   /** Latest transport-level fault raised since the last ``dismissStreamError``.
@@ -268,10 +268,10 @@ export function useNanobotStream(
       return window.localStorage.getItem(`nanobot:review:${chatId}`) === "1";
     } catch { return false; }
   });
-  const [mathQaModeEnabled, setMathQaModeEnabled] = useState(() => {
+  const [longTaskModeEnabled, setLongTaskModeEnabled] = useState(() => {
     if (!chatId) return false;
     try {
-      return window.localStorage.getItem(`nanobot:mathqa:${chatId}`) === "1";
+      return window.localStorage.getItem(`nanobot:longtask:${chatId}`) === "1";
     } catch { return false; }
   });
   const buffer = useRef<StreamBuffer | null>(null);
@@ -315,10 +315,10 @@ export function useNanobotStream(
         return window.localStorage.getItem(`nanobot:review:${chatId}`) === "1";
       } catch { return false; }
     });
-    setMathQaModeEnabled(() => {
+    setLongTaskModeEnabled(() => {
       if (!chatId) return false;
       try {
-        return window.localStorage.getItem(`nanobot:mathqa:${chatId}`) === "1";
+        return window.localStorage.getItem(`nanobot:longtask:${chatId}`) === "1";
       } catch { return false; }
     });
     setRunStartedAt(chatId ? client.getRunStartedAt(chatId) : null);
@@ -468,37 +468,23 @@ export function useNanobotStream(
 
       if (ev.event === "review_mode_updated") {
         setReviewModeEnabled(ev.enabled);
-        if (typeof ev.math_qa_enabled === "boolean") {
-          setMathQaModeEnabled(ev.math_qa_enabled);
-        }
         try {
           if (ev.enabled) {
             window.localStorage.setItem(`nanobot:review:${chatId}`, "1");
-            window.localStorage.removeItem(`nanobot:mathqa:${chatId}`);
           } else {
             window.localStorage.removeItem(`nanobot:review:${chatId}`);
-            if (ev.math_qa_enabled) {
-              window.localStorage.setItem(`nanobot:mathqa:${chatId}`, "1");
-            }
           }
         } catch { /* ignore */ }
         return;
       }
 
-      if (ev.event === "math_qa_mode_updated") {
-        setMathQaModeEnabled(ev.enabled);
-        if (typeof ev.review_enabled === "boolean") {
-          setReviewModeEnabled(ev.review_enabled);
-        }
+      if (ev.event === "long_task_mode_updated") {
+        setLongTaskModeEnabled(ev.enabled);
         try {
           if (ev.enabled) {
-            window.localStorage.setItem(`nanobot:mathqa:${chatId}`, "1");
-            window.localStorage.removeItem(`nanobot:review:${chatId}`);
+            window.localStorage.setItem(`nanobot:longtask:${chatId}`, "1");
           } else {
-            window.localStorage.removeItem(`nanobot:mathqa:${chatId}`);
-            if (ev.review_enabled) {
-              window.localStorage.setItem(`nanobot:review:${chatId}`, "1");
-            }
+            window.localStorage.removeItem(`nanobot:longtask:${chatId}`);
           }
         } catch { /* ignore */ }
         return;
@@ -710,11 +696,9 @@ export function useNanobotStream(
     (enabled: boolean) => {
       if (!chatId) return;
       setReviewModeEnabled(enabled);
-      if (enabled) setMathQaModeEnabled(false);
       try {
         if (enabled) {
           window.localStorage.setItem(`nanobot:review:${chatId}`, "1");
-          window.localStorage.removeItem(`nanobot:mathqa:${chatId}`);
         } else {
           window.localStorage.removeItem(`nanobot:review:${chatId}`);
         }
@@ -724,20 +708,18 @@ export function useNanobotStream(
     [chatId, client],
   );
 
-  const setMathQaMode = useCallback(
+  const setLongTaskMode = useCallback(
     (enabled: boolean) => {
       if (!chatId) return;
-      setMathQaModeEnabled(enabled);
-      if (enabled) setReviewModeEnabled(false);
+      setLongTaskModeEnabled(enabled);
       try {
         if (enabled) {
-          window.localStorage.setItem(`nanobot:mathqa:${chatId}`, "1");
-          window.localStorage.removeItem(`nanobot:review:${chatId}`);
+          window.localStorage.setItem(`nanobot:longtask:${chatId}`, "1");
         } else {
-          window.localStorage.removeItem(`nanobot:mathqa:${chatId}`);
+          window.localStorage.removeItem(`nanobot:longtask:${chatId}`);
         }
       } catch { /* ignore storage errors */ }
-      client.sendSetMathQaMode(chatId, enabled);
+      client.sendSetLongTaskMode(chatId, enabled);
     },
     [chatId, client],
   );
@@ -755,8 +737,8 @@ export function useNanobotStream(
     setSessionApproval,
     reviewModeEnabled,
     setReviewMode,
-    mathQaModeEnabled,
-    setMathQaMode,
+    longTaskModeEnabled,
+    setLongTaskMode,
     respondToPermission,
     streamError,
     dismissStreamError,

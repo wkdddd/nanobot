@@ -11,7 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
-from nanobot.agent.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
+from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +135,7 @@ class RAGIndex:
         max_hits: int = 20,
         semantic_weight: float = 0.6,
     ) -> list[IndexedHit]:
-        from nanobot.agent.rag.utils import query_terms
+        from nanobot.rag.utils import query_terms
 
         terms = query_terms(query)
         if not terms:
@@ -186,7 +186,7 @@ class RAGIndex:
     def _fts5_search(
         self, source_type: str, query: str, *, limit: int = 100
     ) -> dict[ChunkKey, float]:
-        from nanobot.agent.rag.utils import query_terms
+        from nanobot.rag.utils import query_terms
 
         terms = query_terms(query)
         if not terms:
@@ -573,7 +573,7 @@ class RAGIndex:
         mtime: float,
         skip_embedding: bool = False,
     ) -> None:
-        from nanobot.agent.rag.chunk_filter import is_chunk_valid
+        from nanobot.rag.chunk_filter import is_chunk_valid
 
         conn.execute(
             "DELETE FROM chunks WHERE source_type = ? AND path = ?", (source_type, path)

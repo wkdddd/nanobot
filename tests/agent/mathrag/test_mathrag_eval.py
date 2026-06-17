@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from nanobot.agent.math_qa import KnowledgeHit
-from nanobot.agent.mathrag.eval import (
+from nanobot.agent.tools._mathrag.math_knowledge_eval import (
     MathEvalResult,
     MathEvalSample,
     load_eval_dataset,
@@ -108,7 +108,7 @@ class _FakeProvider:
 
 @pytest.mark.asyncio
 async def test_evaluate_samples_uses_llm_judge(monkeypatch, tmp_path) -> None:
-    from nanobot.agent.mathrag import eval as mathrag_eval
+    import nanobot.agent.tools._mathrag.math_knowledge_eval as mathrag_eval
 
     async def fake_search(self, query: str, *, limit: int = 4):
         return [

@@ -246,28 +246,42 @@ describe("ThreadComposer", () => {
     expect(onSessionApprovalChange).toHaveBeenCalledWith(true);
   });
 
-  it("groups mutually exclusive Review and QA modes in one control", () => {
+  it("groups assistance modes in one control", () => {
     const onReviewModeChange = vi.fn();
-    const onMathQaModeChange = vi.fn();
+    const onLongTaskModeChange = vi.fn();
     render(
       <ThreadComposer
         onSend={vi.fn()}
         placeholder="Type your message..."
         reviewModeEnabled
         onReviewModeChange={onReviewModeChange}
-        mathQaModeEnabled={false}
-        onMathQaModeChange={onMathQaModeChange}
+        longTaskModeEnabled={false}
+        onLongTaskModeChange={onLongTaskModeChange}
       />,
     );
 
     const group = screen.getByRole("group", { name: "Assistance mode" });
     expect(group).toContainElement(screen.getByRole("button", { name: "Disable review mode" }));
-    expect(group).toContainElement(screen.getByRole("button", { name: "Enable math QA mode" }));
+    expect(group).toContainElement(screen.getByRole("button", { name: "Enable long-task mode" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "Enable math QA mode" }));
+    fireEvent.click(screen.getByRole("button", { name: "Enable long-task mode" }));
 
-    expect(onReviewModeChange).toHaveBeenCalledWith(false);
-    expect(onMathQaModeChange).toHaveBeenCalledWith(true);
+    expect(onReviewModeChange).not.toHaveBeenCalled();
+    expect(onLongTaskModeChange).toHaveBeenCalledWith(true);
+  });
+
+  it("does not show a separate review target field", () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        reviewModeEnabled
+        onReviewModeChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("textbox", { name: "Review target address" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Review target type" })).not.toBeInTheDocument();
   });
 
 });

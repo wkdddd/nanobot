@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
-from nanobot.session.goal_state import goal_state_runtime_lines
+from nanobot.session.goal_state import goal_state_runtime_lines, long_task_mode_enabled
 from nanobot.utils.helpers import (
     current_time_str,
     detect_image_mime,
@@ -33,7 +33,7 @@ class ContextBuilder:
         self.timezone = timezone
         self.memory = MemoryStore(workspace)
         self.skills = SkillsLoader(workspace, disabled_skills=set(disabled_skills) if disabled_skills else None)
-    
+
     def build_system_prompt(
         self,
         channel: str | None = None,
@@ -154,7 +154,19 @@ class ContextBuilder:
         session_metadata: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        extra = goal_state_runtime_lines(session_metadata)
+        if long_task_mode_enabled(session_metadata):
+            extra = goal_state_runtime_lines(session_metadata)
+            if not extra:
+                extra = [
+                    "[Long-task mode ON] You MUST call `long_task` immediately to register "
+                    "the user's objective as a sustained goal.",
+                    "Do not plan, research, or ask clarifying questions before calling `long_task`.",
+                    "Write an idempotent, self-contained, bounded goal with explicit done-ness criteria.",
+                    "After setting the goal, proceed with execution using ordinary tools.",
+                    "When fully done or cancelled, call `complete_goal` with a recap.",
+                ]
+        else:
+            extra = []
         runtime_ctx = self._build_runtime_context(
             channel,
             chat_id,

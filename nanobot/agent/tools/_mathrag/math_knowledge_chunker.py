@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.rag.utils import IndexedChunk
+from nanobot.rag.utils import IndexedChunk
 
 MATH_SOURCE_TYPE = "math"
 

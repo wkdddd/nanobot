@@ -1056,7 +1056,7 @@ def _run_gateway(
 from nanobot.bus.queue import MessageBus
 @app.command()
 def review(
-    target: str = typer.Argument(..., help="Local repository path or GitHub repository URL"),
+    target: str | None = typer.Argument(None, help="Local file/directory path or GitHub repository URL"),
     focus: str | None = typer.Option(
         None,
         "--focus",
@@ -1074,9 +1074,8 @@ def review(
     output: str | None = typer.Option(None, "--output", "-o", help="Save report to file"),
 ):
     """Review a local or GitHub repository with CodeReviewAgent."""
+    from nanobot.agent.codereview import infer_review_target_type, normalize_focus
     from nanobot.cli.stream import StreamRenderer
-    from nanobot.agent.review.prompts import build_review_prompt
-    from nanobot.agent.review.roles import normalize_focus
 
     if mode not in ("quick", "deep", "full"):
         console.print(f"[red]Invalid mode '{mode}'. Must be: quick, deep, or full[/red]")
@@ -1086,6 +1085,11 @@ def review(
         raise typer.Exit(1)
     if fail_on and fail_on not in ("critical", "high", "medium", "low"):
         console.print(f"[red]Invalid --fail-on '{fail_on}'. Must be: critical, high, medium, or low[/red]")
+        raise typer.Exit(1)
+    if not target or not target.strip():
+        target = typer.prompt("Review target (local file/directory path or GitHub URL)").strip()
+    if not target:
+        console.print("[red]Error: review target is required[/red]")
         raise typer.Exit(1)
 
     loaded = _load_runtime_config(config, workspace)
@@ -1106,22 +1110,18 @@ def review(
 
     async def run_once() -> None:
         try:
-            roles, forced = normalize_focus(focus)
+            normalize_focus(focus)
             effective_max_subagents = max_subagents or loaded.review.max_subagents
-            review_prompt = build_review_prompt(
-                target_url=target,
-                target_name=target,
-                roles=roles,
-                max_subagents=effective_max_subagents,
-                forced=forced,
-                mode=mode,
-                output_format=format,
-            )
 
             session_key = "cli:review"
             session = agent_loop.sessions.get_or_create(session_key)
             session.metadata["review_mode"] = True
-            session.metadata["review_prompt"] = review_prompt
+            session.metadata["review_target"] = target
+            session.metadata["review_target_type"] = infer_review_target_type(target)
+            session.metadata["review_focus"] = focus
+            session.metadata["review_mode_variant"] = mode
+            session.metadata["review_output_format"] = format
+            session.metadata["review_max_subagents"] = effective_max_subagents
             agent_loop.sessions.save(session)
 
             collected: list[str] = []
@@ -1426,7 +1426,7 @@ def _check_fail_on(report_content: str, threshold: str, format: str) -> int:
     import json
     import re
 
-    from nanobot.agent.review.format import SEVERITY_ORDER
+    from nanobot.agent.codereview import SEVERITY_ORDER
 
     threshold_idx = SEVERITY_ORDER.index(threshold)
     target_severities = set(SEVERITY_ORDER[: threshold_idx + 1])

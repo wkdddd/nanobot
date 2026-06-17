@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from nanobot.agent.rag.index import RAGIndex
-from nanobot.agent.rag.utils import IndexedChunk, IndexedHit
+from nanobot.rag.index import RAGIndex
+from nanobot.rag.utils import IndexedChunk, IndexedHit
 
 
 class _CapturingReranker:

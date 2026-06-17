@@ -117,16 +117,28 @@ export default function App() {
           if (cancelled) return;
           if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token);
-          const client = new NanobotClient({
+          let client: NanobotClient;
+          const reauth = async () => {
+            try {
+              const refreshed = await fetchBootstrap("", secret);
+              const refreshedUrl = deriveWsUrl(refreshed.ws_path, refreshed.token);
+              setState((current) =>
+                current.status === "ready" && current.client === client
+                  ? {
+                      ...current,
+                      token: refreshed.token,
+                      modelName: refreshed.model_name ?? current.modelName,
+                    }
+                  : current,
+              );
+              return refreshedUrl;
+            } catch {
+              return null;
+            }
+          };
+          client = new NanobotClient({
             url,
-            onReauth: async () => {
-              try {
-                const refreshed = await fetchBootstrap("", secret);
-                return deriveWsUrl(refreshed.ws_path, refreshed.token);
-              } catch {
-                return null;
-              }
-            },
+            onReauth: reauth,
           });
           client.connect();
           setState({

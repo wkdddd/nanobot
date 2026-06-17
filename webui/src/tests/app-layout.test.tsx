@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatSummary } from "@/lib/types";
@@ -9,6 +9,9 @@ const createChatSpy = vi.fn().mockResolvedValue("chat-1");
 const deleteChatSpy = vi.fn();
 const toggleThemeSpy = vi.fn();
 let mockSessions: ChatSummary[] = [];
+const mockClientInstances: Array<{
+  options: { onReauth?: () => Promise<string | null> };
+}> = [];
 
 vi.mock("@/hooks/useSessions", async (importOriginal) => {
   const React = await import("react");
@@ -55,6 +58,11 @@ vi.mock("@/lib/nanobot-client", () => {
   class MockClient {
     status = "idle" as const;
     defaultChatId: string | null = null;
+    options: { onReauth?: () => Promise<string | null> };
+    constructor(options: { onReauth?: () => Promise<string | null> }) {
+      this.options = options;
+      mockClientInstances.push(this);
+    }
     connect = connectSpy;
     onStatus = () => () => {};
     onRuntimeModelUpdate = () => () => {};
@@ -71,6 +79,7 @@ vi.mock("@/lib/nanobot-client", () => {
 });
 
 import App from "@/App";
+import { fetchBootstrap } from "@/lib/bootstrap";
 
 describe("App layout", () => {
   beforeEach(() => {
@@ -80,6 +89,13 @@ describe("App layout", () => {
     createChatSpy.mockClear();
     deleteChatSpy.mockReset();
     toggleThemeSpy.mockReset();
+    mockClientInstances.length = 0;
+    vi.mocked(fetchBootstrap).mockReset();
+    vi.mocked(fetchBootstrap).mockResolvedValue({
+      token: "tok",
+      ws_path: "/",
+      expires_in: 300,
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue({
@@ -288,6 +304,102 @@ describe("App layout", () => {
     fireEvent.click(screen.getByRole("menuitem", { name: "Brave Search" }));
     expect(screen.getByText("BSAo••••ew20")).toBeInTheDocument();
     expect(screen.queryByDisplayValue("unsaved-brave-key")).not.toBeInTheDocument();
+  });
+
+  it("updates REST token after websocket reauth", async () => {
+    mockSessions = [
+      {
+        key: "websocket:chat-a",
+        channel: "websocket",
+        chatId: "chat-a",
+        createdAt: "2026-04-16T10:00:00Z",
+        updatedAt: "2026-04-16T10:00:00Z",
+        preview: "Existing chat",
+      },
+    ];
+    vi.mocked(fetchBootstrap)
+      .mockResolvedValueOnce({
+        token: "token-old",
+        ws_path: "/",
+        expires_in: 300,
+      })
+      .mockResolvedValueOnce({
+        token: "token-new",
+        ws_path: "/",
+        expires_in: 300,
+      });
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/settings")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            agent: {
+              model: "openai/gpt-4o",
+              provider: "openai",
+              resolved_provider: "openai",
+              has_api_key: true,
+            },
+            providers: [{ name: "openai", label: "OpenAI", configured: true }],
+            web_search: {
+              provider: "duckduckgo",
+              api_key_hint: null,
+              base_url: null,
+              providers: [
+                { name: "duckduckgo", label: "DuckDuckGo", credential: "none" },
+              ],
+            },
+            runtime: {
+              config_path: "/tmp/config.json",
+            },
+            requires_restart: false,
+          }),
+        };
+      }
+      if (String(input).includes("/api/usage")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            scope: "process",
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+            },
+            last_usage: {
+              prompt_tokens: 0,
+              completion_tokens: 0,
+              total_tokens: 0,
+            },
+            note: "Subagent usage is not additionally included in the global total.",
+          }),
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    render(<App />);
+
+    await waitFor(() => expect(connectSpy).toHaveBeenCalled());
+    await act(async () => {
+      await mockClientInstances[0]!.options.onReauth?.();
+    });
+    await waitFor(() => expect(fetchBootstrap).toHaveBeenCalledTimes(2));
+
+    const sidebar = screen.getByRole("navigation", { name: "Sidebar navigation" });
+    fireEvent.click(within(sidebar).getByRole("button", { name: "Settings" }));
+    await screen.findByRole("heading", { name: "General" });
+
+    const settingsCall = fetchSpy.mock.calls.find(([input]) =>
+      String(input).includes("/api/settings"),
+    );
+    expect(settingsCall?.[1]).toMatchObject({
+      headers: {
+        Authorization: "Bearer token-new",
+      },
+    });
   });
 
   it("returns from settings to the blank start page when no session was active", async () => {

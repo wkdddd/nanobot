@@ -41,12 +41,12 @@ function fakeClient() {
   };
 }
 
-function wrap(client: ReturnType<typeof fakeClient>) {
+function wrap(client: ReturnType<typeof fakeClient>, token = "tok") {
   return function Wrapper({ children }: { children: ReactNode }) {
     return (
       <ClientProvider
         client={client as unknown as import("@/lib/nanobot-client").NanobotClient}
-        token="tok"
+        token={token}
       >
         {children}
       </ClientProvider>
@@ -133,6 +133,34 @@ describe("useSessions", () => {
 
     await waitFor(() => expect(result.current.sessions[0]?.title).toBe("生成的小标题"));
     expect(api.listSessions).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the latest provider token when refreshing sessions", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue([]);
+    const client = fakeClient();
+    let token = "tok-old";
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <ClientProvider
+        client={client as unknown as import("@/lib/nanobot-client").NanobotClient}
+        token={token}
+      >
+        {children}
+      </ClientProvider>
+    );
+
+    const { result, rerender } = renderHook(() => useSessions(), {
+      wrapper: Wrapper,
+    });
+
+    await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith("tok-old"));
+
+    token = "tok-new";
+    rerender();
+    await act(async () => {
+      await result.current.refresh();
+    });
+
+    expect(api.listSessions).toHaveBeenLastCalledWith("tok-new");
   });
 
   it("passes through WebUI transcript user media as images and media", async () => {

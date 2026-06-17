@@ -30,7 +30,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
-from nanobot.agent.math_qa import MATH_QA_MODE_KEY
+from nanobot.agent.codereview import normalize_review_target_type
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -60,6 +60,33 @@ def _strip_trailing_slash(path: str) -> str:
 
 def _normalize_config_path(path: str) -> str:
     return _strip_trailing_slash(path)
+
+
+def _review_mode_payload(meta: dict[str, Any]) -> dict[str, Any]:
+    target = str(meta.get("review_target") or "").strip()
+    target_type = normalize_review_target_type(
+        str(meta.get("review_target_type") or ""),
+        target or None,
+    )
+    payload: dict[str, Any] = {}
+    if target:
+        payload["target"] = target
+    if target_type:
+        payload["target_type"] = target_type
+    return payload
+
+
+def _clear_review_metadata(meta: dict[str, Any]) -> None:
+    for key in (
+        "review_target",
+        "review_target_type",
+        "review_focus",
+        "review_mode_variant",
+        "review_mode_name",
+        "review_output_format",
+        "review_max_subagents",
+    ):
+        meta.pop(key, None)
 
 
 class WebSocketConfig(Base):
@@ -579,25 +606,24 @@ class WebSocketChannel(BaseChannel):
         if not isinstance(meta, dict):
             return
         review_enabled = bool(meta.get("review_mode", False))
-        math_enabled = False if review_enabled else bool(meta.get(MATH_QA_MODE_KEY, False))
-        if not review_enabled and not math_enabled:
-            return
+        long_task_enabled = bool(meta.get("long_task_mode", False))
         conns = list(self._subs.get(chat_id, ()))
         for conn in conns:
-            await self._send_event(
-                conn,
-                "review_mode_updated",
-                chat_id=chat_id,
-                enabled=review_enabled,
-                math_qa_enabled=math_enabled,
-            )
-            await self._send_event(
-                conn,
-                "math_qa_mode_updated",
-                chat_id=chat_id,
-                enabled=math_enabled,
-                review_enabled=review_enabled,
-            )
+            if review_enabled:
+                await self._send_event(
+                    conn,
+                    "review_mode_updated",
+                    chat_id=chat_id,
+                    enabled=review_enabled,
+                    **_review_mode_payload(meta),
+                )
+            if long_task_enabled:
+                await self._send_event(
+                    conn,
+                    "long_task_mode_updated",
+                    chat_id=chat_id,
+                    enabled=long_task_enabled,
+                )
 
     async def _hydrate_after_subscribe(self, chat_id: str) -> None:
         """Replay goal/run strip state after subscribe (same-process refresh)."""
@@ -1623,9 +1649,37 @@ class WebSocketChannel(BaseChannel):
             # Auto-attach on first use so clients can one-shot without a separate attach.
             self._attach(connection, cid)
             await self._hydrate_after_subscribe(cid)
+            raw_review_target = envelope.get("review_target")
+            raw_review_target_type = envelope.get("review_target_type")
+            if (
+                self._session_manager is not None
+                and (isinstance(raw_review_target, str) or isinstance(raw_review_target_type, str))
+            ):
+                session_key = f"websocket:{cid}"
+                session = self._session_manager.get_or_create(session_key)
+                session.metadata["review_mode"] = True
+                if isinstance(raw_review_target, str):
+                    target = raw_review_target.strip()
+                    if target:
+                        session.metadata["review_target"] = target
+                    else:
+                        session.metadata.pop("review_target", None)
+                target_type = normalize_review_target_type(
+                    raw_review_target_type if isinstance(raw_review_target_type, str) else None,
+                    session.metadata.get("review_target"),
+                )
+                if target_type:
+                    session.metadata["review_target_type"] = target_type
+                else:
+                    session.metadata.pop("review_target_type", None)
+                self._session_manager.save(session)
             metadata: dict[str, Any] = {"remote": getattr(connection, "remote_address", None)}
             if envelope.get("webui") is True:
                 metadata["webui"] = True
+            if isinstance(raw_review_target, str):
+                metadata["review_target"] = raw_review_target.strip()
+            if isinstance(raw_review_target_type, str):
+                metadata["review_target_type"] = raw_review_target_type
             await self._handle_message(
                 sender_id=client_id,
                 chat_id=cid,
@@ -1686,44 +1740,57 @@ class WebSocketChannel(BaseChannel):
                 return
             logger.info("session websocket:{} review mode: {}", cid, "enabled" if enabled else "disabled")
             math_enabled = False
+            review_payload: dict[str, Any] = {}
             if self._session_manager is not None:
                 session_key = f"websocket:{cid}"
                 session = self._session_manager.get_or_create(session_key)
                 session.metadata["review_mode"] = enabled
                 if enabled:
-                    session.metadata[MATH_QA_MODE_KEY] = False
-                math_enabled = bool(session.metadata.get(MATH_QA_MODE_KEY, False))
+                    raw_target = envelope.get("target")
+                    if isinstance(raw_target, str):
+                        target = raw_target.strip()
+                        if target:
+                            session.metadata["review_target"] = target
+                        else:
+                            session.metadata.pop("review_target", None)
+                    raw_target_type = envelope.get("target_type")
+                    target_type = normalize_review_target_type(
+                        raw_target_type if isinstance(raw_target_type, str) else None,
+                        session.metadata.get("review_target"),
+                    )
+                    if target_type:
+                        session.metadata["review_target_type"] = target_type
+                    else:
+                        session.metadata.pop("review_target_type", None)
+                    review_payload = _review_mode_payload(session.metadata)
+                else:
+                    _clear_review_metadata(session.metadata)
                 self._session_manager.save(session)
             await self._send_event(
                 connection,
                 "review_mode_updated",
                 chat_id=cid,
                 enabled=enabled,
-                math_qa_enabled=math_enabled,
+                **review_payload,
             )
             return
-        if t == "set_math_qa_mode":
+        if t == "set_long_task_mode":
             cid = envelope.get("chat_id")
             enabled = bool(envelope.get("enabled", False))
             if not _is_valid_chat_id(cid):
                 await self._send_event(connection, "error", detail="invalid chat_id")
                 return
-            logger.info("session websocket:{} math QA mode: {}", cid, "enabled" if enabled else "disabled")
-            review_enabled = False
+            logger.info("session websocket:{} long-task mode: {}", cid, "enabled" if enabled else "disabled")
             if self._session_manager is not None:
                 session_key = f"websocket:{cid}"
                 session = self._session_manager.get_or_create(session_key)
-                session.metadata[MATH_QA_MODE_KEY] = enabled
-                if enabled:
-                    session.metadata["review_mode"] = False
-                review_enabled = bool(session.metadata.get("review_mode", False))
+                session.metadata["long_task_mode"] = enabled
                 self._session_manager.save(session)
             await self._send_event(
                 connection,
-                "math_qa_mode_updated",
+                "long_task_mode_updated",
                 chat_id=cid,
                 enabled=enabled,
-                review_enabled=review_enabled,
             )
             return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")

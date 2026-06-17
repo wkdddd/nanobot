@@ -53,6 +53,9 @@ function makeClient() {
       for (const h of sessionUpdateHandlers) h(chatId);
     },
     sendMessage: vi.fn(),
+    sendSetReviewMode: vi.fn(),
+    sendSetLongTaskMode: vi.fn(),
+    sendSetSessionPermission: vi.fn(),
     newChat: vi.fn(),
     attach: vi.fn(),
     connect: vi.fn(),
@@ -251,6 +254,39 @@ describe("ThreadShell", () => {
       expect(screen.queryByText("delete me cleanly")).not.toBeInTheDocument();
     });
     expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
+  });
+
+  it("keeps review mode as a plain prompt mode without a separate target field", async () => {
+    const client = makeClient();
+
+    render(
+      wrap(
+        client,
+        <ThreadShell
+          session={session("chat-review")}
+          title="Chat review"
+          onToggleSidebar={() => {}}
+        />,
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable review mode" }));
+    expect(screen.queryByRole("textbox", { name: "Review target address" })).not.toBeInTheDocument();
+
+    expect(client.sendSetReviewMode).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByLabelText("Message input"), {
+      target: { value: "请审查 https://github.com/test/repo 的登录逻辑" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(client.sendMessage).toHaveBeenCalledWith(
+        "chat-review",
+        "请审查 https://github.com/test/repo 的登录逻辑",
+        undefined,
+      ),
+    );
   });
 
   it("creates a chat only when the blank landing sends a first message", async () => {

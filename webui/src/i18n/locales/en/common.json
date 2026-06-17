@@ -237,12 +237,6 @@
       "goalStateCloseAria": "Close goal",
       "send": "Send message",
       "stop": "Stop response",
-      "mathQa": {
-        "label": "QA",
-        "enable": "Enable math QA mode",
-        "disable": "Disable math QA mode",
-        "placeholder": "Enter or attach a math exam question..."
-      },
       "tools": {
         "search": "Search",
         "reason": "Reason",

@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from nanobot.agent.rag.utils import ChunkKey, IndexedHit
+from nanobot.rag.utils import ChunkKey, IndexedHit
 
 logger = logging.getLogger(__name__)
 
@@ -361,9 +361,9 @@ class MathKnowledgeBase:
         return scored[:limit]
 
     def sync_index(self, *, trace_id: str | None = None) -> None:
-        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE, chunk_math_file
-        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
-        from nanobot.agent.rag.rerank import create_rerank_client_from_config
+        from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE, chunk_math_file
+        from nanobot.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.rag.rerank import create_rerank_client_from_config
 
         t0 = time.perf_counter()
         files = self.list_index_files()
@@ -395,9 +395,9 @@ class MathKnowledgeBase:
         )
 
     async def async_sync_index(self, *, trace_id: str | None = None) -> None:
-        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
-        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
-        from nanobot.agent.rag.qdrant_store import (
+        from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE
+        from nanobot.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.rag.qdrant_store import (
             QdrantMathVectorStore,
             chunk_key,
             stable_point_id,
@@ -479,10 +479,10 @@ class MathKnowledgeBase:
             )
 
     async def async_search(self, query: str, *, limit: int = 4) -> list[KnowledgeHit]:
-        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
-        from nanobot.agent.rag import RAGIndex, create_embedding_client_from_config
-        from nanobot.agent.rag.qdrant_store import QdrantMathVectorStore
-        from nanobot.agent.rag.rerank import create_rerank_client_from_config
+        from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE
+        from nanobot.rag import RAGIndex, create_embedding_client_from_config
+        from nanobot.rag.qdrant_store import QdrantMathVectorStore
+        from nanobot.rag.rerank import create_rerank_client_from_config
 
         trace_id = uuid.uuid4().hex[:8]
         total_t0 = time.perf_counter()
@@ -691,9 +691,9 @@ class MathKnowledgeBase:
         return converted
 
     def _load_example_siblings(self, example_id: str, *, exclude: tuple[str, int, int, str]) -> list[Any]:
-        from nanobot.agent.mathrag.chunker import MATH_SOURCE_TYPE
-        from nanobot.agent.rag import RAGIndex
-        from nanobot.agent.rag.utils import IndexedHit, chunk_from_row
+        from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE
+        from nanobot.rag import RAGIndex
+        from nanobot.rag.utils import IndexedHit, chunk_from_row
 
         index = RAGIndex(self.workspace)
         siblings: list[IndexedHit] = []

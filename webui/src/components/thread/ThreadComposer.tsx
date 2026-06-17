@@ -13,7 +13,6 @@ import {
   Activity,
   ArrowUp,
   BookOpen,
-  Calculator,
   ChevronDown,
   ChevronUp,
   CircleHelp,
@@ -74,8 +73,8 @@ interface ThreadComposerProps {
   onSessionApprovalChange?: (enabled: boolean) => void;
   reviewModeEnabled?: boolean;
   onReviewModeChange?: (enabled: boolean) => void;
-  mathQaModeEnabled?: boolean;
-  onMathQaModeChange?: (enabled: boolean) => void;
+  longTaskModeEnabled?: boolean;
+  onLongTaskModeChange?: (enabled: boolean) => void;
 }
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
@@ -368,8 +367,8 @@ export function ThreadComposer({
   onSessionApprovalChange,
   reviewModeEnabled = false,
   onReviewModeChange,
-  mathQaModeEnabled = false,
-  onMathQaModeChange,
+  longTaskModeEnabled = false,
+  onLongTaskModeChange,
 }: ThreadComposerProps) {
   const { t } = useTranslation();
   const [value, setValue] = useState("");
@@ -383,9 +382,7 @@ export function ThreadComposer({
   const isHero = variant === "hero";
   const resolvedPlaceholder = isStreaming
     ? t("thread.composer.placeholderStreaming")
-    : mathQaModeEnabled
-      ? t("thread.composer.mathQa.placeholder")
-      : placeholder ?? t("thread.composer.placeholderThread");
+    : placeholder ?? t("thread.composer.placeholderThread");
 
   const { images, enqueue, remove, clear, encoding, full } =
     useAttachedImages();
@@ -659,11 +656,9 @@ export function ThreadComposer({
 
   const attachButtonDisabled = disabled || full;
   const showStopButton = isStreaming && !!onStop;
-  const showAssistanceModeGroup = !!(onReviewModeChange || onMathQaModeChange);
+  const showAssistanceModeGroup = !!(onReviewModeChange || onLongTaskModeChange);
   const reviewModeTitle = reviewModeEnabled ? "Disable review mode" : "Enable review mode";
-  const mathQaModeTitle = mathQaModeEnabled
-    ? t("thread.composer.mathQa.disable")
-    : t("thread.composer.mathQa.enable");
+  const longTaskModeTitle = longTaskModeEnabled ? "Disable long-task mode" : "Enable long-task mode";
 
   return (
     <form
@@ -846,13 +841,12 @@ export function ThreadComposer({
                     type="button"
                     disabled={disabled}
                     aria-pressed={reviewModeEnabled}
-                    aria-label={reviewModeTitle}
-                    title={reviewModeTitle}
-                    onClick={() => {
-                      const nextEnabled = !reviewModeEnabled;
-                      if (nextEnabled) onMathQaModeChange?.(false);
-                      onReviewModeChange(nextEnabled);
-                    }}
+                  aria-label={reviewModeTitle}
+                  title={reviewModeTitle}
+                  onClick={() => {
+                    const nextEnabled = !reviewModeEnabled;
+                    onReviewModeChange(nextEnabled);
+                  }}
                     className={cn(
                       "inline-flex h-[calc(100%-4px)] items-center justify-center gap-1.5 rounded-full px-3 font-medium transition-colors",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
@@ -865,28 +859,26 @@ export function ThreadComposer({
                     <span>Review</span>
                   </button>
                 ) : null}
-                {onMathQaModeChange ? (
+                {onLongTaskModeChange ? (
                   <button
                     type="button"
                     disabled={disabled}
-                    aria-pressed={mathQaModeEnabled}
-                    aria-label={mathQaModeTitle}
-                    title={mathQaModeTitle}
+                    aria-pressed={longTaskModeEnabled}
+                    aria-label={longTaskModeTitle}
+                    title={longTaskModeTitle}
                     onClick={() => {
-                      const nextEnabled = !mathQaModeEnabled;
-                      if (nextEnabled) onReviewModeChange?.(false);
-                      onMathQaModeChange(nextEnabled);
+                      onLongTaskModeChange(!longTaskModeEnabled);
                     }}
                     className={cn(
                       "inline-flex h-[calc(100%-4px)] items-center justify-center gap-1.5 rounded-full px-3 font-medium transition-colors",
                       "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-                      mathQaModeEnabled
-                        ? "bg-emerald-500/12 text-emerald-700 shadow-[inset_0_0_0_1px_rgba(16,185,129,0.18)] dark:text-emerald-300"
+                      longTaskModeEnabled
+                        ? "bg-amber-500/12 text-amber-700 shadow-[inset_0_0_0_1px_rgba(245,158,11,0.18)] dark:text-amber-300"
                         : "text-muted-foreground hover:bg-muted/65 hover:text-foreground",
                     )}
                   >
-                    <Calculator className={cn(isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
-                    <span>{t("thread.composer.mathQa.label")}</span>
+                    <Target className={cn(isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
+                    <span>Long Task</span>
                   </button>
                 ) : null}
               </div>

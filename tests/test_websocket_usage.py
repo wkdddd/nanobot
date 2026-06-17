@@ -2,9 +2,12 @@ import json
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.websocket import WebSocketChannel
+from nanobot.session.manager import SessionManager
 
 
 def _request(path: str = "/api/usage", token: str | None = "tok") -> SimpleNamespace:
@@ -80,3 +83,92 @@ def test_agent_loop_accumulates_process_usage_without_double_counting_total() ->
         "cached_tokens": 43,
         "total_tokens": 140,
     }
+
+
+class _FakeConnection:
+    remote_address = ("127.0.0.1", 12345)
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+
+
+@pytest.mark.asyncio
+async def test_websocket_review_mode_stores_and_clears_target(tmp_path) -> None:
+    manager = SessionManager(tmp_path)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    conn = _FakeConnection()
+
+    await channel._dispatch_envelope(
+        conn,
+        "client",
+        {
+            "type": "set_review_mode",
+            "chat_id": "chat",
+            "enabled": True,
+            "target": "https://github.com/test/repo",
+            "target_type": "github",
+        },
+    )
+
+    session = manager.get_or_create("websocket:chat")
+    assert session.metadata["review_mode"] is True
+    assert session.metadata["review_target"] == "https://github.com/test/repo"
+    assert session.metadata["review_target_type"] == "github"
+    assert conn.sent[-1]["target"] == "https://github.com/test/repo"
+    assert conn.sent[-1]["target_type"] == "github"
+
+    await channel._dispatch_envelope(
+        conn,
+        "client",
+        {"type": "set_review_mode", "chat_id": "chat", "enabled": False},
+    )
+
+    assert session.metadata["review_mode"] is False
+    assert "review_target" not in session.metadata
+    assert "review_target_type" not in session.metadata
+    assert "target" not in conn.sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_websocket_message_can_carry_review_target(tmp_path, monkeypatch) -> None:
+    manager = SessionManager(tmp_path)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    conn = _FakeConnection()
+    handled: list[dict] = []
+
+    async def fake_handle_message(**kwargs):
+        handled.append(kwargs)
+
+    monkeypatch.setattr(channel, "_handle_message", fake_handle_message)
+
+    await channel._dispatch_envelope(
+        conn,
+        "client",
+        {
+            "type": "message",
+            "chat_id": "chat",
+            "content": "请审查登录逻辑",
+            "review_target": "https://github.com/test/repo",
+            "review_target_type": "github",
+            "webui": True,
+        },
+    )
+
+    session = manager.get_or_create("websocket:chat")
+    assert session.metadata["review_mode"] is True
+    assert session.metadata["review_target"] == "https://github.com/test/repo"
+    assert session.metadata["review_target_type"] == "github"
+    assert handled[0]["content"] == "请审查登录逻辑"
+    assert handled[0]["metadata"]["review_target"] == "https://github.com/test/repo"
+    assert handled[0]["metadata"]["review_target_type"] == "github"

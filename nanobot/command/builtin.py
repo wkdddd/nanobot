@@ -618,7 +618,7 @@ async def cmd_math_kb(ctx: CommandContext) -> OutboundMessage:
     action = parts[0].lower()
     if action == "convert":
         try:
-            from nanobot.agent.mathrag.data_load import MathKnowledgeMarkdownConverter
+            from nanobot.agent.tools._mathrag.math_knowledge_convert import MathKnowledgeMarkdownConverter
 
             converter = MathKnowledgeMarkdownConverter(ctx.loop.workspace)
             results = converter.convert_all(write=True)

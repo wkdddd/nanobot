@@ -13,6 +13,7 @@ from typing import Any, Mapping, MutableMapping
 from nanobot.session.manager import SessionManager
 
 GOAL_STATE_KEY = "goal_state"
+LONG_TASK_MODE_KEY = "long_task_mode"
 # Older builds stored the same JSON blob under this key.
 _LEGACY_GOAL_STATE_SESSION_KEY = "thread_goal"
 _MAX_OBJECTIVE_IN_RUNTIME = 4000
@@ -109,3 +110,10 @@ def runner_wall_llm_timeout_s(
     if meta is None and session_key:
         meta = sessions.get_or_create(session_key).metadata
     return 0.0 if sustained_goal_active(meta) else None
+
+
+def long_task_mode_enabled(metadata: Mapping[str, Any] | None) -> bool:
+    """True when the session has long-task mode explicitly enabled (default off)."""
+    if not metadata:
+        return False
+    return bool(metadata.get(LONG_TASK_MODE_KEY, False))

@@ -86,7 +86,7 @@ export function ThreadShell({
   const [slashCommands, setSlashCommands] = useState<SlashCommand[]>([]);
   const [newChatApprovalEnabled, setNewChatApprovalEnabled] = useState(false);
   const [newChatReviewEnabled, setNewChatReviewEnabled] = useState(false);
-  const [newChatMathQaEnabled, setNewChatMathQaEnabled] = useState(false);
+  const [newChatLongTaskEnabled, setNewChatLongTaskEnabled] = useState(false);
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0);
   const pendingFirstRef = useRef<PendingFirstMessage | null>(null);
   const messageCacheRef = useRef<Map<string, UIMessage[]>>(new Map());
@@ -117,8 +117,8 @@ export function ThreadShell({
     setSessionApproval,
     reviewModeEnabled,
     setReviewMode,
-    mathQaModeEnabled,
-    setMathQaMode,
+    longTaskModeEnabled,
+    setLongTaskMode,
     respondToPermission,
     streamError,
     dismissStreamError,
@@ -222,17 +222,18 @@ export function ThreadShell({
     const pending = pendingFirstRef.current;
     if (!pending) return;
     pendingFirstRef.current = null;
+    const pendingReviewEnabled = newChatReviewEnabled;
     if (newChatApprovalEnabled) {
       setSessionApproval(true);
       setNewChatApprovalEnabled(false);
     }
-    if (newChatReviewEnabled) {
+    if (pendingReviewEnabled) {
       setReviewMode(true);
       setNewChatReviewEnabled(false);
     }
-    if (newChatMathQaEnabled) {
-      setMathQaMode(true);
-      setNewChatMathQaEnabled(false);
+    if (newChatLongTaskEnabled) {
+      setLongTaskMode(true);
+      setNewChatLongTaskEnabled(false);
     }
     setScrollToBottomSignal((value) => value + 1);
     send(pending.content, pending.images);
@@ -241,11 +242,11 @@ export function ThreadShell({
     chatId,
     newChatApprovalEnabled,
     newChatReviewEnabled,
-    newChatMathQaEnabled,
+    newChatLongTaskEnabled,
     send,
     setSessionApproval,
     setReviewMode,
-    setMathQaMode,
+    setLongTaskMode,
   ]);
 
   useEffect(() => {
@@ -348,8 +349,8 @@ export function ThreadShell({
           onSessionApprovalChange={setSessionApproval}
           reviewModeEnabled={reviewModeEnabled}
           onReviewModeChange={setReviewMode}
-          mathQaModeEnabled={mathQaModeEnabled}
-          onMathQaModeChange={setMathQaMode}
+          longTaskModeEnabled={longTaskModeEnabled}
+          onLongTaskModeChange={setLongTaskMode}
         />
       ) : (
         <ThreadComposer
@@ -371,13 +372,9 @@ export function ThreadShell({
           reviewModeEnabled={newChatReviewEnabled}
           onReviewModeChange={(enabled) => {
             setNewChatReviewEnabled(enabled);
-            if (enabled) setNewChatMathQaEnabled(false);
           }}
-          mathQaModeEnabled={newChatMathQaEnabled}
-          onMathQaModeChange={(enabled) => {
-            setNewChatMathQaEnabled(enabled);
-            if (enabled) setNewChatReviewEnabled(false);
-          }}
+          longTaskModeEnabled={newChatLongTaskEnabled}
+          onLongTaskModeChange={setNewChatLongTaskEnabled}
         />
       )}
       {showHeroComposer ? quickActions : null}

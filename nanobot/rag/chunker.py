@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from nanobot.agent.rag.utils import IndexedChunk
+from nanobot.rag.utils import IndexedChunk
 
 logger = logging.getLogger(__name__)
 

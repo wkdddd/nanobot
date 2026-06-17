@@ -10,7 +10,7 @@ from nanobot.agent.math_qa import (
     build_math_qa_prompt,
     resolve_math_qa_context,
 )
-from nanobot.agent.rag.utils import IndexedChunk, IndexedHit
+from nanobot.rag.utils import IndexedChunk, IndexedHit
 from nanobot.session.manager import Session
 
 

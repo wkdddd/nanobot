@@ -17,11 +17,13 @@ from loguru import logger
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.codereview import (
+    apply_review_metadata_from_message,
+    resolve_code_review_context,
+)
 from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
-from nanobot.agent.math_qa import MATH_QA_MODE_KEY, resolve_math_qa_context
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.progress_hook import AgentProgressHook
-from nanobot.agent.review.prompts import resolve_review_context
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
@@ -471,8 +473,11 @@ class AgentLoop:
         ctx = ToolContext(
             config=self.tools_config,
             workspace=str(self.workspace),
+            provider=self.provider,
+            model=self.model,
             embedding_config=self.embedding_config,
             rerank_config=self.rerank_config,
+            qdrant_config=self.qdrant_config,
             bus=self.bus,
             subagent_manager=self.subagents,
             cron_service=self.cron_service,
@@ -800,16 +805,7 @@ class AgentLoop:
 
             specialist_prompt: str | None = None
             if _session_meta.get("review_mode", False):
-                specialist_prompt = await resolve_review_context(initial_messages, _session_meta)
-            elif _session_meta.get(MATH_QA_MODE_KEY, False):
-                specialist_prompt = await resolve_math_qa_context(
-                    initial_messages,
-                    _session_meta,
-                    workspace=self.workspace,
-                    embedding_config=self.embedding_config,
-                    rerank_config=self.rerank_config,
-                    qdrant_config=self.qdrant_config,
-                )
+                specialist_prompt = await resolve_code_review_context(initial_messages, _session_meta)
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
@@ -1486,6 +1482,8 @@ class AgentLoop:
         if ctx.session is None:
             ctx.session = self.sessions.get_or_create(ctx.session_key)
         mark_webui_session(ctx.session, msg.metadata)
+        if apply_review_metadata_from_message(ctx.session, msg.metadata):
+            self.sessions.save(ctx.session)
 
         # 尝试恢复检查点
         if self._restore_runtime_checkpoint(ctx.session):

@@ -1198,7 +1198,7 @@ class OpenAICompatProvider(LLMProvider):
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "90"))
+        idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "45"))
         try:
             if self._should_use_responses_api(model, reasoning_effort):
                 try:

@@ -25,8 +25,11 @@ class ContextAware(Protocol):
 class ToolContext:
     config: Any
     workspace: str
+    provider: Any | None = None
+    model: str | None = None
     embedding_config: Any | None = None
     rerank_config: Any | None = None
+    qdrant_config: Any | None = None
     bus: Any | None = None
     subagent_manager: Any | None = None
     cron_service: Any | None = None

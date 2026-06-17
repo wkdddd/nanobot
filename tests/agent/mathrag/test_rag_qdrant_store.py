@@ -4,12 +4,12 @@ import sys
 import types
 from dataclasses import dataclass
 
-from nanobot.agent.rag.qdrant_store import (
+from nanobot.rag.qdrant_store import (
     QdrantMathVectorStore,
     chunk_key,
     stable_point_id,
 )
-from nanobot.agent.rag.utils import IndexedChunk
+from nanobot.rag.utils import IndexedChunk
 from nanobot.config.schema import QdrantConfig
 
 

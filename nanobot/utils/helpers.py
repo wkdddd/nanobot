@@ -15,6 +15,47 @@ import tiktoken
 from loguru import logger
 
 
+_DSML_CONTROL_START_RE = re.compile(r"<｜DSML｜(?P<tag>tool_calls|invoke|parameter)\b")
+_DSML_CONTROL_MARKERS = (
+    "<｜DSML｜tool_calls",
+    "<｜DSML｜invoke",
+    "<｜DSML｜parameter",
+    "</｜DSML｜invoke>",
+    "</｜DSML｜tool_calls>",
+)
+
+
+def strip_dsml_control(text: str) -> str:
+    """Remove leaked DSML tool-call control markup from model-visible text."""
+    start = _DSML_CONTROL_START_RE.search(text)
+    if not start:
+        return _strip_trailing_dsml_prefix(text)
+
+    before = text[: start.start()]
+    tail = text[start.end() :]
+    tag = start.group("tag")
+    end_tag = "tool_calls" if tag == "tool_calls" else tag
+    end = re.search(rf"</｜DSML｜{end_tag}>", tail)
+    if not end:
+        paragraph = re.search(r"\n\s*\n", tail)
+        if paragraph:
+            after = tail[paragraph.end() :]
+            return before + strip_dsml_control(after)
+        return before
+
+    after = tail[end.end() :]
+    return before + strip_dsml_control(after)
+
+
+def _strip_trailing_dsml_prefix(text: str) -> str:
+    max_marker_len = max(len(marker) for marker in _DSML_CONTROL_MARKERS)
+    for length in range(min(len(text), max_marker_len), 0, -1):
+        suffix = text[-length:]
+        if any(marker.startswith(suffix) for marker in _DSML_CONTROL_MARKERS):
+            return text[:-length]
+    return text
+
+
 def strip_think(text: str) -> str:
     """Remove thinking blocks, unclosed trailing tags, and tokenizer-level
     template leaks occasionally emitted by some models (notably Gemma 4's
@@ -34,12 +75,15 @@ def strip_think(text: str) -> str:
          or end of the text** only, for the same reason.
       6. Trailing partial control tags split across stream chunks, such as
          `<thi`, `<thin`, or `<tho`.
+      7. DSML tool-call markup accidentally emitted as text by tool-template
+         providers, including unterminated streaming prefixes.
 
     Since this is also applied before persisting to history (memory.py),
     the edge-only stripping of (4) and (5) is deliberate: stripping those
     tokens mid-text would silently rewrite any message where a user or the
     assistant discusses the tokens themselves.
     """
+    text = strip_dsml_control(text)
     # Well-formed blocks first.
     text = re.sub(r"<think>[\s\S]*?</think>", "", text)
     text = re.sub(r"^\s*<think>[\s\S]*$", "", text)

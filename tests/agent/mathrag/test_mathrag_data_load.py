@@ -1,6 +1,6 @@
 import json
 
-from nanobot.agent.mathrag.data_load import MathKnowledgeMarkdownConverter
+from nanobot.agent.tools._mathrag.math_knowledge_convert import MathKnowledgeMarkdownConverter
 
 
 def test_converter_copies_utf8_markdown_to_output_dir(tmp_path) -> None:

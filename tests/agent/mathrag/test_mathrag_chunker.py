@@ -1,6 +1,6 @@
 import pytest
 
-from nanobot.agent.mathrag.chunker import build_math_chunks
+from nanobot.agent.tools._mathrag.math_knowledge_chunker import build_math_chunks
 
 
 def test_math_chunker_keeps_example_answer_linked(tmp_path) -> None:

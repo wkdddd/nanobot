@@ -1,11 +1,11 @@
 """RAG subsystem — retrieval-augmented generation with FTS5 + hnswlib + rerank."""
 
-from nanobot.agent.rag.chunker import TreeSitterChunker
-from nanobot.agent.rag.embedding import EmbeddingClient, create_embedding_client_from_config
-from nanobot.agent.rag.index import RAGIndex
-from nanobot.agent.rag.qdrant_store import QdrantMathVectorStore, QdrantVectorHit
-from nanobot.agent.rag.rerank import RerankClient, create_rerank_client_from_config
-from nanobot.agent.rag.utils import (
+from nanobot.rag.chunker import TreeSitterChunker
+from nanobot.rag.embedding import EmbeddingClient, create_embedding_client_from_config
+from nanobot.rag.index import RAGIndex
+from nanobot.rag.qdrant_store import QdrantMathVectorStore, QdrantVectorHit
+from nanobot.rag.rerank import RerankClient, create_rerank_client_from_config
+from nanobot.rag.utils import (
     ChunkerFn,
     ChunkKey,
     IndexedChunk,

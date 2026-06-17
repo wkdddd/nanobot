@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings
 from nanobot.cron.types import CronSchedule
 
 if TYPE_CHECKING:
+    from nanobot.agent.tools.repo_review import GitHubRepoConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
@@ -314,6 +315,10 @@ class ToolsConfig(Base):
     unsplash_search:UnsplashSearchToolConfig=Field(
         default_factory=lambda:_lazy_default("nanobot.agent.tools.unsplash","UnsplashSearchToolConfig")
     )
+    github_repo: GitHubRepoConfig = Field(
+        default_factory=lambda: _lazy_default("nanobot.agent.tools.repo_review", "GitHubRepoConfig")
+    )
+
 
 
 class ReviewConfig(Base):
@@ -515,6 +520,7 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
+    from nanobot.agent.tools.repo_review import GitHubRepoConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
@@ -528,6 +534,7 @@ def _resolve_tool_config_refs() -> None:
     mod.WebFetchConfig = WebFetchConfig  # type: ignore[attr-defined]
     mod.MyToolConfig = MyToolConfig  # type: ignore[attr-defined]
     mod.UnsplashSearchToolConfig = UnsplashSearchToolConfig
+    mod.GitHubRepoConfig = GitHubRepoConfig  # type: ignore[attr-defined]
     ToolsConfig.model_rebuild()
     Config.model_rebuild()
 

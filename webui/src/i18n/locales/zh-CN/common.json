@@ -224,12 +224,6 @@
       "goalStateSheetTitle": "目标",
       "send": "发送消息",
       "stop": "停止响应",
-      "mathQa": {
-        "label": "答疑",
-        "enable": "开启数学答疑模式",
-        "disable": "关闭数学答疑模式",
-        "placeholder": "输入或上传一道考研数学题..."
-      },
       "tools": {
         "search": "搜索",
         "reason": "推理",

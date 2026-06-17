@@ -1,15 +1,13 @@
 """Sustained goal tools on the main agent (Codex-style).
 
-Follow the built-in **long-goal** skill for lifecycle rules and how to phrase
-objectives (especially **idempotent**, compaction-safe goals). Load that skill
-from the skills listing (path shown there) before composing ``long_task.goal`` text.
-
 ``long_task`` registers an objective on the session (JSON-serializable metadata).
+The feature is per-session: the user must enable long-task mode before the agent can
+set goals. When enabled, the agent MUST call ``long_task`` immediately.
+
 Active objectives are mirrored each turn into the Runtime Context block (see
 ``nanobot.session.goal_state.goal_state_runtime_lines``) so compaction cannot hide them.
 Work proceeds in ordinary agent turns (same runner, compaction as configured).
-Call ``complete_goal`` when the sustained objective should stop being tracked:
-finished successfully, or cancelled / superseded / redirected—in every case the recap should match reality.
+Call ``complete_goal`` when the sustained objective should stop being tracked.
 
 There is **no** sub-agent orchestrator and **no** special WebSocket ``agent_ui`` stream.
 """
@@ -83,10 +81,9 @@ class _GoalToolsMixin(ContextAware):
 @tool_parameters(
     tool_parameters_schema(
         goal=StringSchema(
-            "Sustained objective for this chat thread. First read the built-in **long-goal** skill, "
-            "especially its Start fast section, then call this promptly once the user's intent is clear. "
-            "The goal must still be idempotent, self-contained, bounded, and explicit about done-ness; "
-            "do not delay this tool call to over-plan, research, or decide execution details.",
+            "Sustained objective for this chat thread. Must be idempotent, self-contained, "
+            "bounded, state-oriented, and explicit about done-ness. "
+            "Call this immediately when long-task mode is ON—do not delay to over-plan or research.",
             max_length=12_000,
         ),
         ui_summary=StringSchema(
@@ -120,12 +117,13 @@ class LongTaskTool(Tool, _GoalToolsMixin):
     @property
     def description(self) -> str:
         return (
-            "Mark this thread as a sustained long-running task. "
-            "First read the built-in **long-goal** skill, especially its Start fast section; then call this "
-            "as soon as the user's intent is clear. Write a good idempotent goal, but do not delay the tool "
-            "call with long planning, research, or execution-detail thinking. "
-            "The active goal is mirrored in Runtime Context each turn. Use normal tools until done, then call "
-            "complete_goal when the objective is satisfied, cancelled, or replaced. "
+            "Register a sustained objective for this session (long-task mode must be ON). "
+            "Call this immediately when mode is active—do not delay with planning or research. "
+            "Goal rules: (1) idempotent—safe under resume/replay, use 'ensure…' / 'until…'; "
+            "(2) self-contained—repeat all constraints, do not rely on 'as discussed above'; "
+            "(3) bounded—state what is in and out of scope; "
+            "(4) state-oriented—describe desired end state, not fragile step sequences; "
+            "(5) explicit done-ness—how to verify completion (tests green, artifact exists, etc.). "
             "If a goal is already active, finish it or call complete_goal before registering another."
         )
 
@@ -134,6 +132,11 @@ class LongTaskTool(Tool, _GoalToolsMixin):
         if sess is None:
             return (
                 "Error: long_task requires an active chat session (missing routing context)."
+            )
+        if not sess.metadata.get("long_task_mode", False):
+            return (
+                "Error: long_task mode is disabled for this session. "
+                "The user must enable it before you can register a sustained objective."
             )
         prior = parse_goal_state(goal_state_raw(sess.metadata))
         if isinstance(prior, dict) and prior.get("status") == "active":
@@ -206,6 +209,8 @@ class CompleteGoalTool(Tool, _GoalToolsMixin):
         sess = self._session()
         if sess is None:
             return "Error: complete_goal requires an active chat session."
+        if not sess.metadata.get("long_task_mode", False):
+            return "Error: long_task mode is disabled for this session."
         prior = parse_goal_state(goal_state_raw(sess.metadata))
         if not isinstance(prior, dict) or prior.get("status") != "active":
             return "No active goal to complete."

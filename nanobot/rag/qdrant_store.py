@@ -7,7 +7,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from nanobot.agent.rag.utils import ChunkKey, IndexedChunk
+from nanobot.rag.utils import ChunkKey, IndexedChunk
 
 logger = logging.getLogger(__name__)
 
