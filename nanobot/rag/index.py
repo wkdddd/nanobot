@@ -6,17 +6,16 @@ import asyncio
 import concurrent.futures
 import hashlib
 import json
-import logging
 import sqlite3
 import struct
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
+from loguru import logger
+
 from nanobot.rag.qdrant_store import stable_point_id
 from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
-
-logger = logging.getLogger(__name__)
 
 
 def _vec_norm(vec: list[float]) -> float:
@@ -923,7 +922,7 @@ class _HnswHandle:
             self._index = idx
             return True
         except Exception as e:
-            logger.warning("Failed to load HNSW index: %s", e)
+            logger.warning("Failed to load HNSW index: {}", e)
             return False
 
     def build(self, keys: list[ChunkKey], vectors: list[list[float]]) -> None:

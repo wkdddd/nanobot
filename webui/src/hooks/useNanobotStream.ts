@@ -31,50 +31,40 @@ function findStreamingAssistantId(prev: UIMessage[]): string | null {
   return null;
 }
 
-/**
- * Append a reasoning chunk to the last open reasoning stream in ``prev``.
- *
- * Lookup rule: prefer the most recent assistant turn in the active UI tail.
- * Most providers emit reasoning before answer text, but some only expose
- * ``reasoning_content`` after the answer stream completes. In that post-hoc
- * case the reasoning still belongs to the same assistant turn and must render
- * above the answer, not as a new row below it.
- */
-function attachReasoningChunk(prev: UIMessage[], chunk: string): UIMessage[] {
+function findReasoningCarrier(prev: UIMessage[]): string | null {
   for (let i = prev.length - 1; i >= 0; i -= 1) {
     const candidate = prev[i];
-    // A user turn is a hard boundary: reasoning after it belongs to the new
-    // assistant turn, never to an earlier assistant reply.
     if (candidate.role === "user") break;
-    // A trace row (e.g. Used tools) is also a phase boundary. Reasoning after
-    // tools belongs to the next assistant iteration, not the assistant turn
-    // that produced those tool calls.
-    if (candidate.kind === "trace") break;
+    if (candidate.kind === "trace") continue;
     if (candidate.role !== "assistant") continue;
-    const hasAnswer = candidate.content.length > 0;
     if (
       candidate.reasoningStreaming
       || candidate.reasoning !== undefined
-      || hasAnswer
+      || candidate.content.length > 0
       || candidate.isStreaming
     ) {
-      const merged: UIMessage = {
-        ...candidate,
-        reasoning: (candidate.reasoning ?? "") + chunk,
-        reasoningStreaming: true,
-      };
-      return [...prev.slice(0, i), merged, ...prev.slice(i + 1)];
+      return candidate.id;
     }
-    if (!hasAnswer && candidate.isStreaming) {
-      const merged: UIMessage = {
-        ...candidate,
-        reasoning: chunk,
-        reasoningStreaming: true,
-      };
-      return [...prev.slice(0, i), merged, ...prev.slice(i + 1)];
-    }
-    break;
   }
+  return null;
+}
+
+/**
+ * Append a reasoning chunk to this turn's reasoning carrier.
+ *
+ * Tool traces are not turn boundaries: review turns often interleave reasoning,
+ * tools, then more reasoning. Keep that visible as one thinking panel.
+ */
+function attachReasoningChunk(prev: UIMessage[], chunk: string): UIMessage[] {
+  const carrierId = findReasoningCarrier(prev);
+  if (carrierId) {
+    return prev.map((m) =>
+      m.id === carrierId
+        ? { ...m, reasoning: (m.reasoning ?? "") + chunk, reasoningStreaming: true }
+        : m,
+    );
+  }
+
   return [
     ...prev,
     {
@@ -617,7 +607,13 @@ export function useNanobotStream(
       if (!chatId) return;
       const hasImages = !!images && images.length > 0;
       const reviewTarget = options?.review?.target?.trim() ?? "";
-      const review = reviewTarget ? options?.review : undefined;
+      const hasReviewDetails = Boolean(
+        reviewTarget
+          || options?.review?.action
+          || (options?.review?.focus && options.review.focus.length > 0)
+          || (options?.review?.target_paths && options.review.target_paths.length > 0),
+      );
+      const review = hasReviewDetails ? options?.review : undefined;
       const hasReview = !!review;
       // Text is optional when images are attached — the agent will still see
       // the image blocks via ``media`` paths.

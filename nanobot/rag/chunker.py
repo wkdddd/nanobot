@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import re
 from typing import Any
 
-from nanobot.rag.utils import IndexedChunk
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from nanobot.rag.utils import IndexedChunk
 
 _SYMBOL_RE = re.compile(r"\b[A-Z][A-Za-z0-9_]*|[a-z_][A-Za-z0-9_]*(?=\s*\()")
 
@@ -164,7 +163,7 @@ class TreeSitterChunker:
             self._parsers[lang] = parser
             return parser
         except (ImportError, Exception) as e:
-            logger.debug("Tree-sitter grammar unavailable for %s: %s", lang, e)
+            logger.debug("Tree-sitter grammar unavailable for {}: {}", lang, e)
             self._unavailable.add(lang)
             return None
 

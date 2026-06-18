@@ -849,12 +849,18 @@ class AgentRunner:
         except asyncio.CancelledError:
             raise
         except BaseException as exc:
+            logger.exception(
+                "Tool '{}' execution failed for call_id={}",
+                tool_call.name,
+                tool_call.id,
+            )
+            exc_text = f"{type(exc).__name__}: {exc}"
             event = {
                 "name": tool_call.name,
                 "status": "error",
-                "detail": str(exc),
+                "detail": exc_text.replace("\n", " ").strip()[:160],
             }
-            payload = f"Error: {type(exc).__name__}: {exc}"
+            payload = f"Error: {exc_text}"
             handled = self._classify_violation(
                 raw_text=str(exc),
                 # Preserve legacy exception payloads without the retry hint.

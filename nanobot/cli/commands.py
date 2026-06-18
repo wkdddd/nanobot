@@ -1064,17 +1064,19 @@ def review(
         help="Comma-separated review focus, e.g. security,tests,architecture,performance",
     ),
     mode: str = typer.Option("full", "--mode", help="Review mode: quick, deep, or full"),
+    target_type: str = typer.Option("auto", "--target-type", help="Review target type: auto, github, or local"),
+    action: str = typer.Option("full_repo", "--action", help="Review action: full_repo, pr_diff, or local_changed"),
+    paths: str | None = typer.Option(None, "--paths", help="Comma-separated files or paths that limit the review scope"),
     format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
     max_subagents: int | None = typer.Option(None, "--max-subagents", help="Maximum concurrent subagents"),
     fail_on: str | None = typer.Option(None, "--fail-on", help="Exit non-zero if findings at or above: critical|high|medium|low"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
     config: str | None = typer.Option(None, "--config", "-c", help="Config file path"),
     markdown: bool = typer.Option(True, "--markdown/--no-markdown", help="Render output as Markdown"),
-    logs: bool = typer.Option(False, "--logs/--no-logs", help="Show runtime logs"),
     output: str | None = typer.Option(None, "--output", "-o", help="Save report to file"),
 ):
     """Review a local or GitHub repository with CodeReviewAgent."""
-    from nanobot.agent.codereview import infer_review_target_type, normalize_focus
+    from nanobot.agent.review import infer_review_target_type, normalize_focus, normalize_review_action, normalize_review_target_type
     from nanobot.cli.stream import StreamRenderer
 
     if mode not in ("quick", "deep", "full"):
@@ -1082,6 +1084,14 @@ def review(
         raise typer.Exit(1)
     if format not in ("markdown", "json"):
         console.print(f"[red]Invalid format '{format}'. Must be: markdown or json[/red]")
+        raise typer.Exit(1)
+    if target_type not in ("auto", "github", "local"):
+        console.print(f"[red]Invalid --target-type '{target_type}'. Must be: auto, github, or local[/red]")
+        raise typer.Exit(1)
+    try:
+        normalized_action = normalize_review_action(action).value
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1)
     if fail_on and fail_on not in ("critical", "high", "medium", "low"):
         console.print(f"[red]Invalid --fail-on '{fail_on}'. Must be: critical, high, medium, or low[/red]")
@@ -1094,11 +1104,8 @@ def review(
 
     loaded = _load_runtime_config(config, workspace)
     sync_workspace_templates(loaded.workspace_path)
+    logger.enable("nanobot")
 
-    if logs:
-        logger.enable("nanobot")
-    else:
-        logger.disable("nanobot")
 
     bus = MessageBus()
     agent_loop = AgentLoop.from_config(loaded, bus)
@@ -1117,9 +1124,17 @@ def review(
             session = agent_loop.sessions.get_or_create(session_key)
             session.metadata["review_mode"] = True
             session.metadata["review_target"] = target
-            session.metadata["review_target_type"] = infer_review_target_type(target)
+            resolved_target_type = normalize_review_target_type(target_type, target)
+            session.metadata["review_target_type"] = (
+                resolved_target_type if resolved_target_type != "auto" else infer_review_target_type(target)
+            )
             session.metadata["review_focus"] = focus
             session.metadata["review_mode_variant"] = mode
+            session.metadata["review_action"] = normalized_action
+            if paths:
+                session.metadata["review_target_paths"] = [
+                    item.strip() for item in paths.split(",") if item.strip()
+                ]
             session.metadata["review_output_format"] = format
             session.metadata["review_max_subagents"] = effective_max_subagents
             agent_loop.sessions.save(session)
@@ -1426,7 +1441,7 @@ def _check_fail_on(report_content: str, threshold: str, format: str) -> int:
     import json
     import re
 
-    from nanobot.agent.codereview import SEVERITY_ORDER
+    from nanobot.agent.review import SEVERITY_ORDER
 
     threshold_idx = SEVERITY_ORDER.index(threshold)
     target_severities = set(SEVERITY_ORDER[: threshold_idx + 1])

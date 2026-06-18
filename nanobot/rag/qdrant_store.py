@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from nanobot.rag.utils import ChunkKey, IndexedChunk
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from nanobot.rag.utils import ChunkKey, IndexedChunk
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,7 +117,7 @@ class QdrantVectorStore:
                 continue
             if len(vector) != self.dimensions:
                 logger.warning(
-                    "⚠ Qdrant vector skipped: dim mismatch path=%s dim=%s expected=%s",
+                    "⚠ Qdrant vector skipped: dim mismatch path={} dim={} expected={}",
                     chunk.path,
                     len(vector),
                     self.dimensions,

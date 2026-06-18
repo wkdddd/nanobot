@@ -30,7 +30,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
-from nanobot.agent.codereview import normalize_review_target_type
+from nanobot.agent.review import normalize_review_action, normalize_review_target_type
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
@@ -73,6 +73,17 @@ def _review_mode_payload(meta: dict[str, Any]) -> dict[str, Any]:
         payload["target"] = target
     if target_type:
         payload["target_type"] = target_type
+    action = str(meta.get("review_action") or "").strip()
+    if action:
+        payload["action"] = action
+    focus = meta.get("review_focus")
+    if isinstance(focus, list):
+        payload["focus"] = focus
+    elif isinstance(focus, str) and focus.strip():
+        payload["focus"] = [item.strip() for item in focus.split(",") if item.strip()]
+    paths = meta.get("review_target_paths")
+    if isinstance(paths, list):
+        payload["target_paths"] = [str(item) for item in paths if str(item).strip()]
     return payload
 
 
@@ -81,6 +92,8 @@ def _clear_review_metadata(meta: dict[str, Any]) -> None:
         "review_target",
         "review_target_type",
         "review_focus",
+        "review_action",
+        "review_target_paths",
         "review_mode_variant",
         "review_mode_name",
         "review_output_format",
@@ -938,7 +951,12 @@ class WebSocketChannel(BaseChannel):
                 continue
         normalized["prompt_tokens"] = normalized.get("prompt_tokens", 0)
         normalized["completion_tokens"] = normalized.get("completion_tokens", 0)
-        normalized["total_tokens"] = normalized["prompt_tokens"] + normalized["completion_tokens"]
+        if "total_tokens" not in normalized:
+            normalized["total_tokens"] = sum(
+                value
+                for key, value in normalized.items()
+                if key.endswith("_tokens") and key != "total_tokens"
+            )
         return normalized
 
     def _usage_payload(self) -> dict[str, Any]:
@@ -1158,7 +1176,10 @@ class WebSocketChannel(BaseChannel):
                 review_target = str(dup.get("review_target") or "").strip()
                 review_target_type = str(dup.get("review_target_type") or "").strip()
                 review_mode_variant = str(dup.get("review_mode_variant") or "").strip()
-                if review_target or review_target_type or review_mode_variant:
+                review_action = str(dup.get("review_action") or "").strip()
+                review_focus = dup.get("review_focus")
+                review_target_paths = dup.get("review_target_paths")
+                if review_target or review_target_type or review_mode_variant or review_action or review_focus or review_target_paths:
                     review: dict[str, Any] = {}
                     if review_target:
                         review["target"] = review_target
@@ -1166,6 +1187,12 @@ class WebSocketChannel(BaseChannel):
                         review["target_type"] = review_target_type
                     if review_mode_variant:
                         review["mode"] = review_mode_variant
+                    if review_action:
+                        review["action"] = review_action
+                    if isinstance(review_focus, list):
+                        review["focus"] = review_focus
+                    if isinstance(review_target_paths, list):
+                        review["target_paths"] = review_target_paths
                     dup["review"] = review
             append_transcript_object(sk, dup)
         except (ValueError, TypeError) as e:
@@ -1207,12 +1234,19 @@ class WebSocketChannel(BaseChannel):
             review_target = str(meta.get("review_target") or "").strip()
             review_target_type = str(meta.get("review_target_type") or "").strip()
             review_mode_variant = str(meta.get("review_mode_variant") or "").strip()
+            review_action = str(meta.get("review_action") or "").strip()
             if review_target:
                 user_obj["review_target"] = review_target
             if review_target_type:
                 user_obj["review_target_type"] = review_target_type
             if review_mode_variant:
                 user_obj["review_mode_variant"] = review_mode_variant
+            if review_action:
+                user_obj["review_action"] = review_action
+            if isinstance(meta.get("review_focus"), list):
+                user_obj["review_focus"] = meta["review_focus"]
+            if isinstance(meta.get("review_target_paths"), list):
+                user_obj["review_target_paths"] = meta["review_target_paths"]
             self._try_append_webui_transcript(chat_id, user_obj)
         await super()._handle_message(
             sender_id,
@@ -1665,10 +1699,16 @@ class WebSocketChannel(BaseChannel):
             raw_review_target = envelope.get("review_target")
             raw_review_target_type = envelope.get("review_target_type")
             raw_review_mode_variant = envelope.get("review_mode_variant")
+            raw_review_action = envelope.get("review_action")
+            raw_review_focus = envelope.get("review_focus")
+            raw_review_target_paths = envelope.get("review_target_paths")
             has_review_payload = (
                 isinstance(raw_review_target, str)
                 or isinstance(raw_review_target_type, str)
                 or isinstance(raw_review_mode_variant, str)
+                or isinstance(raw_review_action, str)
+                or isinstance(raw_review_focus, list)
+                or isinstance(raw_review_target_paths, list)
             )
 
             # Allow image-only and review-only turns.
@@ -1698,6 +1738,23 @@ class WebSocketChannel(BaseChannel):
                         session.metadata["review_target"] = target
                     else:
                         session.metadata.pop("review_target", None)
+                if isinstance(raw_review_action, str):
+                    try:
+                        session.metadata["review_action"] = normalize_review_action(raw_review_action).value
+                    except ValueError:
+                        session.metadata.pop("review_action", None)
+                if isinstance(raw_review_focus, list):
+                    focus = [str(item).strip() for item in raw_review_focus if str(item).strip()]
+                    if focus:
+                        session.metadata["review_focus"] = focus
+                    else:
+                        session.metadata.pop("review_focus", None)
+                if isinstance(raw_review_target_paths, list):
+                    paths = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
+                    if paths:
+                        session.metadata["review_target_paths"] = paths
+                    else:
+                        session.metadata.pop("review_target_paths", None)
                 target_type = normalize_review_target_type(
                     raw_review_target_type if isinstance(raw_review_target_type, str) else None,
                     session.metadata.get("review_target"),
@@ -1716,6 +1773,15 @@ class WebSocketChannel(BaseChannel):
                 metadata["review_target_type"] = raw_review_target_type
             if isinstance(raw_review_mode_variant, str):
                 metadata["review_mode_variant"] = raw_review_mode_variant
+            if isinstance(raw_review_action, str):
+                try:
+                    metadata["review_action"] = normalize_review_action(raw_review_action).value
+                except ValueError:
+                    pass
+            if isinstance(raw_review_focus, list):
+                metadata["review_focus"] = [str(item).strip() for item in raw_review_focus if str(item).strip()]
+            if isinstance(raw_review_target_paths, list):
+                metadata["review_target_paths"] = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
             await self._handle_message(
                 sender_id=client_id,
                 chat_id=cid,

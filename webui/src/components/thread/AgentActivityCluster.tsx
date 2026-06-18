@@ -29,6 +29,14 @@ function countToolCalls(messages: UIMessage[]): number {
   return n;
 }
 
+function mergedReasoningText(messages: UIMessage[]): string {
+  return messages
+    .filter(isReasoningOnlyAssistant)
+    .map((m) => m.reasoning ?? "")
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
 interface AgentActivityClusterProps {
   messages: UIMessage[];
   /** True while the session turn is still running (drives “Working…” copy + header sheen). */
@@ -46,12 +54,14 @@ export function AgentActivityCluster({
   hasBodyBelow,
 }: AgentActivityClusterProps) {
   const { t } = useTranslation();
-  const reasoningSteps = messages.filter(isReasoningOnlyAssistant).length;
+  const reasoningMessages = messages.filter(isReasoningOnlyAssistant);
+  const reasoningSteps = reasoningMessages.length > 0 ? 1 : 0;
   const toolCalls = countToolCalls(messages);
   const hasStreamingReasoning = messages.some(
     (m) => isReasoningOnlyAssistant(m) && !!m.reasoningStreaming,
   );
   const hasToolTrace = messages.some((m) => m.kind === "trace");
+  const reasoningText = mergedReasoningText(messages);
 
   const [userToggledOuter, setUserToggledOuter] = useState(false);
   const [outerOpenLocal, setOuterOpenLocal] = useState(false);
@@ -88,12 +98,11 @@ export function AgentActivityCluster({
     setOuterOpenLocal((v) => (userToggledOuter ? !v : !outerExpanded));
   };
 
-  if (!hasToolTrace && messages.length === 1 && isReasoningOnlyAssistant(messages[0])) {
-    const m = messages[0];
+  if (!hasToolTrace && reasoningMessages.length > 0) {
     return (
       <ReasoningBubble
-        text={m.reasoning ?? ""}
-        streaming={!!m.reasoningStreaming}
+        text={reasoningText}
+        streaming={hasStreamingReasoning}
         hasBodyBelow={hasBodyBelow}
       />
     );
@@ -139,18 +148,17 @@ export function AgentActivityCluster({
             )}
           >
             <div className="flex flex-col gap-2">
+              {reasoningMessages.length > 0 ? (
+                <ReasoningBubble
+                  key="merged-reasoning"
+                  text={reasoningText}
+                  streaming={hasStreamingReasoning}
+                  hasBodyBelow={false}
+                  embeddedInCluster
+                />
+              ) : null}
               {messages.map((m) => {
-                if (isReasoningOnlyAssistant(m)) {
-                  return (
-                    <ReasoningBubble
-                      key={m.id}
-                      text={m.reasoning ?? ""}
-                      streaming={!!m.reasoningStreaming}
-                      hasBodyBelow={false}
-                      embeddedInCluster
-                    />
-                  );
-                }
+                if (isReasoningOnlyAssistant(m)) return null;
                 if (m.kind === "trace") {
                   return <TraceGroup key={m.id} message={m} animClass="" />;
                 }

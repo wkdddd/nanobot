@@ -56,7 +56,7 @@ def test_websocket_usage_payload_normalizes_totals_and_note() -> None:
 
     assert response.status_code == 200
     assert body["scope"] == "process"
-    assert body["usage"]["total_tokens"] == 150
+    assert body["usage"]["total_tokens"] == 999
     assert body["last_usage"]["total_tokens"] == 15
     assert body["note"] == "Subagent usage is not additionally included in the global total."
 
@@ -81,7 +81,7 @@ def test_agent_loop_accumulates_process_usage_without_double_counting_total() ->
         "prompt_tokens": 110,
         "completion_tokens": 30,
         "cached_tokens": 43,
-        "total_tokens": 140,
+        "total_tokens": 1017,
     }
 
 

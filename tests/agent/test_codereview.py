@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from nanobot.agent.codereview import (
+from nanobot.agent.review import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
     OPTIONAL_REVIEW_ROLES,
@@ -13,6 +13,7 @@ from nanobot.agent.codereview import (
     ReviewReport,
     build_code_review_context,
     build_review_prompt,
+    build_review_plan,
     normalize_focus,
 )
 from nanobot.agent.loop import AgentLoop
@@ -84,6 +85,21 @@ def test_build_review_prompt_deep_mode_mentions_thorough() -> None:
     assert "thorough" in prompt.lower()
 
 
+def test_build_review_prompt_full_mode_mentions_full() -> None:
+    roles, _ = normalize_focus(None)
+    prompt = build_review_prompt(
+        target_url="https://github.com/test/repo",
+        target_name="test/repo",
+        roles=roles,
+        max_subagents=4,
+        forced=False,
+        mode="full",
+    )
+
+    assert "FULL review" in prompt
+    assert "- Action: full_repo" in prompt
+
+
 def test_build_review_prompt_json_and_markdown_formats() -> None:
     roles, _ = normalize_focus(None)
     json_prompt = build_review_prompt(
@@ -114,7 +130,7 @@ def test_build_code_review_context_extracts_github_target() -> None:
     )
 
     assert "- Name: test/repo" in prompt
-    assert "- URL: https://github.com/test/repo" in prompt
+    assert "- URL/Path: https://github.com/test/repo" in prompt
     assert "- Type: github" in prompt
 
 
@@ -125,8 +141,8 @@ def test_build_code_review_context_uses_local_target_type() -> None:
     )
 
     assert "- Type: local" in prompt
-    assert "Access `C:\\work\\repo\\src\\app.py` directly" in prompt
-    assert "do not clone" in prompt
+    assert "- URL/Path: C:\\work\\repo\\src\\app.py" in prompt
+    assert "Action full_repo" in prompt
 
 
 def test_build_code_review_context_extracts_local_path_inside_prompt() -> None:
@@ -134,7 +150,7 @@ def test_build_code_review_context_extracts_local_path_inside_prompt() -> None:
         user_content=r"请审查 C:\work\repo\src\app.py 的登录逻辑",
     )
 
-    assert "- URL: C:\\work\\repo\\src\\app.py" in prompt
+    assert "- URL/Path: C:\\work\\repo\\src\\app.py" in prompt
     assert "- Type: local" in prompt
 
 
@@ -145,8 +161,35 @@ def test_build_code_review_context_uses_github_target_type() -> None:
     )
 
     assert "- Type: github" in prompt
-    assert "repo_review(target_type='github'" in prompt
+    assert "repo_review(action='full_repo'" in prompt
     assert "github_repo_read" not in prompt
+
+
+def test_build_code_review_context_uses_user_requirements() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
+        target_type="github",
+        user_content="重点检查鉴权和回归风险",
+    )
+
+    assert "User requirements: 重点检查鉴权和回归风险" in prompt
+
+
+def test_review_plan_resolves_pr_url_to_pr_diff() -> None:
+    plan = build_review_plan(target="https://github.com/test/repo/pull/42", target_type="github")
+
+    assert plan is not None
+    assert plan.action == "pr_diff"
+    assert plan.target_repo == "test/repo"
+    assert plan.pr_number == 42
+
+
+def test_review_plan_target_paths_keep_full_repo_scope() -> None:
+    plan = build_review_plan(target="./repo", target_paths=["src/auth.py"], action="full_repo")
+
+    assert plan is not None
+    assert plan.action == "full_repo"
+    assert plan.target_paths == ["src/auth.py"]
 
 
 def test_build_code_review_context_returns_fallback_without_target() -> None:

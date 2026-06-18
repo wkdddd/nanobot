@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 _DASHSCOPE_MAX_INPUT_CHARS = 2048
 
@@ -95,7 +94,7 @@ class EmbeddingClient:
                 for original_index, item in zip(batch_indexes, response.data):
                     all_embeddings[original_index] = item.embedding
             except Exception as e:
-                logger.warning("Embedding API call failed: %s", e)
+                logger.warning("Embedding API call failed: {}", e)
         return all_embeddings
 
     async def embed_query(self, query: str) -> list[float] | None:

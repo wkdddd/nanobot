@@ -26,6 +26,7 @@ export default function MarkdownTextRenderer({
     <div
       className={cn(
         "markdown-content prose max-w-none dark:prose-invert",
+        "min-w-0 break-words [overflow-wrap:anywhere]",
         "prose-headings:mt-4 prose-headings:mb-2 prose-headings:font-semibold prose-headings:tracking-tight",
         "prose-h1:text-lg prose-h2:text-base prose-h3:text-sm prose-h4:text-[13px]",
         "prose-p:my-2",
@@ -36,7 +37,7 @@ export default function MarkdownTextRenderer({
         "prose-hr:my-6",
         "prose-pre:my-0 prose-pre:bg-transparent prose-pre:p-0",
         "prose-code:before:content-none prose-code:after:content-none prose-code:font-normal",
-        "prose-table:my-3 prose-th:text-left prose-th:font-medium",
+        "prose-table:my-0 prose-th:text-left prose-th:font-medium",
         className,
       )}
       style={{ lineHeight: "var(--cjk-line-height)" }}
@@ -53,12 +54,13 @@ export default function MarkdownTextRenderer({
             }
             const raw = String(kids).replace(/\n$/, "");
             /** Plain fenced ``` blocks (no language) & wide one-liners: block monospace, not inline pill. */
-            const widePlainBlock = raw.includes("\n") || raw.length > 120;
+            const widePlainBlock = raw.includes("\n") || raw.length > 100;
             if (widePlainBlock) {
               return (
                 <code
                   className={cn(
-                    "block min-w-0 whitespace-pre bg-transparent p-0 font-mono text-[0.8125rem]",
+                    "block min-w-0 whitespace-pre-wrap break-words bg-transparent p-0 font-mono text-[0.8125rem]",
+                    "[overflow-wrap:anywhere]",
                     "leading-snug text-inherit",
                     cls,
                   )}
@@ -69,11 +71,12 @@ export default function MarkdownTextRenderer({
               );
             }
             return (
-              <code
-                className={cn(
-                  "rounded bg-muted px-1 py-0.5 font-mono text-[0.85em]",
-                  cls,
-                )}
+                <code
+                  className={cn(
+                    "whitespace-pre-wrap break-words rounded bg-muted px-1 py-0.5 font-mono text-[0.85em]",
+                    "[overflow-wrap:anywhere]",
+                    cls,
+                  )}
                 {...props}
               >
                 {kids}
@@ -97,6 +100,35 @@ export default function MarkdownTextRenderer({
               >
                 {markdownChildren}
               </pre>
+            );
+          },
+          table({ children: markdownChildren, ...props }) {
+            return (
+              <div className="my-3 min-w-0 overflow-x-auto">
+                <table className="min-w-full table-auto" {...props}>
+                  {markdownChildren}
+                </table>
+              </div>
+            );
+          },
+          th({ children: markdownChildren, ...props }) {
+            return (
+              <th
+                className="max-w-[18rem] whitespace-normal break-words align-top [overflow-wrap:anywhere]"
+                {...props}
+              >
+                {markdownChildren}
+              </th>
+            );
+          },
+          td({ children: markdownChildren, ...props }) {
+            return (
+              <td
+                className="max-w-[24rem] whitespace-normal break-words align-top [overflow-wrap:anywhere]"
+                {...props}
+              >
+                {markdownChildren}
+              </td>
             );
           },
           a({ href, children: markdownChildren, ...props }) {

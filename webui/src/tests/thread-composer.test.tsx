@@ -270,6 +270,47 @@ describe("ThreadComposer", () => {
     expect(onLongTaskModeChange).toHaveBeenCalledWith(true);
   });
 
+  it("uses the additional requirements placeholder while review mode is enabled", () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        reviewModeEnabled
+        onReviewModeChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByPlaceholderText("Additional requirements…")).toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Type your message...")).not.toBeInTheDocument();
+  });
+
+  it("limits review actions by target type", async () => {
+    render(
+      <ThreadComposer
+        onSend={vi.fn()}
+        placeholder="Type your message..."
+        reviewModeEnabled
+        onReviewModeChange={vi.fn()}
+      />,
+    );
+
+    const actionSelect = screen.getByRole("combobox", { name: "Action" }) as HTMLSelectElement;
+    const optionValues = () =>
+      Array.from(actionSelect.querySelectorAll("option")).map((option) => option.value);
+
+    expect(optionValues()).toEqual(["full_repo", "pr_diff", "local_changed"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "github" }));
+    expect(optionValues()).toEqual(["full_repo", "pr_diff"]);
+
+    fireEvent.change(actionSelect, { target: { value: "pr_diff" } });
+    expect(actionSelect.value).toBe("pr_diff");
+
+    fireEvent.click(screen.getByRole("button", { name: "local" }));
+    expect(optionValues()).toEqual(["full_repo", "local_changed"]);
+    await waitFor(() => expect(actionSelect.value).toBe("full_repo"));
+  });
+
   it("shows a review reference card and sends structured review metadata", () => {
     const onSend = vi.fn();
     render(
@@ -297,6 +338,17 @@ describe("ThreadComposer", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Deep" }));
     fireEvent.click(screen.getByRole("button", { name: "local" }));
+    fireEvent.click(screen.getByRole("button", { name: /Advanced/i }));
+    expect(screen.getByRole("textbox", { name: "Limited scope" })).toBeInTheDocument();
+    expect(screen.getByText("Necessary")).toBeInTheDocument();
+    expect(screen.getAllByText("Advanced").length).toBeGreaterThanOrEqual(2);
+    fireEvent.change(screen.getByRole("combobox", { name: "Action" }), {
+      target: { value: "full_repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "security" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Limited scope" }), {
+      target: { value: "src/auth.ts\ntests/auth.test.ts" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     expect(onSend).toHaveBeenCalledWith(
@@ -306,7 +358,10 @@ describe("ThreadComposer", () => {
         review: {
           mode: "deep",
           target_type: "local",
+          action: "full_repo",
           target: "https://github.com/test/repo",
+          focus: ["security"],
+          target_paths: ["src/auth.ts", "tests/auth.test.ts"],
         },
       },
     );

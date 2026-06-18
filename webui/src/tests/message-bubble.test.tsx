@@ -36,6 +36,7 @@ describe("MessageBubble", () => {
       review: {
         mode: "deep",
         target_type: "github",
+        action: "pr_diff",
         target: "https://github.com/test/repo",
       },
     };
@@ -44,6 +45,7 @@ describe("MessageBubble", () => {
 
     expect(screen.getByText("https://github.com/test/repo")).toBeInTheDocument();
     expect(screen.getByText("GITHUB")).toBeInTheDocument();
+    expect(screen.getByText("PR_DIFF")).toBeInTheDocument();
     expect(screen.getByText("DEEP")).toBeInTheDocument();
     expect(screen.getByText("please review")).toBeInTheDocument();
   });
@@ -201,7 +203,7 @@ describe("MessageBubble", () => {
       );
 
       // ##AI修改前
-      // expect(screen.getByText("Thinking鈥?)).toBeInTheDocument();
+      // expect(screen.getByText("Thinking…")).toBeInTheDocument();
       // ######
       // ##AI修改后
       expect(screen.getByRole("button", { name: /thinking/i })).toBeInTheDocument();
@@ -300,6 +302,63 @@ describe("MessageBubble", () => {
     });
     expect(container.textContent).not.toContain("###");
     expect(screen.getByText("Body line.")).toBeInTheDocument();
+  });
+
+  it("adds wrapping affordances for long review prose, inline code, and tables", async () => {
+    await import("@/components/MarkdownTextRenderer");
+    const longLambda = "lambda t, k=k: self._active_tasks.get(k, []) and (t in self._active_tasks.get(k, []) and self._active_tasks.get(k, []).remove(t) or None) or None";
+    const message: UIMessage = {
+      id: "a-long-review",
+      role: "assistant",
+      content: [
+        `Impact: \`${longLambda}\``,
+        "",
+        "| File | Impact |",
+        "|---|---|",
+        `| loop.py | ${"A".repeat(160)} |`,
+      ].join("\n"),
+      createdAt: Date.now(),
+    };
+
+    const { container } = render(<MessageBubble message={message} />);
+
+    await waitFor(() => {
+      expect(container.querySelector(".markdown-content")).toBeInTheDocument();
+    });
+    expect(container.querySelector(".markdown-content")).toHaveClass(
+      "break-words",
+      "[overflow-wrap:anywhere]",
+    );
+    expect(container.querySelector("code")).toHaveClass(
+      "break-words",
+      "[overflow-wrap:anywhere]",
+    );
+    expect(container.querySelector("table")?.parentElement).toHaveClass("overflow-x-auto");
+    expect(container.querySelector("td")).toHaveClass(
+      "break-words",
+      "[overflow-wrap:anywhere]",
+    );
+  });
+
+  it("wraps long trace lines inside the tool group", () => {
+    const longLine = `Impact: ${"x".repeat(180)}`;
+    const message: UIMessage = {
+      id: "t-long",
+      role: "tool",
+      kind: "trace",
+      content: longLine,
+      traces: [longLine],
+      createdAt: Date.now(),
+    };
+
+    render(<MessageBubble message={message} />);
+    fireEvent.click(screen.getByRole("button", { name: /used 1 tool/i }));
+
+    expect(screen.getByText(longLine)).toHaveClass(
+      "whitespace-pre-wrap",
+      "break-words",
+      "[overflow-wrap:anywhere]",
+    );
   });
 
   it("renders assistant image media as a larger generated result", () => {

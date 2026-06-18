@@ -95,6 +95,9 @@ describe("ThreadMessages", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]).not.toHaveClass("mt-2", "mt-4", "mt-5");
     expect(rows[1]).toHaveClass("mt-4");
+    expect(screen.getAllByRole("button", { name: /thinking/i })).toHaveLength(1);
+    expect(screen.getByText("thinking")).toBeInTheDocument();
+    expect(screen.getByText("more thinking")).toBeInTheDocument();
   });
 
   it("shows copy only on the last assistant slice before the next user turn", () => {

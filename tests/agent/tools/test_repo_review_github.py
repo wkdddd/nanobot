@@ -53,7 +53,7 @@ def test_parse_github_repo_from_url_and_owner_repo() -> None:
 async def test_repo_review_github_requires_target_repo(tmp_path: Path) -> None:
     tool = RepoReviewTool(workspace=tmp_path)
 
-    result = await tool.execute(target_type="github", action="meta")
+    result = await tool.execute(target_type="github", action="full_repo")
 
     assert result == "Error: target_repo is required when target_type='github'."
 
@@ -65,39 +65,18 @@ async def test_repo_review_github_respects_disabled_config(tmp_path: Path) -> No
         github_config=GitHubRepoConfig(enable=False),
     )
 
-    result = await tool.execute(target_type="github", action="meta", target_repo="test/repo")
+    result = await tool.execute(target_type="github", action="full_repo", target_repo="test/repo")
 
     assert result == "Error: GitHub repository access is disabled by tools.githubRepo.enable."
 
 
 @pytest.mark.asyncio
-async def test_repo_review_github_delegates_to_reader(tmp_path: Path) -> None:
+async def test_repo_review_rejects_old_actions(tmp_path: Path) -> None:
     tool = RepoReviewTool(workspace=tmp_path)
-    seen = {}
 
-    async def fake_execute(**kwargs):
-        seen.update(kwargs)
-        return "github result"
+    result = await tool.execute(action="targeted_files", review_query="auth")
 
-    tool.github.execute = fake_execute  # type: ignore[method-assign]
-
-    result = await tool.execute(
-        target_type="github",
-        action="tree",
-        target_repo="test/repo",
-        tree_pattern="*.py",
-        tree_limit=12,
-    )
-
-    assert result == "github result"
-    assert seen == {
-        "action": "tree",
-        "repo": "test/repo",
-        "path": None,
-        "ref": None,
-        "pattern": "*.py",
-        "max_entries": 12,
-    }
+    assert "unknown repo_review action 'targeted_files'" in result
 
 
 def test_repo_review_github_token_prefers_workspace_config_json(tmp_path: Path) -> None:
@@ -141,18 +120,16 @@ def test_rrf_merge_combines_ranked_lists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repo_review_evaluate_writes_markdown_report(tmp_path: Path) -> None:
+async def test_repo_review_full_repo_limited_scope_requires_paths_for_targeted_helper(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "auth.py").write_text("def login(token):\n    return token\n", encoding="utf-8")
-    dataset = tmp_path / "eval.jsonl"
-    dataset.write_text(
-        '{"id":"auth","question":"login token","expected_files":["src/auth.py"],"expected_symbols":["login"]}\n',
-        encoding="utf-8",
-    )
     tool = RepoReviewTool(workspace=tmp_path)
 
-    result = await tool.execute(action="evaluate", dataset_path=str(dataset), max_results=3)
+    result = await tool._local_targeted_context(
+        review_query="login token",
+        target_paths=[],
+        max_results=5,
+        include_tests=True,
+    )
 
-    assert "Evaluation report written:" in result
-    assert "Average evidence coverage" in result
-    assert (tmp_path / ".nanobot" / "review_reports" / "code-review-rag-eval.md").is_file()
+    assert result == "Error: target_paths is required for limited full_repo review."

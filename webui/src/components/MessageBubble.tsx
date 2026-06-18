@@ -81,8 +81,16 @@ export function MessageBubble({
     const images = message.images ?? [];
     const media = message.media ?? [];
     const review = message.review;
-    const reviewTarget = review?.target?.trim() ?? "";
-    const hasReview = reviewTarget.length > 0;
+    const hasReview = Boolean(
+      review
+        && (
+          review.target?.trim()
+          || review.action
+          || review.target_type
+          || review.mode
+          || (review.target_paths?.length ?? 0) > 0
+        ),
+    );
     const hasImages = images.length > 0;
     const hasMedia = media.length > 0;
     const hasText = message.content.trim().length > 0;
@@ -93,7 +101,7 @@ export function MessageBubble({
           baseAnim,
         )}
       >
-        {hasReview ? <UserReviewReference review={review} /> : null}
+        {hasReview && review ? <UserReviewReference review={review} /> : null}
         {hasImages ? <UserImages images={images} align="right" /> : null}
         {!hasImages && hasMedia ? (
           <MessageMedia media={media} align="right" />
@@ -199,9 +207,12 @@ function UserReviewReference({
   review: NonNullable<UIMessage["review"]>;
 }) {
   const target = review.target?.trim() ?? "";
-  if (!target) return null;
+  const hasReview = target || review.action || review.target_type || review.mode || (review.target_paths?.length ?? 0) > 0;
+  if (!hasReview) return null;
   const mode = review.mode ? review.mode.toUpperCase() : "";
   const targetType = review.target_type ? review.target_type.toUpperCase() : "";
+  const action = review.action ? review.action.toUpperCase() : "";
+  const pathCount = review.target_paths?.length ?? 0;
   return (
     <div className="ml-auto flex max-w-[min(85%,36rem)] justify-end">
       <div
@@ -210,9 +221,14 @@ function UserReviewReference({
           "border-blue-500/15 bg-blue-500/[0.06] text-[11.5px] text-blue-800",
           "dark:text-blue-200",
         )}
-      >
+        >
         <FileSearch className="h-3.5 w-3.5 flex-none text-blue-600/80 dark:text-blue-300/85" aria-hidden />
-        <span className="truncate font-medium">{target}</span>
+        <span className="truncate font-medium">{target || (pathCount ? `${pathCount} path${pathCount === 1 ? "" : "s"}` : "Code review")}</span>
+        {action ? (
+          <span className="shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700 dark:text-blue-200">
+            {action}
+          </span>
+        ) : null}
         {targetType ? (
           <span className="shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700 dark:text-blue-200">
             {targetType}
@@ -553,22 +569,14 @@ export function ReasoningBubble({
   const markdownSource = streaming ? deferredText : text;
   const [userToggled, setUserToggled] = useState(false);
   const [openLocal, setOpenLocal] = useState(true);
-  // ##AI修改后
   const [autoOpen, setAutoOpen] = useState(streaming);
   const autoCollapseTimerRef = useRef<number | null>(null);
   const AUTO_COLLAPSE_DELAY_MS = 700;
-  // ######
-  // ##AI修改前
-  // const open = userToggled ? openLocal : streaming;
-  // ######
-  // ##AI修改后
   const open = userToggled ? openLocal : autoOpen;
-  // ######
   const onToggle = () => {
     setUserToggled(true);
     setOpenLocal((v) => (userToggled ? !v : !open));
   };
-  // ##AI修改后
   useEffect(() => {
     if (autoCollapseTimerRef.current !== null) {
       window.clearTimeout(autoCollapseTimerRef.current);
@@ -589,7 +597,6 @@ export function ReasoningBubble({
       }
     };
   }, [streaming]);
-  // ######
   useEffect(() => {
     if (open && text.length > 0) {
       preloadMarkdownText();
@@ -632,14 +639,15 @@ export function ReasoningBubble({
       </button>
       {open && text.length > 0 && (
         <div
-          className={cn(
-            "mt-1 min-w-0 border-l border-muted-foreground/20 pl-3",
-            !embeddedInCluster && "animate-in fade-in-0 slide-in-from-top-1 duration-200",
-          )}
+            className={cn(
+              "mt-1 min-w-0 break-words border-l border-muted-foreground/20 pl-3",
+              "[overflow-wrap:anywhere]",
+              !embeddedInCluster && "animate-in fade-in-0 slide-in-from-top-1 duration-200",
+            )}
         >
           <MarkdownText
             className={cn(
-              "text-[12.5px] italic text-muted-foreground/88",
+              "break-words text-[12.5px] italic text-muted-foreground/88 [overflow-wrap:anywhere]",
               "prose-p:my-1.5 prose-li:my-0.5",
               "prose-headings:mt-2 prose-headings:mb-1 prose-headings:font-medium",
               "prose-headings:text-muted-foreground/92 prose-strong:text-muted-foreground",
@@ -706,7 +714,7 @@ export function TraceGroup({ message, animClass }: TraceGroupProps) {
           {lines.map((line, i) => (
             <li
               key={i}
-              className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground/90"
+              className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-muted-foreground/90 [overflow-wrap:anywhere]"
             >
               {line}
             </li>

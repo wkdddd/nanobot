@@ -17,7 +17,7 @@ from loguru import logger
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.codereview import (
+from nanobot.agent.review import (
     apply_review_metadata_from_message,
     resolve_code_review_context,
 )
@@ -189,15 +189,17 @@ class AgentLoop:
         model_preset: str | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
-        unsplash_provider_config:ProviderConfig | None = None,
-        unsplash_provider_configs:dict[str, ProviderConfig] | None = None,
+        unsplash_provider_config: ProviderConfig | None = None,
+        unsplash_provider_configs: dict[str, ProviderConfig] | None = None,
     ):
         from nanobot.config.schema import (
             EmbeddingConfig,
             RerankConfig,
             ToolsConfig,
+            _resolve_tool_config_refs,
         )
 
+        _resolve_tool_config_refs()
         _tc = tools_config or ToolsConfig()
         _embedding_config = (
             embedding_config if embedding_config is not None else EmbeddingConfig()
@@ -236,6 +238,7 @@ class AgentLoop:
             else defaults.tool_hint_max_length
         )
         self.tools_config = _tc
+        # Permission approval policy currently lives on ToolsConfig.
         self.permissions_config = _tc
         self.embedding_config = _embedding_config
         self.rerank_config = _rerank_config
@@ -293,7 +296,7 @@ class AgentLoop:
         self._pending_queues: dict[str, asyncio.Queue] = {}
         self._permission_futures: dict[str, asyncio.Future[bool]] = {}
         # NANOBOT_MAX_CONCURRENT_REQUESTS: <=0 means unlimited; default 3.
-        _max = int(os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3"))
+        _max = self._parse_max_concurrent_requests()
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
@@ -745,11 +748,10 @@ class AgentLoop:
         async def _drain_pending(*, limit: int = _MAX_INJECTIONS_PER_TURN) -> list[dict[str, Any]]:
             """Drain follow-up messages from the pending queue.
 
-            When no messages are immediately available but sub-agents
-            spawned in this dispatch are still running, blocks until at
-            least one result arrives (or timeout).  This keeps the runner
-            loop alive so subsequent sub-agent completions are consumed
-            in-order rather than dispatched separately.
+            Only messages that have already reached the pending queue are
+            injected into the current runner iteration. Sub-agent completions
+            that arrive later are routed through the normal session queue
+            instead of blocking this turn while waiting for them.
             """
             if pending_queue is None:
                 return []
@@ -770,27 +772,6 @@ class AgentLoop:
                 except asyncio.QueueEmpty:
                     break
 
-            # Block if nothing drained but sub-agents spawned in this dispatch
-            # are still running.  Keeps the runner loop alive so subsequent
-            # completions are injected in-order rather than dispatched separately.
-            if (not items
-                    and session is not None
-                    and self.subagents.get_running_count_by_session(session.key) > 0):
-                try:
-                    msg = await asyncio.wait_for(pending_queue.get(), timeout=300)
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "Timeout waiting for sub-agent completion in session {}",
-                        session.key,
-                    )
-                    return items
-                items.append(_to_user_message(msg))
-                while len(items) < limit:
-                    try:
-                        items.append(_to_user_message(pending_queue.get_nowait()))
-                    except asyncio.QueueEmpty:
-                        break
-
             return items
 
         active_session_key = session.key if session else session_key
@@ -805,7 +786,10 @@ class AgentLoop:
 
             specialist_prompt: str | None = None
             if _session_meta.get("review_mode", False):
-                specialist_prompt = await resolve_code_review_context(initial_messages, _session_meta)
+                review_meta = dict(_session_meta)
+                if repo_review_tool := self.tools.get("repo_review"):
+                    review_meta["_repo_review_tool"] = repo_review_tool
+                specialist_prompt = await resolve_code_review_context(initial_messages, review_meta)
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
@@ -875,31 +859,38 @@ class AgentLoop:
         return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
 
     def _accumulate_total_usage(self, usage: dict[str, int]) -> None:
+        usage_total: int | None = None
+        fallback_total = 0
         for key, value in usage.items():
-            if key == "total_tokens":
-                continue
             try:
                 amount = int(value or 0)
             except (TypeError, ValueError):
                 continue
+            if key == "total_tokens":
+                usage_total = amount
+            elif key.endswith("_tokens"):
+                fallback_total += amount
             self._total_usage[key] = self._total_usage.get(key, 0) + amount
-        prompt = self._total_usage.get("prompt_tokens", 0)
-        completion = self._total_usage.get("completion_tokens", 0)
-        self._total_usage["total_tokens"] = prompt + completion
+        if usage_total is None:
+            self._total_usage["total_tokens"] = (
+                self._total_usage.get("total_tokens", 0) + fallback_total
+            )
+
+    @staticmethod
+    def _parse_max_concurrent_requests() -> int:
+        raw = os.environ.get("NANOBOT_MAX_CONCURRENT_REQUESTS", "3")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid NANOBOT_MAX_CONCURRENT_REQUESTS={!r}; using default 3",
+                raw,
+            )
+            return 3
 
     async def run(self) -> None:
-        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop.
+        """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         
-        这是 agent 的"总控循环"，职责是：
-        1. 不断从消息总线的 inbound 队列读取新消息
-        2. 识别优先命令（如 /stop）并直接执行
-        3. 判断该 session 是否已有活动任务
-           - 如果有，把新消息放入 pending 队列（中途注入）
-           - 如果没有，创建新的 asyncio 任务处理该消息
-        4. 定期检查过期 session，触发自动压缩
-        
-        设计目的：通过异步任务管理，既能并发处理不同 session，又能保证同一 session 串行执行。
-        """
         self._running = True
         await self._connect_mcp()
         logger.info("Agent loop started")
@@ -981,61 +972,44 @@ class AgentLoop:
             task = asyncio.create_task(self._dispatch(msg))
             self._active_tasks.setdefault(effective_key, []).append(task)
             task.add_done_callback(
-                lambda t, k=effective_key: self._active_tasks.get(k, [])
-                and self._active_tasks[k].remove(t)
-                if t in self._active_tasks.get(k, [])
-                else None
-            )
+            lambda t, k=effective_key: self._remove_active_task(k, t)
+                                      )
+    def _remove_active_task(self, key: str, task: asyncio.Task) -> None:
+        tasks = self._active_tasks.get(key)
+        if not tasks:
+            return
+        with suppress(ValueError):
+            tasks.remove(task)
+        if not tasks:
+            self._active_tasks.pop(key, None)
+            lock = self._session_locks.get(key)
+            if lock is not None:
+                self._cleanup_session_lock(key, lock)
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent.
-        
-        这是"会话级消息处理入口"，它的职责是：
-        1. 获取有效 session_key（支持统一 session 模式）
-        2. 获取该 session 的锁，保证同一 session 串行执行
-        3. 获取全局并发门（Semaphore），限制整体并发数
-        4. 为该 session 创建 pending 队列，用于接收中途到来的消息
-        5. 在 lock + gate 下执行 _process_message()（真正的消息处理）
-        6. 处理异常、取消、stream 回调
-        7. 最后清理：把 pending 队列中剩余消息重新发回总线
-        
-        关键设计：同一 session 用锁保证顺序，中途消息放入 pending 队列等待注入（而不是创建新任务）。
         """
         session_key = self._effective_session_key(msg)
         if session_key != msg.session_key:
             msg = dataclasses.replace(msg, session_key_override=session_key)
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
-
-        # 为该 session 创建 pending 队列，后续到来的同 session 消息会先进这个队列
-        # 由 runner 的 _drain_pending() 回调定期提取，注入到 LLM 上下文
         pending = asyncio.Queue(maxsize=20)
         self._pending_queues[session_key] = pending
 
         try:
-            # lock：同一 session 串行执行
-            # gate：全局并发门，限制同时处理的消息数（默认 3 个）
             async with lock, gate:
                 try:
-                    # ===== 步骤 1：准备流式输出回调 =====
+    
                     on_stream = on_stream_end = None
                     if msg.metadata.get("_wants_stream"):
-                        # 如果客户端要求流式输出，就构建两个回调函数
-                        # 这样 LLM 在生成文本时，可以分段发送增量内容
                         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
                         stream_segment = 0
 
                         def _current_stream_id() -> str:
-                            """为每一段流数据生成唯一 ID"""
                             return f"{stream_base_id}:{stream_segment}"
 
                         async def on_stream(delta: str) -> None:
-                            """回调：每当 LLM 生成一段增量文本时调用
-                            
-                            delta：这一段生成的文本
-                            将其包装成 OutboundMessage 并立即发送给客户端
-                            这样用户能"实时看到" AI 生成过程，而不用等整个回答生成完
-                            """
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True  # 标记这是流增量
                             meta["_stream_id"] = _current_stream_id()  # 该段的唯一 ID
@@ -1046,11 +1020,6 @@ class AgentLoop:
                             ))
 
                         async def on_stream_end(*, resuming: bool = False) -> None:
-                            """回调：一段流式输出结束时调用
-                            
-                            resuming=True：意味着 LLM 接下来会执行工具调用，前端应该保持加载状态
-                            resuming=False：整个对话完全结束了，前端可以停止加载
-                            """
                             nonlocal stream_segment
                             meta = dict(msg.metadata or {})
                             meta["_stream_end"] = True  # 标记段结束
@@ -1063,29 +1032,26 @@ class AgentLoop:
                             ))
                             stream_segment += 1  # 准备下一段
 
-                    # ===== 步骤 2：真正处理消息 =====
-                    # _process_message() 执行整个状态机（RESTORE -> COMPACT -> COMMAND -> BUILD -> RUN -> SAVE -> RESPOND）
-                    # 返回最终的 OutboundMessage 或 None
                     response = await self._process_message(
                         msg, on_stream=on_stream, on_stream_end=on_stream_end,
                         pending_queue=pending,
                     )
                     
-                    # ===== 步骤 3：发送最终响应 =====
+    
                     if response is not None:
-                        # 正常情况：把 agent 的回复发送到总线
+               
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
-                        # CLI 特殊处理：即使没有响应，也要发一个空消息（保持交互感）
+                 
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=msg.metadata or {},
                         ))
                     
-                    # ===== 步骤 4：WebSocket 特殊处理 =====
+             
                     if msg.channel == "websocket":
-                        # WebSocket 客户端需要明确知道"这一轮会话已经完全结束"
-                        # 这样前端可以停止加载动画，显示最终结果
+               
+            
                         turn_lat = self._pending_turn_latency_ms.pop(session_key, None)
                         turn_trace = self._pending_turn_traces.pop(session_key, None)
                         turn_metadata: dict[str, Any] = {**msg.metadata, "_turn_end": True}  # 关键标记
@@ -1118,15 +1084,11 @@ class AgentLoop:
                                     ))
 
                             self._schedule_background(_generate_title_and_notify())
-                # ===== 步骤 5：异常处理 =====
+        
                 except asyncio.CancelledError:
-                    # 用户发送了 /stop 命令，这个处理任务被取消
+              
                     logger.info("Task cancelled for session {}", session_key)
-                    # 关键：即使被中断，也要把"运行时检查点"恢复到 session，这样：
-                    # - 已执行的工具结果会被保留
-                    # - 已生成的 assistant 消息会被保留
-                    # - 下一轮对话时，用户能看到被中断前发生了什么
-                    # 检查点是在工具执行时实时保存的（_checkpoint 回调），这里只是物化到历史
+         
                     try:
                         key = self._effective_session_key(msg)
                         session = self.sessions.get_or_create(key)
@@ -1143,18 +1105,17 @@ class AgentLoop:
                             session_key,
                             exc_info=True,
                         )
-                    raise  # 继续抛出取消异常，通知上层
+                    raise  
                 except Exception:
-                    # 任何其他异常都不应该导致任务失败而不通知用户
+              
                     logger.exception("Error processing message for session {}", session_key)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="Sorry, I encountered an error.",
                     ))
-        # ===== 步骤 6：最终清理（无论成功还是异常都执行）=====
+    
         finally:
-            # 关键逻辑：如果本轮处理期间有新消息到来，它们被放入了 pending 队列
-            # 现在要把它们重新发回总线，作为"新消息"处理，避免丢失
+   
             queue = self._pending_queues.pop(session_key, None)
             if queue is not None:
                 leftover = 0
@@ -1172,29 +1133,46 @@ class AgentLoop:
                         leftover, session_key,
                     )
             
-            # 通知系统这个 session 现在进入"空闲"状态
+           
             await publish_turn_run_status(self.bus, msg, "idle")
             # 清除本轮的延迟记录
             self._pending_turn_latency_ms.pop(session_key, None)
             self._pending_turn_traces.pop(session_key, None)
+            self._cleanup_session_lock(session_key, lock)
+
+    def _cleanup_session_lock(self, session_key: str, lock: asyncio.Lock) -> None:
+        if lock.locked():
+            return
+        if self._pending_queues.get(session_key) is not None:
+            return
+        if self._active_tasks.get(session_key):
+            return
+        if self._session_locks.get(session_key) is lock:
+            self._session_locks.pop(session_key, None)
 
     async def close_mcp(self) -> None:
         """Drain pending background archives, then close MCP connections."""
         if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
-            self._background_tasks.clear()
+            tasks = list(self._background_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for task in tasks:
+                self._remove_background_task(task)
         for name, stack in self._mcp_stacks.items():
             try:
                 await stack.aclose()
             except (RuntimeError, BaseExceptionGroup):
-                logger.debug("MCP server '{}' cleanup error (can be ignored)", name)
+                logger.exception("MCP server '{}' cleanup failed during shutdown", name)
         self._mcp_stacks.clear()
 
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
         task = asyncio.create_task(coro)
         self._background_tasks.append(task)
-        task.add_done_callback(self._background_tasks.remove)
+        task.add_done_callback(self._remove_background_task)
+
+    def _remove_background_task(self, task: asyncio.Task) -> None:
+        with suppress(ValueError):
+            self._background_tasks.remove(task)
 
     def stop(self) -> None:
         """Stop the agent loop."""
@@ -1796,15 +1774,20 @@ class AgentLoop:
 
     @staticmethod
     def _checkpoint_message_key(message: dict[str, Any]) -> tuple[Any, ...]:
-        return (
-            message.get("role"),
-            message.get("content"),
-            message.get("tool_call_id"),
-            message.get("name"),
-            message.get("tool_calls"),
-            message.get("reasoning_content"),
-            message.get("thinking_blocks"),
-        )
+        tc = message.get("tool_calls")
+        if isinstance(tc, list):
+            tc = tuple((c.get("id"), c.get("type"), 
+                        (c.get("function") or {}).get("name")) for c in tc if isinstance(c, dict))
+        content = message.get("content")
+        if isinstance(content, list):
+            content = tuple(str(b) for b in content)
+        return (message.get("role"),
+                content, 
+                message.get("tool_call_id"),
+                message.get("name"), 
+                tc, 
+                message.get("reasoning_content"),
+                tuple(message.get("thinking_blocks") or ()))
 
     def _restore_runtime_checkpoint(self, session: Session) -> bool:
         """Materialize an unfinished turn into session history before a new request."""

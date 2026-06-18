@@ -17,6 +17,8 @@ import {
   ChevronDown,
   ChevronUp,
   CircleHelp,
+  ClipboardList,
+  Files,
   Gauge,
   FileSearch,
   History,
@@ -50,6 +52,8 @@ import type {
   SlashCommand,
   GoalStateWsPayload,
   ReviewDepth,
+  ReviewAction,
+  ReviewFocus,
   ReviewTargetType,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -86,12 +90,34 @@ interface ThreadComposerProps {
 }
 
 const REVIEW_DEPTH_OPTIONS: ReviewDepth[] = ["quick", "full", "deep"];
-const REVIEW_TARGET_TYPE_OPTIONS: ReviewTargetType[] = ["github", "local"];
+const REVIEW_TARGET_TYPE_OPTIONS: ReviewTargetType[] = ["auto", "github", "local"];
+const REVIEW_ACTION_OPTIONS_BY_TARGET: Record<ReviewTargetType, ReviewAction[]> = {
+  auto: ["full_repo", "pr_diff", "local_changed"],
+  github: ["full_repo", "pr_diff"],
+  local: ["full_repo", "local_changed"],
+};
+const REVIEW_FOCUS_GROUPS: { key: "necessary" | "advanced"; options: ReviewFocus[] }[] = [
+  {
+    key: "necessary",
+    options: ["security", "tests", "architecture", "performance"],
+  },
+  {
+    key: "advanced",
+    options: ["bug-risk", "maintainability", "dependency"],
+  },
+];
 
 function reviewDepthLabel(mode: ReviewDepth): string {
   if (mode === "quick") return "Quick";
   if (mode === "deep") return "Deep";
   return "Full";
+}
+
+function reviewActionLabel(action: ReviewAction): string {
+  if (action === "full_repo") return "full_repo";
+  if (action === "pr_diff") return "pr_diff";
+  if (action === "local_changed") return "local_changed";
+  return action;
 }
 
 function ReviewFieldLabel({
@@ -408,8 +434,12 @@ export function ThreadComposer({
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [reviewDepth, setReviewDepth] = useState<ReviewDepth>("full");
-  const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>("github");
+  const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>("auto");
   const [reviewTarget, setReviewTarget] = useState("");
+  const [reviewAction, setReviewAction] = useState<ReviewAction>("full_repo");
+  const [reviewFocus, setReviewFocus] = useState<ReviewFocus[]>([]);
+  const [reviewTargetPaths, setReviewTargetPaths] = useState("");
+  const [reviewAdvancedOpen, setReviewAdvancedOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -417,6 +447,8 @@ export function ThreadComposer({
   const isHero = variant === "hero";
   const resolvedPlaceholder = isStreaming
     ? t("thread.composer.placeholderStreaming")
+    : reviewModeEnabled
+      ? t("thread.composer.review.requirementsPlaceholder")
     : placeholder ?? t("thread.composer.placeholderThread");
 
   const { images, enqueue, remove, clear, encoding, full } =
@@ -468,7 +500,23 @@ export function ThreadComposer({
   );
   const hasErrors = images.some((img) => img.status === "error");
   const reviewTargetTrimmed = reviewTarget.trim();
-  const hasReviewPayload = reviewModeEnabled && reviewTargetTrimmed.length > 0;
+  const reviewTargetPathItems = useMemo(
+    () => reviewTargetPaths.split(/[\n,]+/).map((item) => item.trim()).filter(Boolean),
+    [reviewTargetPaths],
+  );
+  const reviewActionOptions = REVIEW_ACTION_OPTIONS_BY_TARGET[reviewTargetType];
+  const hasReviewPayload = reviewModeEnabled && (
+    reviewTargetTrimmed.length > 0
+    || reviewAction !== "full_repo"
+    || reviewFocus.length > 0
+    || reviewTargetPathItems.length > 0
+  );
+
+  useEffect(() => {
+    if (!reviewActionOptions.includes(reviewAction)) {
+      setReviewAction("full_repo");
+    }
+  }, [reviewAction, reviewActionOptions]);
 
   const canSend =
     !disabled
@@ -479,8 +527,12 @@ export function ThreadComposer({
   useEffect(() => {
     if (!reviewModeEnabled) {
       setReviewDepth("full");
-      setReviewTargetType("github");
+      setReviewTargetType("auto");
       setReviewTarget("");
+      setReviewAction("full_repo");
+      setReviewFocus([]);
+      setReviewTargetPaths("");
+      setReviewAdvancedOpen(false);
     }
   }, [reviewModeEnabled]);
 
@@ -620,7 +672,10 @@ export function ThreadComposer({
           review: {
             mode: reviewDepth,
             target_type: reviewTargetType,
+            action: reviewAction,
             ...(reviewTargetTrimmed ? { target: reviewTargetTrimmed } : {}),
+            ...(reviewFocus.length > 0 ? { focus: reviewFocus } : {}),
+            ...(reviewTargetPathItems.length > 0 ? { target_paths: reviewTargetPathItems } : {}),
           },
         }
       : undefined;
@@ -628,8 +683,12 @@ export function ThreadComposer({
     setValue("");
     if (reviewModeEnabled) {
       setReviewDepth("full");
-      setReviewTargetType("github");
+      setReviewTargetType("auto");
       setReviewTarget("");
+      setReviewAction("full_repo");
+      setReviewFocus([]);
+      setReviewTargetPaths("");
+      setReviewAdvancedOpen(false);
     }
     setInlineError(null);
     // Bubble owns the data URL copy; safe to revoke every staged blob
@@ -644,8 +703,11 @@ export function ThreadComposer({
     readyImages,
     resizeTextarea,
     reviewDepth,
+    reviewAction,
+    reviewFocus,
     reviewModeEnabled,
     reviewTarget,
+    reviewTargetPathItems,
     reviewTargetTrimmed,
     reviewTargetType,
     value,
@@ -767,15 +829,15 @@ export function ThreadComposer({
               "dark:border-blue-300/18 dark:bg-card/94 dark:shadow-[0_18px_48px_rgba(0,0,0,0.45)]",
             )}
           >
-            <div className="flex flex-col gap-2.5 sm:flex-row sm:items-end">
-              <div className="grid gap-1.5">
+            <div className="grid gap-2.5 md:grid-cols-[auto_auto_minmax(8.5rem,0.85fr)_minmax(0,1.6fr)_auto] md:items-end">
+              <div className="grid shrink-0 gap-1.5">
                 <ReviewFieldLabel icon={Gauge}>
                   {t("thread.composer.review.depth")}
                 </ReviewFieldLabel>
                 <div
                   role="group"
                   aria-label={t("thread.composer.review.depth")}
-                  className="inline-flex h-8 overflow-hidden rounded-full border border-border/60 bg-background/80 p-0.5"
+                  className="inline-flex h-8 w-max overflow-visible rounded-full border border-border/60 bg-background/80 p-0.5"
                 >
                   {REVIEW_DEPTH_OPTIONS.map((mode) => (
                     <button
@@ -785,7 +847,7 @@ export function ThreadComposer({
                       aria-pressed={reviewDepth === mode}
                       onClick={() => setReviewDepth(mode)}
                       className={cn(
-                        "min-w-14 rounded-full px-2.5 text-[11.5px] font-medium transition-colors",
+                        "min-w-14 whitespace-nowrap rounded-full px-2.5 text-[11.5px] font-medium transition-colors",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
                         reviewDepth === mode
                           ? "bg-blue-500/12 text-blue-700 dark:text-blue-300"
@@ -797,14 +859,14 @@ export function ThreadComposer({
                   ))}
                 </div>
               </div>
-              <div className="grid gap-1.5">
+              <div className="grid shrink-0 gap-1.5">
                 <ReviewFieldLabel icon={Tag}>
                   {t("thread.composer.review.targetType")}
                 </ReviewFieldLabel>
                 <div
                   role="group"
                   aria-label={t("thread.composer.review.targetType")}
-                  className="inline-flex h-8 overflow-hidden rounded-full border border-border/60 bg-background/80 p-0.5"
+                  className="inline-flex h-8 w-max overflow-visible rounded-full border border-border/60 bg-background/80 p-0.5"
                 >
                   {REVIEW_TARGET_TYPE_OPTIONS.map((targetType) => (
                     <button
@@ -814,7 +876,7 @@ export function ThreadComposer({
                       aria-pressed={reviewTargetType === targetType}
                       onClick={() => setReviewTargetType(targetType)}
                       className={cn(
-                        "min-w-16 rounded-full px-2.5 font-mono text-[11.5px] font-medium transition-colors",
+                        "min-w-16 whitespace-nowrap rounded-full px-2.5 font-mono text-[11.5px] font-medium transition-colors",
                         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
                         reviewTargetType === targetType
                           ? "bg-blue-500/12 text-blue-700 dark:text-blue-300"
@@ -826,7 +888,29 @@ export function ThreadComposer({
                   ))}
                 </div>
               </div>
-              <label className="grid min-w-0 flex-1 gap-1.5">
+              <label className="grid min-w-0 gap-1.5">
+                <ReviewFieldLabel icon={FileSearch}>
+                  {t("thread.composer.review.action")}
+                </ReviewFieldLabel>
+                <select
+                  value={reviewAction}
+                  onChange={(e) => setReviewAction(e.target.value as ReviewAction)}
+                  disabled={disabled}
+                  aria-label={t("thread.composer.review.action")}
+                  className={cn(
+                    "h-8 rounded-full border border-border/60 bg-background/80 px-3 font-mono text-[11.5px]",
+                    "text-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                >
+                  {reviewActionOptions.map((action) => (
+                    <option key={action} value={action}>
+                      {reviewActionLabel(action)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid min-w-0 gap-1.5">
                 <ReviewFieldLabel icon={Target}>
                   {t("thread.composer.review.target")}
                 </ReviewFieldLabel>
@@ -845,7 +929,90 @@ export function ThreadComposer({
                   )}
                 />
               </label>
+              <div className="grid min-w-0 gap-1.5 md:self-end">
+                <button
+                  type="button"
+                  disabled={disabled}
+                  aria-expanded={reviewAdvancedOpen}
+                  onClick={() => setReviewAdvancedOpen((open) => !open)}
+                  className={cn(
+                    "inline-flex h-8 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full border border-border/60 bg-background/80 px-3",
+                    "text-[11.5px] font-medium text-muted-foreground transition-colors hover:bg-muted/65 hover:text-foreground",
+                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                >
+                  <ClipboardList className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  <span className="truncate">{t("thread.composer.review.advanced")}</span>
+                  {reviewAdvancedOpen ? <ChevronUp className="h-3.5 w-3.5 shrink-0" aria-hidden /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden />}
+                </button>
+              </div>
             </div>
+            {reviewAdvancedOpen ? (
+              <div className="mt-2.5 grid gap-2.5 border-t border-border/50 pt-2.5">
+                <div className="grid gap-2.5 sm:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]">
+                  <div className="grid min-w-0 gap-1.5">
+                    <ReviewFieldLabel icon={ShieldCheck}>
+                      {t("thread.composer.review.focus")}
+                    </ReviewFieldLabel>
+                    <div className="grid gap-1.5">
+                      {REVIEW_FOCUS_GROUPS.map((group) => (
+                        <div key={group.key} className="grid gap-1">
+                          <span className="text-[10px] font-medium uppercase text-muted-foreground/75">
+                            {t(`thread.composer.review.focusGroups.${group.key}`)}
+                          </span>
+                          <div className="flex min-h-8 flex-wrap gap-1.5">
+                            {group.options.map((focus) => {
+                              const selected = reviewFocus.includes(focus);
+                              return (
+                                <button
+                                  key={focus}
+                                  type="button"
+                                  disabled={disabled}
+                                  aria-pressed={selected}
+                                  onClick={() =>
+                                    setReviewFocus((current) =>
+                                      selected ? current.filter((item) => item !== focus) : [...current, focus],
+                                    )
+                                  }
+                                  className={cn(
+                                    "h-7 rounded-full border px-2.5 font-mono text-[11px] transition-colors",
+                                    "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                                    selected
+                                      ? "border-blue-500/30 bg-blue-500/12 text-blue-700 dark:text-blue-300"
+                                      : "border-border/60 bg-background/80 text-muted-foreground hover:bg-muted/65 hover:text-foreground",
+                                  )}
+                                >
+                                  {focus}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <label className="grid min-w-0 gap-1.5">
+                    <ReviewFieldLabel icon={Files}>
+                      {t("thread.composer.review.scope")}
+                    </ReviewFieldLabel>
+                    <textarea
+                      value={reviewTargetPaths}
+                      onChange={(e) => setReviewTargetPaths(e.target.value)}
+                      disabled={disabled}
+                      rows={3}
+                      aria-label={t("thread.composer.review.scope")}
+                      placeholder={t("thread.composer.review.scopePlaceholder")}
+                      className={cn(
+                        "min-h-20 resize-none rounded-xl border border-border/60 bg-background/80 px-3 py-2 font-mono text-[11.5px]",
+                        "text-foreground placeholder:text-muted-foreground/58",
+                        "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        "disabled:cursor-not-allowed disabled:opacity-50",
+                      )}
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       ) : null}

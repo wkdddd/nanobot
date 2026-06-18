@@ -306,12 +306,24 @@ export interface OutboundImageGeneration {
 }
 
 export type ReviewDepth = "quick" | "full" | "deep";
-export type ReviewTargetType = "github" | "local";
+export type ReviewTargetType = "auto" | "github" | "local";
+export type ReviewAction = "full_repo" | "pr_diff" | "local_changed";
+export type ReviewFocus =
+  | "security"
+  | "tests"
+  | "architecture"
+  | "performance"
+  | "bug-risk"
+  | "maintainability"
+  | "dependency";
 
 export interface OutboundReviewContext {
   mode?: ReviewDepth;
   target_type?: ReviewTargetType;
   target?: string;
+  action?: ReviewAction;
+  focus?: ReviewFocus[];
+  target_paths?: string[];
 }
 
 /** Response shape for ``GET .../webui-thread`` (server-built transcript replay). */
@@ -344,6 +356,9 @@ export type Outbound =
       review_mode_variant?: ReviewDepth;
       review_target?: string;
       review_target_type?: ReviewTargetType;
+      review_action?: ReviewAction;
+      review_focus?: ReviewFocus[];
+      review_target_paths?: string[];
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;

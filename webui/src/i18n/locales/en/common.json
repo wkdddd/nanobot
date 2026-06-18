@@ -236,11 +236,21 @@
       "goalStateSheetTitle": "Goal",
       "goalStateCloseAria": "Close goal",
       "review": {
+        "requirementsPlaceholder": "Additional requirements…",
         "depth": "Review depth",
         "targetType": "Target type",
         "target": "Review target",
         "targetAria": "Review target address",
-        "targetPlaceholder": "Repository URL or local path"
+        "targetPlaceholder": "Repository URL or local path",
+        "advanced": "Advanced",
+        "action": "Action",
+        "focus": "Focus",
+        "focusGroups": {
+          "necessary": "Necessary",
+          "advanced": "Advanced"
+        },
+        "scope": "Limited scope",
+        "scopePlaceholder": "src/auth.ts, tests/auth.test.ts"
       },
       "send": "Send message",
       "stop": "Stop response",

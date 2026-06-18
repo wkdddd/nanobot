@@ -289,6 +289,7 @@ describe("ThreadShell", () => {
           review: {
             mode: "deep",
             target_type: "local",
+            action: "full_repo",
             target: "./repo",
           },
         },

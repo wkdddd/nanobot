@@ -302,6 +302,23 @@ def _lazy_default(module_path: str, class_name: str) -> Any:
     return getattr(module, class_name)()
 
 
+_resolving_tool_config_refs = False
+
+
+def ensure_config_models_rebuilt() -> None:
+    """Resolve deferred tool config references before runtime instantiation."""
+    global _resolving_tool_config_refs
+    if Config.__pydantic_complete__ and ToolsConfig.__pydantic_complete__:
+        return
+    if _resolving_tool_config_refs:
+        return
+    _resolving_tool_config_refs = True
+    try:
+        _resolve_tool_config_refs()
+    finally:
+        _resolving_tool_config_refs = False
+
+
 class ToolsConfig(Base):
     """Tools configuration.
 
@@ -323,6 +340,10 @@ class ToolsConfig(Base):
     github_repo: GitHubRepoConfig = Field(
         default_factory=lambda: _lazy_default("nanobot.agent.tools.repo_review", "GitHubRepoConfig")
     )
+
+    def __init__(self, **data: Any) -> None:
+        ensure_config_models_rebuilt()
+        super().__init__(**data)
 
 
 
@@ -361,6 +382,10 @@ class Config(BaseSettings):
         default_factory=dict,
         validation_alias=AliasChoices("modelPresets", "model_presets"),
     )
+
+    def __init__(self, **data: Any) -> None:
+        ensure_config_models_rebuilt()
+        super().__init__(**data)
 
     @model_validator(mode="after")
     def _validate_model_preset(self) -> "Config":

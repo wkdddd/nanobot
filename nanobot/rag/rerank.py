@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Mapping
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 _DASHSCOPE_COMPATIBLE_MODE_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 _DASHSCOPE_QWEN3_RERANK_BASE = "https://dashscope.aliyuncs.com/compatible-api/v1"
@@ -156,5 +155,5 @@ class RerankClient:
                 for r in sorted(results, key=lambda x: -x.get("relevance_score", 0.0))
             ]
         except Exception as e:
-            logger.warning("Rerank API call failed: %s", e)
+            logger.warning("Rerank API call failed: {}", e)
             return []

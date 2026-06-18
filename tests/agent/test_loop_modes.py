@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -35,6 +36,30 @@ class CapturingRunner:
     async def run(self, spec: AgentRunSpec) -> AgentRunResult:
         self.initial_messages = list(spec.initial_messages)
         return AgentRunResult(final_content="ok", messages=spec.initial_messages)
+
+
+class InjectionRunner:
+    def __init__(self) -> None:
+        self.injected: list[dict[str, Any]] | None = None
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        assert spec.injection_callback is not None
+        self.injected = await spec.injection_callback(limit=3)
+        return AgentRunResult(
+            final_content="ok",
+            messages=list(spec.initial_messages) + list(self.injected),
+            had_injections=bool(self.injected),
+        )
+
+
+class RunningSubagents:
+    def get_running_count_by_session(self, session_key: str) -> int:
+        return 1
+
+
+class FailingMCPStack:
+    async def aclose(self) -> None:
+        raise RuntimeError("disconnect failed")
 
 
 @pytest.mark.asyncio
@@ -76,6 +101,96 @@ async def test_agent_loop_ignores_legacy_math_qa_mode_metadata(tmp_path) -> None
     )
 
     assert runner.initial_messages == [{"role": "user", "content": "求极限"}]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_pending_drain_does_not_wait_for_running_subagents(tmp_path) -> None:
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    runner = InjectionRunner()
+    loop.runner = runner
+    loop.subagents = RunningSubagents()
+    session = Session(key="test:pending")
+    pending: asyncio.Queue = asyncio.Queue()
+
+    await asyncio.wait_for(
+        loop._run_agent_loop(
+            [{"role": "user", "content": "hello"}],
+            session=session,
+            session_key=session.key,
+            pending_queue=pending,
+        ),
+        timeout=0.1,
+    )
+
+    assert runner.injected == []
+
+
+@pytest.mark.asyncio
+async def test_close_mcp_logs_cleanup_failures_and_clears_stacks(tmp_path, monkeypatch) -> None:
+    log_messages: list[str] = []
+
+    def capture_exception(message: str, name: str) -> None:
+        log_messages.append(message.format(name))
+
+    monkeypatch.setattr("nanobot.agent.loop.logger.exception", capture_exception)
+
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    loop._mcp_stacks = {"broken": FailingMCPStack()}
+
+    await loop.close_mcp()
+
+    assert log_messages == ["MCP server 'broken' cleanup failed during shutdown"]
+    assert loop._mcp_stacks == {}
+
+
+@pytest.mark.asyncio
+async def test_close_mcp_handles_background_task_done_callback_removal(tmp_path) -> None:
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    task = asyncio.create_task(asyncio.sleep(0))
+    loop._background_tasks = [task]
+    task.add_done_callback(loop._remove_background_task)
+
+    await loop.close_mcp()
+
+    assert loop._background_tasks == []
+
+
+def test_invalid_max_concurrent_requests_falls_back_to_default(monkeypatch) -> None:
+    warnings: list[str] = []
+
+    def capture_warning(message: str, raw: str) -> None:
+        warnings.append(message.format(raw))
+
+    monkeypatch.setenv("NANOBOT_MAX_CONCURRENT_REQUESTS", "not-an-int")
+    monkeypatch.setattr("nanobot.agent.loop.logger.warning", capture_warning)
+
+    assert AgentLoop._parse_max_concurrent_requests() == 3
+    assert warnings == ["Invalid NANOBOT_MAX_CONCURRENT_REQUESTS='not-an-int'; using default 3"]
+
+
+def test_cleanup_session_lock_removes_idle_lock() -> None:
+    loop = AgentLoop.__new__(AgentLoop)
+    lock = asyncio.Lock()
+    loop._session_locks = {"session": lock}
+    loop._pending_queues = {}
+    loop._active_tasks = {}
+
+    loop._cleanup_session_lock("session", lock)
+
+    assert loop._session_locks == {}
+
+
+def test_sanitize_persisted_blocks_converts_non_dict_blocks() -> None:
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.max_tool_result_chars = 20
+
+    result = loop._sanitize_persisted_blocks(["hello", b"raw", 123])
+
+    assert result == [
+        {"type": "text", "text": "hello"},
+        {"type": "text", "text": "[binary content omit\n... (truncated)"},
+        {"type": "text", "text": "123"},
+    ]
 
 
 @pytest.mark.asyncio

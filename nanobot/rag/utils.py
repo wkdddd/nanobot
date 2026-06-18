@@ -44,6 +44,7 @@ _STOP_WORDS = {
 
 
 def query_terms(query: str) -> list[str]:
+    '''把用户查询字符串拆成用于检索的关键词列表。'''
     raw = re.findall(
         r"[A-Za-z_][A-Za-z0-9_./:-]*|[一-鿿]+",
         query.lower(),

@@ -366,7 +366,7 @@ describe("useNanobotStream", () => {
     expect(result.current.messages[2].reasoningStreaming).toBe(true);
   });
 
-  it("does not attach reasoning across a tool trace boundary", () => {
+  it("keeps one reasoning carrier across a tool trace boundary", () => {
     const fake = fakeClient();
     const { result } = renderHook(() => useNanobotStream("chat-r7", EMPTY_MESSAGES), {
       wrapper: wrap(fake.client),
@@ -392,17 +392,65 @@ describe("useNanobotStream", () => {
       });
     });
 
-    expect(result.current.messages).toHaveLength(3);
+    expect(result.current.messages).toHaveLength(2);
     expect(result.current.messages.map((m) => m.kind ?? "message")).toEqual([
       "message",
       "trace",
-      "message",
     ]);
-    expect(result.current.messages[0].reasoning).toBe("First reasoning.");
+    expect(result.current.messages[0].reasoning).toBe("First reasoning.Second reasoning.");
+    expect(result.current.messages[0].reasoningStreaming).toBe(true);
     expect(result.current.messages[1].traces).toEqual([
       "web_search({\"query\":\"OpenClaw\"})",
     ]);
-    expect(result.current.messages[2].reasoning).toBe("Second reasoning.");
+  });
+
+  it("keeps one reasoning panel for a turn with reasoning, trace, and more reasoning", () => {
+    const fake = fakeClient();
+    const { result } = renderHook(() => useNanobotStream("chat-review-reasoning", EMPTY_MESSAGES), {
+      wrapper: wrap(fake.client),
+    });
+
+    act(() => {
+      fake.emit("chat-review-reasoning", {
+        event: "reasoning_delta",
+        chat_id: "chat-review-reasoning",
+        text: "Inspect target.",
+      });
+      fake.emit("chat-review-reasoning", {
+        event: "reasoning_end",
+        chat_id: "chat-review-reasoning",
+      });
+      fake.emit("chat-review-reasoning", {
+        event: "message",
+        chat_id: "chat-review-reasoning",
+        text: "read_file({\"path\":\"loop.py\"})",
+        kind: "tool_hint",
+      });
+      fake.emit("chat-review-reasoning", {
+        event: "reasoning_delta",
+        chat_id: "chat-review-reasoning",
+        text: "Verify finding.",
+      });
+      fake.emit("chat-review-reasoning", {
+        event: "reasoning_end",
+        chat_id: "chat-review-reasoning",
+      });
+      fake.emit("chat-review-reasoning", {
+        event: "turn_end",
+        chat_id: "chat-review-reasoning",
+      });
+    });
+
+    const reasoningMessages = result.current.messages.filter(
+      (m) => m.role === "assistant" && m.reasoning,
+    );
+    expect(reasoningMessages).toHaveLength(1);
+    expect(reasoningMessages[0]).toMatchObject({
+      reasoning: "Inspect target.Verify finding.",
+      reasoningStreaming: false,
+      isStreaming: false,
+    });
+    expect(result.current.messages.filter((m) => m.kind === "trace")).toHaveLength(1);
   });
 
   it("keeps tool-call reasoning before the matching live tool trace", () => {

@@ -7,7 +7,6 @@ import base64
 import fnmatch
 import hashlib
 import json
-import logging
 import os
 import re
 import subprocess
@@ -19,8 +18,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
+from loguru import logger
 from pydantic import AliasChoices, Field
 
+from nanobot.agent.review.types import ReviewAction
 from nanobot.rag import (
     IndexedChunk,
     QdrantVectorStore,
@@ -34,6 +35,7 @@ from nanobot.rag.utils import ChunkKey, IndexedHit
 from nanobot.rag.rerank import create_rerank_client_from_config
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.schema import (
+    ArraySchema,
     BooleanSchema,
     IntegerSchema,
     StringSchema,
@@ -48,7 +50,10 @@ _GITHUB_PR_URL_RE = re.compile(
 )
 _SOURCE_TYPE = "code_review"
 _REMOTE_SOURCE_TYPE = "code_review_github"
-logger = logging.getLogger(__name__)
+
+
+def _repo_review_action_values() -> tuple[str, ...]:
+    return tuple(action.value for action in ReviewAction)
 
 _DEFAULT_IGNORE_DIRS = {
     ".git",
@@ -264,6 +269,27 @@ def _safe_slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "repo"
 
 
+def _clean_scope_paths(paths: list[str] | None, *, remote: bool = False) -> list[str]:
+    cleaned: list[str] = []
+    for path in paths or []:
+        if not isinstance(path, str):
+            continue
+        value = path.strip().replace("\\", "/")
+        if remote:
+            value = value.lstrip("/")
+        value = value.rstrip("/")
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+
+def _path_matches_scope(path: str, scopes: list[str]) -> bool:
+    if not scopes:
+        return True
+    normalized = path.strip().replace("\\", "/").lstrip("/")
+    return any(normalized == scope or normalized.startswith(f"{scope}/") for scope in scopes)
+
+
 def _parse_repo(repo: str) -> tuple[str, str]:
     repo = repo.strip().rstrip("/")
     m = _GITHUB_URL_RE.search(repo)
@@ -313,7 +339,7 @@ class LocalRepoReader:
         limit = max_results or self.config.max_results
         raw_hits = await self._retrieve_index_hits(review_query, limit=limit)
         logger.info(
-            "repo_review local retrieval source_type=%s query_terms=%s hits=%s elapsed_ms=%.1f",
+            "repo_review local retrieval source_type={} query_terms={} hits={} elapsed_ms={:.1f}",
             self.source_type,
             len(terms),
             len(raw_hits),
@@ -440,7 +466,7 @@ class LocalRepoReader:
         start = time.perf_counter()
         files = list(self._iter_candidate_files())
         logger.info(
-            "repo_review index sync start source_type=%s workspace=%s files=%s",
+            "repo_review index sync start source_type={} workspace={} files={}",
             self.source_type,
             self.workspace,
             len(files),
@@ -453,7 +479,7 @@ class LocalRepoReader:
             skip_embed_filter=should_skip_file_embedding,
         )
         logger.info(
-            "repo_review index sync finish source_type=%s chunks=%s elapsed_ms=%.1f",
+            "repo_review index sync finish source_type={} chunks={} elapsed_ms={:.1f}",
             self.source_type,
             self.index.count(self.source_type),
             (time.perf_counter() - start) * 1000,
@@ -488,14 +514,14 @@ class LocalRepoReader:
         try:
             from chonkie import RecursiveChunker  # type: ignore
         except Exception as exc:
-            logger.debug("repo_review chonkie unavailable path=%s reason=%s", rel_path, exc)
+            logger.debug("repo_review chonkie unavailable path={} reason={}", rel_path, exc)
             return []
 
         try:
             chunker = RecursiveChunker(chunk_size=1800, min_characters_per_chunk=120)
             raw_chunks = chunker.chunk(text)
         except Exception as exc:
-            logger.warning("repo_review chonkie chunk failed path=%s reason=%s", rel_path, exc)
+            logger.warning("repo_review chonkie chunk failed path={} reason={}", rel_path, exc)
             return []
 
         chunks: list[IndexedChunk] = []
@@ -523,7 +549,7 @@ class LocalRepoReader:
                 )
             )
         if chunks:
-            logger.debug("repo_review chonkie chunks path=%s chunks=%s", rel_path, len(chunks))
+            logger.debug("repo_review chonkie chunks path={} chunks={}", rel_path, len(chunks))
         return chunks
 
     def _iter_candidate_files(self) -> Iterable[Path]:
@@ -735,7 +761,7 @@ class GitHubRepoReader:
             source = "workspace config.json" if workspace_token else (
                 "runtime config" if self.config.token.strip() else "GITHUB_TOKEN"
             )
-            logger.info("repo_review github token loaded source=%s", source)
+            logger.info("repo_review github token loaded source={}", source)
             return token
         try:
             result = await asyncio.to_thread(
@@ -790,13 +816,13 @@ class GitHubRepoReader:
                 response = await client.get(url, headers=headers, params=params or {})
         except httpx.TimeoutException:
             logger.warning(
-                "repo_review github api timeout endpoint=%s timeout=%s",
+                "repo_review github api timeout endpoint={} timeout={}",
                 endpoint,
                 self.config.timeout,
             )
             return f"Error: request to GitHub API timed out ({self.config.timeout}s)."
         except httpx.HTTPError as exc:
-            logger.warning("repo_review github api http error endpoint=%s reason=%s", endpoint, exc)
+            logger.warning("repo_review github api http error endpoint={} reason={}", endpoint, exc)
             return f"Error: HTTP request failed: {exc}"
 
         if response.status_code == 403:
@@ -805,24 +831,24 @@ class GitHubRepoReader:
                 reset = response.headers.get("X-RateLimit-Reset", "unknown")
                 auth_hint = " Set GITHUB_TOKEN for higher limits (5000 req/hr)." if not token else ""
                 logger.warning(
-                    "repo_review github api rate limited endpoint=%s reset=%s authenticated=%s",
+                    "repo_review github api rate limited endpoint={} reset={} authenticated={}",
                     endpoint,
                     reset,
                     bool(token),
                 )
                 return f"Error: GitHub API rate limited. Resets at timestamp {reset}.{auth_hint}"
             logger.warning(
-                "repo_review github api forbidden endpoint=%s authenticated=%s",
+                "repo_review github api forbidden endpoint={} authenticated={}",
                 endpoint,
                 bool(token),
             )
             return "Error: access denied (403). The repo may be private; ensure GITHUB_TOKEN is set."
         if response.status_code == 404:
-            logger.warning("repo_review github api not found endpoint=%s", endpoint)
+            logger.warning("repo_review github api not found endpoint={}", endpoint)
             return "Error: repository or path not found. Check the URL and access permissions."
         if response.status_code >= 400:
             logger.warning(
-                "repo_review github api error endpoint=%s status=%s body=%s",
+                "repo_review github api error endpoint={} status={} body={}",
                 endpoint,
                 response.status_code,
                 response.text[:200],
@@ -1011,7 +1037,7 @@ class GitHubRepoReader:
             if len(files) >= limit:
                 break
         logger.info(
-            "repo_review github fetched files repo=%s/%s ref=%s files=%s limit=%s",
+            "repo_review github fetched files repo={}/{} ref={} files={} limit={}",
             owner,
             repo_name,
             ref,
@@ -1063,13 +1089,13 @@ class GitHubRepoReader:
         try:
             from github import Github  # type: ignore
         except Exception as exc:
-            logger.debug("repo_review PyGithub unavailable reason=%s", exc)
+            logger.debug("repo_review PyGithub unavailable reason={}", exc)
             return None
         token = self._workspace_config_token() or self.config.token.strip() or os.environ.get("GITHUB_TOKEN", "").strip()
         try:
             return Github(token or None, timeout=self.config.timeout)
         except Exception as exc:
-            logger.warning("repo_review PyGithub client init failed reason=%s", exc)
+            logger.warning("repo_review PyGithub client init failed reason={}", exc)
             return None
 
     def _fetch_text_files_pygithub(
@@ -1109,14 +1135,14 @@ class GitHubRepoReader:
                 if len(files) >= limit:
                     break
             logger.info(
-                "repo_review PyGithub fetched files repo=%s ref=%s files=%s",
+                "repo_review PyGithub fetched files repo={} ref={} files={}",
                 repo,
                 ref_name,
                 len(files),
             )
             return f"{repo_slug}@{ref_name}", files
         except Exception as exc:
-            logger.warning("repo_review PyGithub full repo fallback repo=%s reason=%s", repo, exc)
+            logger.warning("repo_review PyGithub full repo fallback repo={} reason={}", repo, exc)
             return None
 
     def _fetch_pr_files_pygithub(
@@ -1149,14 +1175,14 @@ class GitHubRepoReader:
                     if patch:
                         files[filename] = patch
             logger.info(
-                "repo_review PyGithub fetched pr files repo=%s pr=%s files=%s",
+                "repo_review PyGithub fetched pr files repo={} pr={} files={}",
                 repo,
                 pr_number,
                 len(files),
             )
             return f"{repo_slug}#{pr_number}", files, touched
         except Exception as exc:
-            logger.warning("repo_review PyGithub PR fallback repo=%s pr=%s reason=%s", repo, pr_number, exc)
+            logger.warning("repo_review PyGithub PR fallback repo={} pr={} reason={}", repo, pr_number, exc)
             return None
 
     async def _fetch_file_text(
@@ -1177,7 +1203,7 @@ class GitHubRepoReader:
             try:
                 return base64.b64decode(content).decode("utf-8", errors="replace")
             except Exception:
-                logger.warning("repo_review github decode failed repo=%s/%s path=%s", owner, repo, path)
+                logger.warning("repo_review github decode failed repo={}/{} path={}", owner, repo, path)
                 return None
         return str(content) if content else None
 
@@ -1198,7 +1224,7 @@ def _changed_lines_from_patch(filename: str, patch: str) -> list[int]:
                             lines.append(int(line.target_line_no))
         return sorted(set(lines))
     except Exception as exc:
-        logger.debug("repo_review unidiff fallback filename=%s reason=%s", filename, exc)
+        logger.debug("repo_review unidiff fallback filename={} reason={}", filename, exc)
     lines = []
     current = 0
     for line in patch.splitlines():
@@ -1249,7 +1275,7 @@ class CachedRepoReader:
             try:
                 target.relative_to(cache_root)
             except ValueError:
-                logger.warning("repo_review skipped unsafe remote path=%s", rel)
+                logger.warning("repo_review skipped unsafe remote path={}", rel)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8", newline="\n")
@@ -1259,7 +1285,7 @@ class CachedRepoReader:
             newline="\n",
         )
         logger.info(
-            "repo_review remote snapshot written snapshot=%s cache=%s files=%s elapsed_ms=%.1f",
+            "repo_review remote snapshot written snapshot={} cache={} files={} elapsed_ms={:.1f}",
             snapshot_name,
             cache_root,
             len(files),
@@ -1300,16 +1326,16 @@ class CachedRepoReader:
 @tool_parameters(
     tool_parameters_schema(
         target_type=StringSchema(
-            "Review target type: 'local' for current workspace search or 'github' for GitHub API reads",
-            enum=("local", "github"),
+            "Review target type: 'local' for current workspace search, 'github' for GitHub API reads, or 'auto'",
+            enum=("auto", "local", "github"),
         ),
         action=StringSchema(
-            "Code review RAG action: context, diff, report, evaluate. Legacy GitHub actions: meta, tree, file",
-            enum=("context", "diff", "report", "evaluate", "meta", "tree", "file"),
+            "Code review evidence action: full_repo, pr_diff, or local_changed",
+            enum=_repo_review_action_values(),
             nullable=True,
         ),
         target=StringSchema(
-            "Optional local path, GitHub repo URL, or GitHub PR URL. PR URLs imply action='diff'.",
+            "Optional local path, GitHub repo URL, or GitHub PR URL. PR URLs imply action='pr_diff'.",
             nullable=True,
         ),
         target_repo=StringSchema(
@@ -1318,12 +1344,18 @@ class CachedRepoReader:
         ),
         pr_number=IntegerSchema(
             0,
-            description="GitHub pull request number for action='diff'",
+            description="GitHub pull request number for action='pr_diff'",
             minimum=0,
             maximum=1000000,
         ),
         repo_path=StringSchema(
-            "File path within the GitHub repo. Required for target_type='github' action='file'",
+            "File path within the GitHub repo.",
+            nullable=True,
+        ),
+        target_paths=ArraySchema(
+            StringSchema("Repository-relative file or directory path"),
+            description="Optional files or directories that limit the review scope",
+            max_items=80,
             nullable=True,
         ),
         ref=StringSchema("GitHub branch, tag, or commit SHA", nullable=True),
@@ -1344,26 +1376,6 @@ class CachedRepoReader:
         include_tests=BooleanSchema(
             description="Include likely related test file paths when available",
             default=True,
-        ),
-        tree_limit=IntegerSchema(
-            500,
-            description="Maximum GitHub tree entries to return",
-            minimum=1,
-            maximum=10000,
-        ),
-        report_path=StringSchema(
-            "Optional Markdown report output path for action='report' or action='evaluate'",
-            nullable=True,
-        ),
-        dataset_path=StringSchema(
-            "JSONL evaluation dataset path for action='evaluate'",
-            nullable=True,
-        ),
-        budget_chars=IntegerSchema(
-            16000,
-            description="Maximum characters to include in generated Markdown reports",
-            minimum=1000,
-            maximum=100000,
         ),
         required=[],
     )
@@ -1444,8 +1456,8 @@ class RepoReviewTool(Tool):
     def description(self) -> str:
         return (
             "CodeReview RAG tool for repository evidence retrieval, GitHub full-repo "
-            "and PR diff context, Markdown context reports, and retrieval evaluation. "
-            "Use action='context' for full-repo retrieval and action='diff' for PR/diff review."
+            "and PR diff context. Use action='full_repo' for complete repository or limited-scope retrieval, "
+            "action='pr_diff' for GitHub PR review, and action='local_changed' for local git changes."
         )
 
     @property
@@ -1461,6 +1473,7 @@ class RepoReviewTool(Tool):
         target_repo: str | None = None,
         pr_number: int = 0,
         repo_path: str | None = None,
+        target_paths: list[str] | None = None,
         ref: str | None = None,
         tree_pattern: str | None = None,
         max_results: int = 5,
@@ -1472,44 +1485,34 @@ class RepoReviewTool(Tool):
     ) -> str:
         trace_id = uuid.uuid4().hex[:8]
         started = time.perf_counter()
-        action = (action or "context").strip().lower()
+        action_value = (action or ReviewAction.FULL_REPO.value).strip().lower()
         logger.info(
-            "repo_review start trace_id=%s action=%s target_type=%s target=%s target_repo=%s",
+            "repo_review.start trace_id={} action={} target_type={} target={} target_repo={} paths_count={}",
             trace_id,
-            action,
+            action_value,
             target_type,
             target,
             target_repo,
+            len(target_paths or []),
         )
         target_type = (target_type or "local").strip().lower()
+        if target_type == "auto":
+            target_type = "github" if _GITHUB_URL_RE.search(target or target_repo or "") else "local"
         pr_repo, parsed_pr_number = _parse_pr_target(target)
         if pr_repo:
             target_type = "github"
             target_repo = target_repo or pr_repo
             pr_number = pr_number or parsed_pr_number or 0
-            if action == "context":
-                action = "diff"
+            if action_value == ReviewAction.FULL_REPO.value:
+                action_value = ReviewAction.PR_DIFF.value
 
         try:
-            if action == "evaluate":
-                return await self._evaluate(
-                    dataset_path=dataset_path,
-                    report_path=report_path,
-                    max_results=max_results,
-                    trace_id=trace_id,
-                )
-            if action == "report":
-                return await self._report(
-                    review_query=review_query,
-                    target_type=target_type,
-                    target=target,
-                    target_repo=target_repo,
-                    ref=ref,
-                    max_results=max_results,
-                    include_tests=include_tests,
-                    report_path=report_path,
-                    budget_chars=budget_chars,
-                    trace_id=trace_id,
+            action_values = _repo_review_action_values()
+            if action_value not in action_values:
+                allowed = ", ".join(action_values)
+                return (
+                    f"Error: unknown repo_review action '{action_value}'. "
+                    f"Use {allowed}."
                 )
             if target_type == "github":
                 if not self.github.config.enable:
@@ -1517,26 +1520,27 @@ class RepoReviewTool(Tool):
                 repo = (target_repo or target or "").strip()
                 if not repo:
                     return "Error: target_repo is required when target_type='github'."
-                if action in {"meta", "tree", "file"}:
-                    kwargs: dict[str, Any] = {
-                        "action": action,
-                        "repo": repo,
-                        "path": repo_path,
-                        "ref": ref,
-                        "pattern": tree_pattern,
-                        "max_entries": tree_limit,
-                    }
-                    return await self.github.execute(**kwargs)
-                if action == "diff":
+                if action_value == ReviewAction.PR_DIFF.value:
                     return await self._github_diff_context(
                         repo=repo,
                         pr_number=int(pr_number or 0),
+                        target_paths=target_paths or ([repo_path] if repo_path else []),
                         review_query=review_query,
                         max_results=max_results,
                         include_tests=include_tests,
                         trace_id=trace_id,
                     )
-                if action == "context":
+                if action_value == ReviewAction.FULL_REPO.value and (target_paths or repo_path):
+                    return await self._github_targeted_context(
+                        repo=repo,
+                        ref=ref,
+                        target_paths=target_paths or ([repo_path] if repo_path else []),
+                        review_query=review_query,
+                        max_results=max_results,
+                        include_tests=include_tests,
+                        trace_id=trace_id,
+                    )
+                if action_value == ReviewAction.FULL_REPO.value:
                     return await self._github_context(
                         repo=repo,
                         ref=ref,
@@ -1546,16 +1550,26 @@ class RepoReviewTool(Tool):
                         include_tests=include_tests,
                         trace_id=trace_id,
                     )
-                return f"Error: unknown GitHub action '{action}'."
+                return f"Error: unknown GitHub action '{action_value}'."
 
-            if action not in {"context", "diff"}:
-                return f"Error: action '{action}' is not supported for local target_type."
-            if action == "diff":
-                return await self._local_diff_context(
+            if action_value == ReviewAction.PR_DIFF.value:
+                return "Error: action 'pr_diff' requires target_type='github'."
+            if action_value == ReviewAction.LOCAL_CHANGED.value:
+                return await self._local_changed_context(
                     review_query=review_query,
+                    target_paths=target_paths or ([repo_path] if repo_path else []),
                     max_results=max_results,
                     include_tests=include_tests,
                 )
+            if action_value == ReviewAction.FULL_REPO.value and (target_paths or repo_path):
+                return await self._local_targeted_context(
+                    review_query=review_query,
+                    target_paths=target_paths or ([repo_path] if repo_path else []),
+                    max_results=max_results,
+                    include_tests=include_tests,
+                )
+            if action_value != ReviewAction.FULL_REPO.value:
+                return f"Error: action '{action_value}' is not supported for local target_type."
             return await self._local_context(
                 review_query=review_query,
                 max_results=max_results,
@@ -1563,9 +1577,9 @@ class RepoReviewTool(Tool):
             )
         finally:
             logger.info(
-                "repo_review finish trace_id=%s action=%s elapsed_ms=%.1f",
+                "repo_review.finish trace_id={} action={} elapsed_ms={:.1f}",
                 trace_id,
-                action,
+                action_value,
                 (time.perf_counter() - started) * 1000,
             )
 
@@ -1591,15 +1605,19 @@ class RepoReviewTool(Tool):
             related_tests=False,
         )
 
-    async def _local_diff_context(
+    async def _local_changed_context(
         self,
         *,
         review_query: str | None,
+        target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
     ) -> str:
         changed = await asyncio.to_thread(self._local_changed_files)
-        query = review_query or "code review changed files regressions tests security"
+        scopes = _clean_scope_paths(target_paths)
+        if scopes:
+            changed = [path for path in changed if _path_matches_scope(path, scopes)]
+        query = review_query or "code review local changed files regressions tests security"
         if changed:
             query = f"{query} {' '.join(changed[:40])}"
         block = await self._local_context(
@@ -1608,10 +1626,12 @@ class RepoReviewTool(Tool):
             include_tests=include_tests,
         )
         if not changed:
-            return "[Local Diff Review Context]\n- changed files: unavailable or none\n\n" + block
+            scope_line = f"- scope paths: {', '.join(scopes[:20])}\n" if scopes else ""
+            return "[Local Diff Review Context]\n" + scope_line + "- changed files: unavailable or none\n\n" + block
         return (
             "[Local Diff Review Context]\n"
-            f"- changed files: {len(changed)}\n"
+            + (f"- scope paths: {', '.join(scopes[:20])}\n" if scopes else "")
+            + f"- changed files: {len(changed)}\n"
             + "\n".join(f"  - {path}" for path in changed[:80])
             + "\n\n"
             + block
@@ -1621,7 +1641,7 @@ class RepoReviewTool(Tool):
         try:
             from git import Repo  # type: ignore
         except Exception as exc:
-            logger.debug("repo_review GitPython unavailable reason=%s", exc)
+            logger.debug("repo_review GitPython unavailable reason={}", exc)
             return []
         try:
             repo = Repo(self.workspace, search_parent_directories=True)
@@ -1630,8 +1650,29 @@ class RepoReviewTool(Tool):
             paths.update(str(p) for p in repo.untracked_files)
             return sorted(path for path in paths if path and Path(path).suffix.lower() in _DEFAULT_TEXT_EXTS)
         except Exception as exc:
-            logger.warning("repo_review local git diff unavailable reason=%s", exc)
+            logger.warning("repo_review local git diff unavailable reason={}", exc)
             return []
+
+    async def _local_targeted_context(
+        self,
+        *,
+        review_query: str | None,
+        target_paths: list[str],
+        max_results: int,
+        include_tests: bool | None,
+    ) -> str:
+        cleaned = _clean_scope_paths(target_paths)
+        if not cleaned:
+            return "Error: target_paths is required for limited full_repo review."
+        query = review_query or "code review targeted files security tests architecture"
+        query = f"{query} {' '.join(cleaned[:40])}"
+        block = await self._local_context(
+            review_query=query,
+            max_results=max_results,
+            include_tests=include_tests,
+        )
+        header = "[Limited Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80])
+        return header + "\n\n" + block
 
     async def _github_context(
         self,
@@ -1654,7 +1695,7 @@ class RepoReviewTool(Tool):
                 max_files=self.github.config.max_index_files,
             )
         except Exception as exc:
-            logger.exception("repo_review github context failed trace_id=%s", trace_id)
+            logger.exception("repo_review github context failed trace_id={}", trace_id)
             return f"Error: failed to fetch GitHub repository context: {exc}"
         if not files:
             return "No text files found for GitHub repository context retrieval."
@@ -1665,7 +1706,7 @@ class RepoReviewTool(Tool):
             max_results=max_results,
         )
         logger.info(
-            "repo_review github context trace_id=%s snapshot=%s cache=%s files=%s hits=%s",
+            "repo_review github context trace_id={} snapshot={} cache={} files={} hits={}",
             trace_id,
             snapshot,
             cache_root,
@@ -1676,18 +1717,62 @@ class RepoReviewTool(Tool):
             return "No relevant GitHub repository review references found."
         return self.retriever._format_review_block(hits, include_tests=include_tests)
 
+    async def _github_targeted_context(
+        self,
+        *,
+        repo: str,
+        ref: str | None,
+        target_paths: list[str],
+        review_query: str | None,
+        max_results: int,
+        include_tests: bool | None,
+        trace_id: str,
+    ) -> str:
+        cleaned = _clean_scope_paths(target_paths, remote=True)
+        if not cleaned:
+            return "Error: target_paths is required for limited full_repo review."
+        files: dict[str, str] = {}
+        snapshot_name = repo
+        for path in cleaned[:80]:
+            text = await self.github._fetch_file_text(*_parse_repo(repo), path, ref)
+            if text is not None:
+                files[path] = text
+        if not files:
+            return "No text files found for targeted GitHub review retrieval."
+        query = review_query or "code review targeted files security tests architecture"
+        query = f"{query} {' '.join(cleaned[:40])}"
+        cache_root, hits = await self.remote_retriever.retrieve(
+            snapshot_name=f"{snapshot_name}:targeted:{hashlib.sha256('|'.join(cleaned).encode('utf-8')).hexdigest()[:8]}",
+            files=files,
+            review_query=query,
+            max_results=max_results,
+        )
+        logger.info(
+            "repo_review.github_targeted trace_id={} repo={} cache={} files={} hits={}",
+            trace_id,
+            repo,
+            cache_root,
+            len(files),
+            len(hits),
+        )
+        header = "[Limited GitHub Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80]) + "\n\n"
+        if not hits:
+            return header + "No relevant targeted GitHub repository review references found."
+        return header + self.retriever._format_review_block(hits, include_tests=include_tests)
+
     async def _github_diff_context(
         self,
         *,
         repo: str,
         pr_number: int,
+        target_paths: list[str],
         review_query: str | None,
         max_results: int,
         include_tests: bool | None,
         trace_id: str,
     ) -> str:
         if pr_number <= 0:
-            return "Error: pr_number is required for action='diff'."
+            return "Error: pr_number is required for action='pr_diff'."
         if not review_query or not review_query.strip():
             review_query = "code review changed lines regressions security tests"
         try:
@@ -1696,8 +1781,14 @@ class RepoReviewTool(Tool):
                 pr_number=pr_number,
             )
         except Exception as exc:
-            logger.exception("repo_review github diff failed trace_id=%s", trace_id)
+            logger.exception("repo_review github diff failed trace_id={}", trace_id)
             return f"Error: failed to fetch GitHub PR diff context: {exc}"
+        scopes = _clean_scope_paths(target_paths, remote=True)
+        if scopes:
+            files = {path: text for path, text in files.items() if _path_matches_scope(path, scopes)}
+            touched_lines = {
+                path: lines for path, lines in touched_lines.items() if _path_matches_scope(path, scopes)
+            }
         if not files:
             return "No text files found for GitHub PR diff retrieval."
         cache_root, hits = await self.remote_retriever.retrieve(
@@ -1710,6 +1801,7 @@ class RepoReviewTool(Tool):
         header = [
             "[GitHub PR Diff Review Context]",
             f"- repository/pr: {snapshot}",
+            *( [f"- scope paths: {', '.join(scopes[:20])}"] if scopes else [] ),
             f"- cached files: {len(files)}",
             f"- cache: {cache_root}",
             "",
@@ -1770,7 +1862,7 @@ class RepoReviewTool(Tool):
         path = self._resolve_report_path(report_path, "code-review-rag-report.md")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(markdown, encoding="utf-8", newline="\n")
-        logger.info("repo_review report written trace_id=%s path=%s chars=%s", trace_id, path, len(markdown))
+        logger.info("repo_review report written trace_id={} path={} chars={}", trace_id, path, len(markdown))
         return f"Markdown report written: {path}\n\n{markdown[:4000]}"
 
     async def _evaluate(
@@ -1865,7 +1957,7 @@ class RepoReviewTool(Tool):
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(markdown, encoding="utf-8", newline="\n")
         logger.info(
-            "repo_review evaluation written trace_id=%s path=%s samples=%s average=%.3f",
+            "repo_review evaluation written trace_id={} path={} samples={} average={:.3f}",
             trace_id,
             out_path,
             len(results),
@@ -1880,3 +1972,12 @@ class RepoReviewTool(Tool):
                 path = self.workspace / path
             return path
         return self.workspace / self.config.report_dir / default_name
+
+
+try:
+    from nanobot.config import schema as _config_schema
+
+    if not getattr(_config_schema.ToolsConfig, "__pydantic_complete__", False):
+        _config_schema._resolve_tool_config_refs()
+except Exception:
+    pass

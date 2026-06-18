@@ -367,6 +367,40 @@ describe("NanobotClient", () => {
     );
   });
 
+  it("includes advanced review context options in outbound messages", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    client.sendMessage("chat-review", "review auth", undefined, {
+      review: {
+        mode: "full",
+        target_type: "auto",
+        action: "full_repo",
+        focus: ["security", "tests"],
+        target_paths: ["src/auth.ts", "tests/auth.test.ts"],
+      },
+    });
+
+    expect(lastSocket().sent).toContain(
+      JSON.stringify({
+        type: "message",
+        chat_id: "chat-review",
+        content: "review auth",
+        review_mode_variant: "full",
+        review_target_type: "auto",
+        review_action: "full_repo",
+        review_focus: ["security", "tests"],
+        review_target_paths: ["src/auth.ts", "tests/auth.test.ts"],
+        webui: true,
+      }),
+    );
+  });
+
   it("re-attaches known chats after a reconnect", async () => {
     const client = new NanobotClient({
       url: "ws://test",

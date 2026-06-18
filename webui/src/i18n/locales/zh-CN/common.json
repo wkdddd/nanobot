@@ -224,11 +224,21 @@
       "goalStateSheetTitle": "目标",
       "goalStateCloseAria": "关闭目标",
       "review": {
+        "requirementsPlaceholder": "额外要求…",
         "depth": "审查深度",
         "targetType": "目标类型",
         "target": "审查目标",
         "targetAria": "审查目标地址",
-        "targetPlaceholder": "仓库 URL 或本地路径"
+        "targetPlaceholder": "仓库 URL 或本地路径",
+        "advanced": "高级",
+        "action": "动作",
+        "focus": "维度",
+        "focusGroups": {
+          "necessary": "必要",
+          "advanced": "高级"
+        },
+        "scope": "限定范围",
+        "scopePlaceholder": "src/auth.ts, tests/auth.test.ts"
       },
       "send": "发送消息",
       "stop": "停止响应",
