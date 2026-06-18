@@ -1155,6 +1155,18 @@ class WebSocketChannel(BaseChannel):
             dup = json.loads(json.dumps(wire, ensure_ascii=False))
             if isinstance(dup, dict):
                 dup.setdefault("createdAt", int(time.time() * 1000))
+                review_target = str(dup.get("review_target") or "").strip()
+                review_target_type = str(dup.get("review_target_type") or "").strip()
+                review_mode_variant = str(dup.get("review_mode_variant") or "").strip()
+                if review_target or review_target_type or review_mode_variant:
+                    review: dict[str, Any] = {}
+                    if review_target:
+                        review["target"] = review_target
+                    if review_target_type:
+                        review["target_type"] = review_target_type
+                    if review_mode_variant:
+                        review["mode"] = review_mode_variant
+                    dup["review"] = review
             append_transcript_object(sk, dup)
         except (ValueError, TypeError) as e:
             self.logger.warning("webui transcript append failed: {}", e)
@@ -1192,6 +1204,15 @@ class WebSocketChannel(BaseChannel):
             }
             if media:
                 user_obj["media_paths"] = list(media)
+            review_target = str(meta.get("review_target") or "").strip()
+            review_target_type = str(meta.get("review_target_type") or "").strip()
+            review_mode_variant = str(meta.get("review_mode_variant") or "").strip()
+            if review_target:
+                user_obj["review_target"] = review_target
+            if review_target_type:
+                user_obj["review_target_type"] = review_target_type
+            if review_mode_variant:
+                user_obj["review_mode_variant"] = review_mode_variant
             self._try_append_webui_transcript(chat_id, user_obj)
         await super()._handle_message(
             sender_id,
@@ -1641,23 +1662,36 @@ class WebSocketChannel(BaseChannel):
                     )
                     return
 
-            # Allow image-only turns (content may be empty when media is attached).
-            if not content.strip() and not media_paths:
+            raw_review_target = envelope.get("review_target")
+            raw_review_target_type = envelope.get("review_target_type")
+            raw_review_mode_variant = envelope.get("review_mode_variant")
+            has_review_payload = (
+                isinstance(raw_review_target, str)
+                or isinstance(raw_review_target_type, str)
+                or isinstance(raw_review_mode_variant, str)
+            )
+
+            # Allow image-only and review-only turns.
+            if not content.strip() and not media_paths and not has_review_payload:
                 await self._send_event(connection, "error", detail="missing content")
                 return
 
             # Auto-attach on first use so clients can one-shot without a separate attach.
             self._attach(connection, cid)
             await self._hydrate_after_subscribe(cid)
-            raw_review_target = envelope.get("review_target")
-            raw_review_target_type = envelope.get("review_target_type")
             if (
                 self._session_manager is not None
-                and (isinstance(raw_review_target, str) or isinstance(raw_review_target_type, str))
+                and has_review_payload
             ):
                 session_key = f"websocket:{cid}"
                 session = self._session_manager.get_or_create(session_key)
                 session.metadata["review_mode"] = True
+                if isinstance(raw_review_mode_variant, str):
+                    mode = raw_review_mode_variant.strip().lower()
+                    if mode in {"quick", "full", "deep"}:
+                        session.metadata["review_mode_variant"] = mode
+                    else:
+                        session.metadata.pop("review_mode_variant", None)
                 if isinstance(raw_review_target, str):
                     target = raw_review_target.strip()
                     if target:
@@ -1680,6 +1714,8 @@ class WebSocketChannel(BaseChannel):
                 metadata["review_target"] = raw_review_target.strip()
             if isinstance(raw_review_target_type, str):
                 metadata["review_target_type"] = raw_review_target_type
+            if isinstance(raw_review_mode_variant, str):
+                metadata["review_mode_variant"] = raw_review_mode_variant
             await self._handle_message(
                 sender_id=client_id,
                 chat_id=cid,

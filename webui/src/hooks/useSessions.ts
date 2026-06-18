@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useClient } from "@/providers/ClientProvider";
 import i18n from "@/i18n";
 import {
+  type ApiAuth,
   ApiError,
   deleteSession as apiDeleteSession,
   fetchWebuiThread,
@@ -33,17 +34,27 @@ export function useSessions(): {
   createChat: () => Promise<string>;
   deleteChat: (key: string) => Promise<void>;
 } {
-  const { client, token } = useClient();
+  const { client, token, refreshAuth } = useClient();
   const [sessions, setSessions] = useState<ChatSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const tokenRef = useRef(token);
   tokenRef.current = token;
+  const refreshAuthRef = useRef(refreshAuth);
+  refreshAuthRef.current = refreshAuth;
+
+  const auth = useCallback(
+    (): ApiAuth => ({
+      token: tokenRef.current,
+      refreshAuth: refreshAuthRef.current,
+    }),
+    [],
+  );
 
   const refresh = useCallback(async () => {
     try {
       setLoading(true);
-      const rows = await listSessions(tokenRef.current);
+      const rows = await listSessions(auth());
       setSessions(rows);
       setError(null);
     } catch (e) {
@@ -53,7 +64,7 @@ export function useSessions(): {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [auth]);
 
   useEffect(() => {
     void refresh();
@@ -87,10 +98,10 @@ export function useSessions(): {
 
   const deleteChat = useCallback(
     async (key: string) => {
-      await apiDeleteSession(tokenRef.current, key);
+      await apiDeleteSession(auth(), key);
       setSessions((prev) => prev.filter((s) => s.key !== key));
     },
-    [],
+    [auth],
   );
 
   return { sessions, loading, error, refresh, createChat, deleteChat };
@@ -106,7 +117,7 @@ export function useSessionHistory(key: string | null): {
   /** ``true`` when the replayed transcript ends with a trace row (turn still in flight). */
   hasPendingToolCalls: boolean;
 } {
-  const { token } = useClient();
+  const { token, refreshAuth } = useClient();
   const [refreshSeq, setRefreshSeq] = useState(0);
   const refresh = useCallback(() => {
     setRefreshSeq((value) => value + 1);
@@ -154,7 +165,7 @@ export function useSessionHistory(key: string | null): {
         });
     (async () => {
       try {
-        const body = await fetchWebuiThread(token, key);
+        const body = await fetchWebuiThread({ token, refreshAuth }, key);
         if (cancelled) return;
         if (!body?.messages?.length) {
           setState((prev) => ({

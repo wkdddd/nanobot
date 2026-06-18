@@ -99,6 +99,95 @@ describe("webui API helpers", () => {
     );
   });
 
+  it("refreshes and retries settings requests after a 401", async () => {
+    const refreshAuth = vi
+      .fn()
+      .mockResolvedValueOnce("tok-new");
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          agent: {
+            model: "openai/gpt-4o",
+            provider: "openai",
+            resolved_provider: "openai",
+            has_api_key: true,
+          },
+          providers: [],
+          web_search: { provider: "duckduckgo", providers: [] },
+          runtime: { config_path: "/tmp/config.json" },
+          requires_restart: false,
+        }),
+      } as Response);
+
+    await expect(
+      updateSettings({ token: "tok-old", refreshAuth }, { model: "openai/gpt-4o" }),
+    ).resolves.toMatchObject({
+      agent: { model: "openai/gpt-4o" },
+    });
+
+    expect(refreshAuth).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/settings/update?model=openai%2Fgpt-4o",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok-old" },
+      }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/settings/update?model=openai%2Fgpt-4o",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok-new" },
+      }),
+    );
+  });
+
+  it("refreshes and retries webui-thread fetches after a 401", async () => {
+    const refreshAuth = vi
+      .fn()
+      .mockResolvedValueOnce("tok-new");
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          schemaVersion: 3,
+          messages: [
+            {
+              id: "u1",
+              role: "user",
+              content: "hello",
+              createdAt: 1,
+            },
+          ],
+        }),
+      } as Response);
+
+    await expect(
+      fetchWebuiThread({ token: "tok-old", refreshAuth }, "websocket:chat-1"),
+    ).resolves.toMatchObject({
+      messages: [{ id: "u1", content: "hello" }],
+    });
+
+    expect(refreshAuth).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/sessions/websocket%3Achat-1/webui-thread",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok-old" },
+      }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/sessions/websocket%3Achat-1/webui-thread",
+      expect.objectContaining({
+        headers: { Authorization: "Bearer tok-new" },
+      }),
+    );
+  });
+
   it("maps generated session titles from the sessions list", async () => {
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,

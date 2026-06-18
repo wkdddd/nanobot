@@ -235,6 +235,13 @@
       "goalStateExpandAria": "Show full goal",
       "goalStateSheetTitle": "Goal",
       "goalStateCloseAria": "Close goal",
+      "review": {
+        "depth": "Review depth",
+        "targetType": "Target type",
+        "target": "Review target",
+        "targetAria": "Review target address",
+        "targetPlaceholder": "Repository URL or local path"
+      },
       "send": "Send message",
       "stop": "Stop response",
       "tools": {
@@ -325,6 +332,7 @@
     "agentActivityLiveToolsOnly": "Working… · {{tools}} tool calls",
     "imageAttachment": "Image attachment",
     "copyReply": "Copy reply",
+    "downloadMarkdown": "Download Markdown",
     "copiedReply": "Copied reply",
     "turnLatencyTitle": "Response time (end-to-end)"
   },

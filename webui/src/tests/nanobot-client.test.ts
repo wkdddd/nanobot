@@ -297,6 +297,76 @@ describe("NanobotClient", () => {
     );
   });
 
+  it("includes review context options in outbound messages", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    client.sendMessage(
+      "chat-review",
+      "review login",
+      undefined,
+      {
+        review: {
+          mode: "deep",
+          target_type: "github",
+          target: "https://github.com/test/repo",
+        },
+      },
+    );
+
+    expect(lastSocket().sent).toContain(
+      JSON.stringify({
+        type: "message",
+        chat_id: "chat-review",
+        content: "review login",
+        review_mode_variant: "deep",
+        review_target: "https://github.com/test/repo",
+        review_target_type: "github",
+        webui: true,
+      }),
+    );
+  });
+
+  it("sends review-only messages even when content is empty", () => {
+    const client = new NanobotClient({
+      url: "ws://test",
+      reconnect: false,
+      socketFactory: (url) => new FakeSocket(url) as unknown as WebSocket,
+    });
+    client.connect();
+    lastSocket().fakeOpen();
+
+    client.sendMessage(
+      "chat-review",
+      "",
+      undefined,
+      {
+        review: {
+          mode: "full",
+          target_type: "local",
+          target: "./repo",
+        },
+      },
+    );
+
+    expect(lastSocket().sent).toContain(
+      JSON.stringify({
+        type: "message",
+        chat_id: "chat-review",
+        content: "",
+        review_mode_variant: "full",
+        review_target: "./repo",
+        review_target_type: "local",
+        webui: true,
+      }),
+    );
+  });
+
   it("re-attaches known chats after a reconnect", async () => {
     const client = new NanobotClient({
       url: "ws://test",

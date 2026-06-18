@@ -281,6 +281,26 @@ def replay_transcript_to_ui_messages(
                 "content": text_s,
                 "createdAt": created_at,
             }
+            review = rec.get("review")
+            if not isinstance(review, dict):
+                review = {
+                    "target": rec.get("review_target"),
+                    "target_type": rec.get("review_target_type"),
+                    "mode": rec.get("review_mode_variant"),
+                }
+            if isinstance(review, dict):
+                review_target = review.get("target")
+                review_target_type = review.get("target_type")
+                review_mode = review.get("mode")
+                review_row: dict[str, Any] = {}
+                if isinstance(review_target, str) and review_target.strip():
+                    review_row["target"] = review_target.strip()
+                if isinstance(review_target_type, str) and review_target_type.strip():
+                    review_row["target_type"] = review_target_type.strip()
+                if isinstance(review_mode, str) and review_mode.strip():
+                    review_row["mode"] = review_mode.strip()
+                if review_row:
+                    row["review"] = review_row
             if media_att:
                 row["media"] = media_att
                 if all(m.get("kind") == "image" for m in media_att):

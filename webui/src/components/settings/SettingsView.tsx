@@ -40,6 +40,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import {
+  type ApiAuth,
   fetchUsage,
   fetchSettings,
   updateProviderSettings,
@@ -73,7 +74,11 @@ export function SettingsView({
   isRestarting = false,
 }: SettingsViewProps) {
   const { t } = useTranslation();
-  const { token } = useClient();
+  const { token, refreshAuth } = useClient();
+  const auth = useMemo<ApiAuth>(() => ({
+    token,
+    refreshAuth,
+  }), [token, refreshAuth]);
   const [settings, setSettings] = useState<SettingsPayload | null>(null);
   const [usage, setUsage] = useState<UsagePayload | null>(null);
   const [usageError, setUsageError] = useState<string | null>(null);
@@ -115,7 +120,7 @@ export function SettingsView({
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    Promise.allSettled([fetchSettings(token), fetchUsage(token)])
+    Promise.allSettled([fetchSettings(auth), fetchUsage(auth)])
       .then(([settingsResult, usageResult]) => {
         if (cancelled) return;
         if (settingsResult.status === "fulfilled") {
@@ -140,7 +145,7 @@ export function SettingsView({
     return () => {
       cancelled = true;
     };
-  }, [applyPayload, token]);
+  }, [applyPayload, auth]);
 
   useEffect(() => {
     if (!settings) return;
@@ -168,7 +173,7 @@ export function SettingsView({
     if (!dirty || saving) return;
     setSaving(true);
     try {
-      const payload = await updateSettings(token, {
+      const payload = await updateSettings(auth, {
         model: form.model,
         ...(form.provider ? { provider: form.provider } : {}),
       });
@@ -194,7 +199,7 @@ export function SettingsView({
     }
     setProviderSaving(providerName);
     try {
-      const payload = await updateProviderSettings(token, {
+      const payload = await updateProviderSettings(auth, {
         provider: providerName,
         apiKey: apiKey || undefined,
         apiBase: providerForm.apiBase.trim(),
@@ -242,7 +247,7 @@ export function SettingsView({
       const update: WebSearchSettingsUpdate = { provider: webSearchForm.provider };
       if (provider.credential === "api_key" && apiKey) update.apiKey = apiKey;
       if (provider.credential === "base_url") update.baseUrl = baseUrl;
-      const payload = await updateWebSearchSettings(token, update);
+      const payload = await updateWebSearchSettings(auth, update);
       applyPayload(payload);
       setWebSearchForm((prev) => ({
         provider: payload.web_search.provider,

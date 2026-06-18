@@ -4,6 +4,7 @@ import type {
   Outbound,
   OutboundImageGeneration,
   OutboundMedia,
+  OutboundReviewContext,
   GoalStateWsPayload,
 } from "./types";
 
@@ -288,7 +289,10 @@ export class NanobotClient {
     chatId: string,
     content: string,
     media?: OutboundMedia[],
-    options?: { imageGeneration?: OutboundImageGeneration },
+    options?: {
+      imageGeneration?: OutboundImageGeneration;
+      review?: OutboundReviewContext;
+    },
   ): void {
     this.knownChats.add(chatId);
     const frame: Outbound = {
@@ -297,6 +301,9 @@ export class NanobotClient {
       content,
       ...(media && media.length > 0 ? { media } : {}),
       ...(options?.imageGeneration ? { image_generation: options.imageGeneration } : {}),
+      ...(options?.review?.mode ? { review_mode_variant: options.review.mode } : {}),
+      ...(options?.review?.target ? { review_target: options.review.target } : {}),
+      ...(options?.review?.target_type ? { review_target_type: options.review.target_type } : {}),
       webui: true,
     };
     this.queueSend(frame);

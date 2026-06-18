@@ -1,4 +1,4 @@
-"""Optional Qdrant vector store for MathQA RAG."""
+"""Optional Qdrant vector store for RAG."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def chunk_key(chunk: IndexedChunk) -> ChunkKey:
     return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
 
 
-class QdrantMathVectorStore:
+class QdrantVectorStore:
     """Small wrapper around qdrant-client with lazy imports and safe fallbacks."""
 
     def __init__(
@@ -39,24 +39,27 @@ class QdrantMathVectorStore:
         api_key: str = "",
         timeout: float = 30.0,
         dimensions: int = 1024,
+        check_compatibility: bool = False,
     ) -> None:
         self.url = url
         self.collection = collection
         self.api_key = api_key
         self.timeout = timeout
         self.dimensions = dimensions
+        self.check_compatibility = check_compatibility
         self._client: Any | None = None
 
     @classmethod
-    def from_config(cls, config: Any, *, dimensions: int = 1024) -> "QdrantMathVectorStore | None":
+    def from_config(cls, config: Any, *, dimensions: int = 1024) -> "QdrantVectorStore | None":
         if not getattr(config, "enable", False):
             return None
         return cls(
             url=str(getattr(config, "url", "http://localhost:6333")),
-            collection=str(getattr(config, "collection", "nanobot_math_chunks")),
+            collection=str(getattr(config, "collection", "nanobot_rag_chunks")),
             api_key=str(getattr(config, "api_key", "") or ""),
             timeout=float(getattr(config, "timeout", 30.0) or 30.0),
             dimensions=dimensions,
+            check_compatibility=bool(getattr(config, "check_compatibility", False)),
         )
 
     def _get_client(self) -> Any:
@@ -66,7 +69,11 @@ class QdrantMathVectorStore:
             from qdrant_client import QdrantClient
         except Exception as exc:  # pragma: no cover - exercised via fallback tests
             raise RuntimeError("qdrant-client is not installed") from exc
-        kwargs: dict[str, Any] = {"url": self.url, "timeout": self.timeout}
+        kwargs: dict[str, Any] = {
+            "url": self.url,
+            "timeout": self.timeout,
+            "check_compatibility": self.check_compatibility,
+        }
         if self.api_key:
             kwargs["api_key"] = self.api_key
         self._client = QdrantClient(**kwargs)

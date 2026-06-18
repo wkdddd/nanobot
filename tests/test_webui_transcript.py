@@ -38,3 +38,24 @@ def test_replay_preserves_multi_turn_created_at_order() -> None:
         ("user", 200),
         ("assistant", 210),
     ]
+
+
+def test_replay_preserves_user_review_reference() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {
+            "event": "user",
+            "text": "",
+            "createdAt": 100,
+            "review": {
+                "mode": "deep",
+                "target_type": "github",
+                "target": "https://github.com/test/repo",
+            },
+        },
+    ])
+
+    assert messages[0]["review"] == {
+        "mode": "deep",
+        "target_type": "github",
+        "target": "https://github.com/test/repo",
+    }

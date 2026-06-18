@@ -1,7 +1,9 @@
-"""RAGIndex — unified retrieval index with FTS5 lexical + hnswlib semantic search."""
+"""RAGIndex — unified retrieval index with FTS5 lexical + vector semantic search."""
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -11,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
 
+from nanobot.rag.qdrant_store import stable_point_id
 from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
 
 logger = logging.getLogger(__name__)
@@ -53,12 +56,14 @@ class RAGIndex:
         *,
         embedding_client: Any | None = None,
         rerank_client: Any | None = None,
+        vector_store: Any | None = None,
         dimensions: int = 1024,
     ) -> None:
         self.workspace = workspace.expanduser().resolve()
         self.db_path = db_path or self.workspace / ".nanobot" / "context_index.sqlite"
         self.embedding_client = embedding_client
         self.rerank_client = rerank_client
+        self.vector_store = vector_store
         self.dimensions = dimensions
         self._hnsw_indexes: dict[str, _HnswHandle] = {}
 
@@ -77,14 +82,17 @@ class RAGIndex:
         self._ensure_schema()
         seen: set[str] = set()
         with self._connect() as conn:
+            current_mtimes = self._current_file_mtimes(conn, source_type)
             for path in files:
                 rel = path.relative_to(self.workspace).as_posix()
                 seen.add(rel)
+                mtime = self._mtime(path)
+                if current_mtimes.get(rel) == float(mtime):
+                    continue
                 raw = self._read_bytes(path, max_file_chars=max_file_chars)
                 if raw is None:
                     continue
                 digest = hashlib.sha256(raw).hexdigest()
-                mtime = self._mtime(path)
                 if self._is_current(conn, source_type, rel, digest, mtime):
                     continue
                 try:
@@ -92,6 +100,11 @@ class RAGIndex:
                 except UnicodeDecodeError:
                     continue
                 chunks = chunker(path, text)
+                for chunk in chunks:
+                    chunk.source_type = source_type
+                    chunk.path = rel
+                    chunk.content_hash = digest
+                    chunk.mtime = mtime
                 file_skip = bool(skip_embed_filter and skip_embed_filter(rel, text))
                 self._replace_chunks(
                     conn, source_type, rel, chunks, digest, mtime,
@@ -100,6 +113,7 @@ class RAGIndex:
 
             if prune_missing:
                 self._prune_missing(conn, source_type, seen)
+        self._sync_vector_store_from_sqlite(source_type)
 
     def count(self, source_type: str) -> int:
         self._ensure_schema()
@@ -143,24 +157,58 @@ class RAGIndex:
 
         self._ensure_schema()
 
-        # Stage 1: FTS5 BM25 lexical candidates
-        lexical_hits = self._fts5_search(source_type, query, limit=100)
+        # Stage 1: Dense semantic recall, preferably through Qdrant.
+        qdrant_hits: list[IndexedHit] = []
+        if self.embedding_client:
+            qdrant_scores = await self._vector_search(
+                source_type,
+                query,
+                top_k=max(max_hits * 3, 50),
+            )
+            if qdrant_scores:
+                qdrant_hits = self._hits_from_scores(
+                    qdrant_scores,
+                    source_type=source_type,
+                    reason="qdrant",
+                )
+                if len(qdrant_hits) < max_hits:
+                    lexical_hits = self._fts5_search(source_type, query, limit=100)
+                    qdrant_keys = {self._hit_key(hit) for hit in qdrant_hits}
+                    supplemental = self._hits_from_scores(
+                        lexical_hits,
+                        source_type=source_type,
+                        reason="bm25",
+                    )
+                    for hit in supplemental:
+                        if self._hit_key(hit) in qdrant_keys:
+                            continue
+                        qdrant_hits.append(hit)
+                        if len(qdrant_hits) >= max_hits * 3:
+                            break
+                candidates = qdrant_hits[: max_hits * 3]
+                if self.rerank_client and candidates:
+                    candidates = await self._rerank(query, candidates, max_hits)
+                else:
+                    candidates = candidates[:max_hits]
+                return candidates
 
-        # Stage 2: On-demand semantic scoring of BM25 candidates
+        # Stage 2: SQLite/FTS5 fallback, with local semantic scoring when available.
+        lexical_hits = self._fts5_search(source_type, query, limit=100)
         semantic_scores: dict[ChunkKey, float] = {}
         if self.embedding_client and lexical_hits:
             semantic_scores = await self._embed_and_score_candidates(
                 source_type, query, set(lexical_hits.keys())
             )
 
-        # Stage 3: Hybrid scoring
         hits = self._merge_scores(
-            lexical_hits, semantic_scores, semantic_weight=semantic_weight
+            lexical_hits,
+            semantic_scores,
+            source_type=source_type,
+            semantic_weight=semantic_weight,
         )
         hits.sort(key=lambda h: -h.score)
         candidates = hits[: max_hits * 3]
 
-        # Stage 4: Rerank (optional)
         if self.rerank_client and candidates:
             candidates = await self._rerank(query, candidates, max_hits)
         else:
@@ -312,6 +360,196 @@ class RAGIndex:
 
         return scores
 
+    async def _vector_search(
+        self,
+        source_type: str,
+        query: str,
+        *,
+        top_k: int,
+    ) -> dict[ChunkKey, float]:
+        """Search the external vector backend when configured."""
+        if not self.embedding_client or not self.vector_store:
+            return {}
+
+        query_vec = await self.embedding_client.embed_query(query)
+        if query_vec is None:
+            return {}
+
+        try:
+            hits = await asyncio.to_thread(
+                self.vector_store.search,
+                source_type=source_type,
+                query_vector=query_vec,
+                top_k=top_k,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Qdrant semantic search fallback source_type=%s reason=%s",
+                source_type,
+                exc,
+            )
+            return {}
+        return {hit.key: float(hit.score) for hit in hits if getattr(hit, "score", 0.0) > 0}
+
+    def _hits_from_scores(
+        self,
+        scores: dict[ChunkKey, float],
+        *,
+        source_type: str,
+        reason: str,
+    ) -> list[IndexedHit]:
+        chunks_by_key = self._load_chunks_by_keys(set(scores), source_type=source_type)
+        hits = [
+            IndexedHit(chunk=chunk, score=scores[key], reason=[reason])
+            for key, chunk in chunks_by_key.items()
+            if key in scores
+        ]
+        hits.sort(key=lambda hit: -hit.score)
+        return hits
+
+    @staticmethod
+    def _hit_key(hit: IndexedHit) -> ChunkKey:
+        chunk = hit.chunk
+        return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
+
+    def _sync_vector_store_from_sqlite(self, source_type: str) -> None:
+        if not self.embedding_client or not self.vector_store:
+            return
+
+        embeddable = self._list_embeddable_chunks(source_type)
+        if not embeddable:
+            return
+
+        collection = getattr(self.vector_store, "collection", "")
+        dimensions = getattr(self.embedding_client, "dimensions", self.dimensions)
+        fingerprint = self._vector_sync_fingerprint(
+            embeddable,
+            collection=collection,
+            embedding_model=getattr(self.embedding_client, "model", ""),
+            dimensions=dimensions,
+        )
+        meta_key = f"qdrant_sync:{source_type}:{collection}:{dimensions}"
+        if self._meta_get(meta_key) == fingerprint:
+            return
+
+        if self._sync_vector_store(source_type, embeddable):
+            self._meta_set(meta_key, fingerprint)
+
+    def _list_embeddable_chunks(self, source_type: str) -> list[IndexedChunk]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source_type, path, start_line, end_line, kind, text, symbols,
+                       title, url, query, fetched_at, mtime, content_hash
+                FROM chunks
+                WHERE source_type = ? AND COALESCE(skip_embedding, 0) = 0
+                ORDER BY path, start_line, end_line, kind
+                """,
+                (source_type,),
+            ).fetchall()
+        return [chunk_from_row(row) for row in rows]
+
+    def _vector_sync_fingerprint(
+        self,
+        chunks: list[IndexedChunk],
+        *,
+        collection: str,
+        embedding_model: str,
+        dimensions: int,
+    ) -> str:
+        payload = {
+            "collection": collection,
+            "embedding_model": embedding_model,
+            "dimensions": dimensions,
+            "chunks": [
+                [
+                    chunk.source_type,
+                    chunk.path,
+                    int(chunk.start_line),
+                    int(chunk.end_line),
+                    chunk.kind,
+                    chunk.content_hash,
+                ]
+                for chunk in chunks
+            ],
+        }
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _meta_get(self, key: str) -> str:
+        self._ensure_schema()
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return str(row[0]) if row else ""
+
+    def _meta_set(self, key: str, value: str) -> None:
+        self._ensure_schema()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
+                (key, value),
+            )
+
+    def _sync_vector_store(self, source_type: str, chunks: list[IndexedChunk]) -> bool:
+        """Best-effort dense index sync for newly replaced chunks."""
+        if not self.embedding_client or not self.vector_store or not chunks:
+            return False
+
+        embeddable = [chunk for chunk in chunks if not getattr(chunk, "skip_embedding", False)]
+        if not embeddable:
+            return True
+
+        try:
+            vectors = self._run_async_blocking(
+                self.embedding_client.embed_texts([chunk.text for chunk in embeddable])
+            )
+            if len(vectors) != len(embeddable) or any(vector is None for vector in vectors):
+                logger.warning(
+                    "Qdrant dense sync incomplete source_type=%s chunks=%s vectors=%s",
+                    source_type,
+                    len(embeddable),
+                    len(vectors),
+                )
+                return False
+            upserted = self.vector_store.upsert_chunks(
+                source_type=source_type,
+                chunks=embeddable,
+                vectors=vectors,
+            )
+            if upserted:
+                logger.debug(
+                    "Qdrant dense sync source_type=%s chunks=%s upserted=%s",
+                    source_type,
+                    len(embeddable),
+                    upserted,
+                )
+            return upserted == len(embeddable)
+        except RuntimeError as exc:
+            logger.warning(
+                "Qdrant dense sync skipped source_type=%s reason=%s",
+                source_type,
+                exc,
+            )
+            return False
+        except Exception as exc:
+            logger.warning(
+                "Qdrant dense sync fallback source_type=%s reason=%s",
+                source_type,
+                exc,
+            )
+            return False
+
+    @staticmethod
+    def _run_async_blocking(coro: Any) -> Any:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        if not loop.is_running():
+            return asyncio.run(coro)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            return executor.submit(lambda: asyncio.run(coro)).result()
+
     # ─── Hybrid merge ────────────────────────────────────────────────────
 
     def _merge_scores(
@@ -319,6 +557,7 @@ class RAGIndex:
         lexical: dict[ChunkKey, float],
         semantic: dict[ChunkKey, float],
         *,
+        source_type: str | None = None,
         semantic_weight: float,
     ) -> list[IndexedHit]:
         all_keys = set(lexical) | set(semantic)
@@ -329,7 +568,7 @@ class RAGIndex:
         max_sem = max(semantic.values()) if semantic else 1.0
 
         hits: list[IndexedHit] = []
-        chunks_by_key = self._load_chunks_by_keys(all_keys)
+        chunks_by_key = self._load_chunks_by_keys(all_keys, source_type=source_type)
 
         for key in all_keys:
             chunk = chunks_by_key.get(key)
@@ -552,6 +791,14 @@ class RAGIndex:
             return 0.0
 
     @staticmethod
+    def _current_file_mtimes(conn: sqlite3.Connection, source_type: str) -> dict[str, float]:
+        rows = conn.execute(
+            "SELECT path, MAX(mtime) FROM chunks WHERE source_type = ? GROUP BY path",
+            (source_type,),
+        ).fetchall()
+        return {str(row[0]): float(row[1]) for row in rows}
+
+    @staticmethod
     def _is_current(
         conn: sqlite3.Connection, source_type: str, path: str, content_hash: str, mtime: float
     ) -> bool:
@@ -621,6 +868,29 @@ class RAGIndex:
                 )
         if removed_keys and source_type in self._hnsw_indexes:
             self._hnsw_indexes[source_type].remove_keys(removed_keys)
+        if self.vector_store:
+            try:
+                keep_rows = conn.execute(
+                    "SELECT path, start_line, end_line, kind FROM chunks WHERE source_type = ?",
+                    (source_type,),
+                ).fetchall()
+                keep_ids = {
+                    stable_point_id(
+                        source_type,
+                        (str(row[0]), int(row[1]), int(row[2]), str(row[3])),
+                    )
+                    for row in keep_rows
+                }
+                self.vector_store.prune_missing(
+                    source_type=source_type,
+                    keep_point_ids=keep_ids,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Qdrant prune fallback source_type=%s reason=%s",
+                    source_type,
+                    exc,
+                )
 
 
 # ─── HNSW Handle ─────────────────────────────────────────────────────────────

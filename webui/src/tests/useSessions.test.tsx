@@ -92,7 +92,10 @@ describe("useSessions", () => {
       await result.current.deleteChat("websocket:chat-a");
     });
 
-    expect(api.deleteSession).toHaveBeenCalledWith("tok", "websocket:chat-a");
+    expect(api.deleteSession).toHaveBeenCalledWith(
+      expect.objectContaining({ token: "tok" }),
+      "websocket:chat-a",
+    );
     expect(result.current.sessions.map((s) => s.key)).toEqual(["websocket:chat-b"]);
   });
 
@@ -152,7 +155,11 @@ describe("useSessions", () => {
       wrapper: Wrapper,
     });
 
-    await waitFor(() => expect(api.listSessions).toHaveBeenCalledWith("tok-old"));
+    await waitFor(() =>
+      expect(api.listSessions).toHaveBeenCalledWith(
+        expect.objectContaining({ token: "tok-old" }),
+      ),
+    );
 
     token = "tok-new";
     rerender();
@@ -160,7 +167,9 @@ describe("useSessions", () => {
       await result.current.refresh();
     });
 
-    expect(api.listSessions).toHaveBeenLastCalledWith("tok-new");
+    expect(api.listSessions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ token: "tok-new" }),
+    );
   });
 
   it("passes through WebUI transcript user media as images and media", async () => {
@@ -226,6 +235,45 @@ describe("useSessions", () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.messages[0]?.createdAt).toBe(Date.parse("2026-06-10T06:30:00.000Z"));
+  });
+
+  it("passes refreshable auth when loading webui-thread history", async () => {
+    const refreshAuth = vi.fn().mockResolvedValue("tok-new");
+    vi.mocked(api.fetchWebuiThread).mockResolvedValue({
+      schemaVersion: 3,
+      messages: [
+        {
+          id: "u1",
+          role: "user",
+          content: "hello",
+          createdAt: 1,
+        },
+      ],
+    });
+
+    const Wrapper = ({ children }: { children: ReactNode }) => (
+      <ClientProvider
+        client={fakeClient() as unknown as import("@/lib/nanobot-client").NanobotClient}
+        token="tok-old"
+        refreshAuth={refreshAuth}
+      >
+        {children}
+      </ClientProvider>
+    );
+
+    const { result } = renderHook(() => useSessionHistory("websocket:chat-history"), {
+      wrapper: Wrapper,
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.messages[0]?.content).toBe("hello");
+    expect(api.fetchWebuiThread).toHaveBeenCalledWith(
+      expect.objectContaining({
+        token: "tok-old",
+        refreshAuth,
+      }),
+      "websocket:chat-history",
+    );
   });
 
   it("passes through assistant video media from transcript replay", async () => {

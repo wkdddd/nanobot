@@ -27,6 +27,27 @@ describe("MessageBubble", () => {
     expect(screen.queryByRole("button", { name: "Copy reply" })).not.toBeInTheDocument();
   });
 
+  it("renders a code review reference above user message text", () => {
+    const message: UIMessage = {
+      id: "u-review",
+      role: "user",
+      content: "please review",
+      createdAt: Date.now(),
+      review: {
+        mode: "deep",
+        target_type: "github",
+        target: "https://github.com/test/repo",
+      },
+    };
+
+    render(<MessageBubble message={message} />);
+
+    expect(screen.getByText("https://github.com/test/repo")).toBeInTheDocument();
+    expect(screen.getByText("GITHUB")).toBeInTheDocument();
+    expect(screen.getByText("DEEP")).toBeInTheDocument();
+    expect(screen.getByText("please review")).toBeInTheDocument();
+  });
+
   it("copies completed assistant replies from the action row", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -229,6 +250,34 @@ describe("MessageBubble", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("offers markdown download for completed code review reports", () => {
+    const createObjectURL = vi.fn(() => "blob:report");
+    const revokeObjectURL = vi.fn();
+    Object.defineProperty(URL, "createObjectURL", {
+      configurable: true,
+      value: createObjectURL,
+    });
+    Object.defineProperty(URL, "revokeObjectURL", {
+      configurable: true,
+      value: revokeObjectURL,
+    });
+    const click = vi.fn();
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(click);
+    const message: UIMessage = {
+      id: "a-report",
+      role: "assistant",
+      content: "## Code Review Report: demo\n\n### Findings\n- none",
+      createdAt: Date.now(),
+    };
+
+    render(<MessageBubble message={message} />);
+    fireEvent.click(screen.getByRole("button", { name: "Download Markdown" }));
+
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(click).toHaveBeenCalled();
+    clickSpy.mockRestore();
   });
   // ######
 

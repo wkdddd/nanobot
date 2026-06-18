@@ -18,12 +18,28 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(
+export interface ApiAuth {
+  token: string;
+  refreshAuth: () => Promise<string | null>;
+}
+
+export type ApiToken = string | ApiAuth;
+
+function authToken(auth: ApiToken): string {
+  return typeof auth === "string" ? auth : auth.token;
+}
+
+async function refreshedToken(auth: ApiToken): Promise<string | null> {
+  if (typeof auth === "string") return null;
+  return auth.refreshAuth();
+}
+
+async function fetchWithToken(
   url: string,
   token: string,
   init?: RequestInit,
-): Promise<T> {
-  const res = await fetch(url, {
+): Promise<Response> {
+  return fetch(url, {
     ...(init ?? {}),
     headers: {
       ...(init?.headers ?? {}),
@@ -31,6 +47,20 @@ async function request<T>(
     },
     credentials: "same-origin",
   });
+}
+
+async function request<T>(
+  url: string,
+  auth: ApiToken,
+  init?: RequestInit,
+): Promise<T> {
+  let res = await fetchWithToken(url, authToken(auth), init);
+  if (res.status === 401) {
+    const nextToken = await refreshedToken(auth);
+    if (nextToken) {
+      res = await fetchWithToken(url, nextToken, init);
+    }
+  }
   if (!res.ok) {
     throw new ApiError(res.status, `HTTP ${res.status}`);
   }
@@ -44,7 +74,7 @@ function splitKey(key: string): { channel: string; chatId: string } {
 }
 
 export async function listSessions(
-  token: string,
+  token: ApiToken,
   base: string = "",
 ): Promise<ChatSummary[]> {
   type Row = {
@@ -70,22 +100,25 @@ export async function listSessions(
 
 /** Disk-backed WebUI display thread snapshot (separate from agent session). */
 export async function fetchWebuiThread(
-  token: string,
+  token: ApiToken,
   key: string,
   base: string = "",
 ): Promise<WebuiThreadPersistedPayload | null> {
   const url = `${base}/api/sessions/${encodeURIComponent(key)}/webui-thread`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-    credentials: "same-origin",
-  });
+  let res = await fetchWithToken(url, authToken(token));
+  if (res.status === 401) {
+    const nextToken = await refreshedToken(token);
+    if (nextToken) {
+      res = await fetchWithToken(url, nextToken);
+    }
+  }
   if (res.status === 404) return null;
   if (!res.ok) throw new ApiError(res.status, `HTTP ${res.status}`);
   return (await res.json()) as WebuiThreadPersistedPayload;
 }
 
 export async function deleteSession(
-  token: string,
+  token: ApiToken,
   key: string,
   base: string = "",
 ): Promise<boolean> {
@@ -97,21 +130,21 @@ export async function deleteSession(
 }
 
 export async function fetchSettings(
-  token: string,
+  token: ApiToken,
   base: string = "",
 ): Promise<SettingsPayload> {
   return request<SettingsPayload>(`${base}/api/settings`, token);
 }
 
 export async function fetchUsage(
-  token: string,
+  token: ApiToken,
   base: string = "",
 ): Promise<UsagePayload> {
   return request<UsagePayload>(`${base}/api/usage`, token);
 }
 
 export async function listSlashCommands(
-  token: string,
+  token: ApiToken,
   base: string = "",
 ): Promise<SlashCommand[]> {
   type Row = {
@@ -134,7 +167,7 @@ export async function listSlashCommands(
 }
 
 export async function updateSettings(
-  token: string,
+  token: ApiToken,
   update: SettingsUpdate,
   base: string = "",
 ): Promise<SettingsPayload> {
@@ -145,7 +178,7 @@ export async function updateSettings(
 }
 
 export async function updateProviderSettings(
-  token: string,
+  token: ApiToken,
   update: ProviderSettingsUpdate,
   base: string = "",
 ): Promise<SettingsPayload> {
@@ -160,7 +193,7 @@ export async function updateProviderSettings(
 }
 
 export async function updateWebSearchSettings(
-  token: string,
+  token: ApiToken,
   update: WebSearchSettingsUpdate,
   base: string = "",
 ): Promise<SettingsPayload> {

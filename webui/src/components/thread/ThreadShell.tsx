@@ -14,7 +14,7 @@ import { ThreadComposer } from "@/components/thread/ThreadComposer";
 import { ThreadHeader } from "@/components/thread/ThreadHeader";
 import { StreamErrorNotice } from "@/components/thread/StreamErrorNotice";
 import { ThreadViewport } from "@/components/thread/ThreadViewport";
-import { useNanobotStream, type SendImage } from "@/hooks/useNanobotStream";
+import { useNanobotStream, type SendImage, type SendOptions } from "@/hooks/useNanobotStream";
 import { useSessionHistory } from "@/hooks/useSessions";
 import { listSlashCommands } from "@/lib/api";
 import type { ChatSummary, SlashCommand, UIMessage } from "@/lib/types";
@@ -59,6 +59,7 @@ const QUICK_ACTION_KEYS = [
 interface PendingFirstMessage {
   content: string;
   images?: SendImage[];
+  options?: SendOptions;
 }
 
 export function ThreadShell({
@@ -236,7 +237,7 @@ export function ThreadShell({
       setNewChatLongTaskEnabled(false);
     }
     setScrollToBottomSignal((value) => value + 1);
-    send(pending.content, pending.images);
+    send(pending.content, pending.images, pending.options);
     setBooting(false);
   }, [
     chatId,
@@ -265,10 +266,10 @@ export function ThreadShell({
   }, [token]);
 
   const handleWelcomeSend = useCallback(
-    async (content: string, images?: SendImage[]) => {
+    async (content: string, images?: SendImage[], options?: SendOptions) => {
       if (booting) return;
       setBooting(true);
-      pendingFirstRef.current = { content, images };
+      pendingFirstRef.current = { content, images, options };
       const newId = await onCreateChat?.();
       if (!newId) {
         pendingFirstRef.current = null;
@@ -279,9 +280,9 @@ export function ThreadShell({
   );
 
   const handleThreadSend = useCallback(
-    (content: string, images?: SendImage[]) => {
+    (content: string, images?: SendImage[], options?: SendOptions) => {
       setScrollToBottomSignal((value) => value + 1);
-      send(content, images);
+      send(content, images, options);
     },
     [send],
   );

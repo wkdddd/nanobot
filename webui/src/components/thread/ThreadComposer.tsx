@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
 } from "react";
 
 import { MarkdownText, preloadMarkdownText } from "@/components/MarkdownText";
@@ -16,6 +17,7 @@ import {
   ChevronDown,
   ChevronUp,
   CircleHelp,
+  Gauge,
   FileSearch,
   History,
   ImageIcon,
@@ -28,6 +30,7 @@ import {
   Square,
   SquarePen,
   Target,
+  Tag,
   Undo2,
   X,
   type LucideIcon,
@@ -42,8 +45,13 @@ import {
   MAX_IMAGES_PER_MESSAGE,
 } from "@/hooks/useAttachedImages";
 import { useClipboardAndDrop } from "@/hooks/useClipboardAndDrop";
-import type { SendImage } from "@/hooks/useNanobotStream";
-import type { SlashCommand, GoalStateWsPayload } from "@/lib/types";
+import type { SendImage, SendOptions } from "@/hooks/useNanobotStream";
+import type {
+  SlashCommand,
+  GoalStateWsPayload,
+  ReviewDepth,
+  ReviewTargetType,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 /** ``<input accept>``: aligned with the server's MIME whitelist. SVG is
@@ -57,7 +65,7 @@ function formatBytes(n: number): string {
 }
 
 interface ThreadComposerProps {
-  onSend: (content: string, images?: SendImage[]) => void;
+  onSend: (content: string, images?: SendImage[], options?: SendOptions) => void;
   disabled?: boolean;
   placeholder?: string;
   isStreaming?: boolean;
@@ -75,6 +83,30 @@ interface ThreadComposerProps {
   onReviewModeChange?: (enabled: boolean) => void;
   longTaskModeEnabled?: boolean;
   onLongTaskModeChange?: (enabled: boolean) => void;
+}
+
+const REVIEW_DEPTH_OPTIONS: ReviewDepth[] = ["quick", "full", "deep"];
+const REVIEW_TARGET_TYPE_OPTIONS: ReviewTargetType[] = ["github", "local"];
+
+function reviewDepthLabel(mode: ReviewDepth): string {
+  if (mode === "quick") return "Quick";
+  if (mode === "deep") return "Deep";
+  return "Full";
+}
+
+function ReviewFieldLabel({
+  icon: Icon,
+  children,
+}: {
+  icon: LucideIcon;
+  children: ReactNode;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold uppercase text-muted-foreground">
+      <Icon className="h-3.5 w-3.5 text-blue-600/75 dark:text-blue-300/80" aria-hidden />
+      <span>{children}</span>
+    </span>
+  );
 }
 
 const COMMAND_ICONS: Record<string, LucideIcon> = {
@@ -375,6 +407,9 @@ export function ThreadComposer({
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [slashMenuDismissed, setSlashMenuDismissed] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [reviewDepth, setReviewDepth] = useState<ReviewDepth>("full");
+  const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>("github");
+  const [reviewTarget, setReviewTarget] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -432,12 +467,22 @@ export function ThreadComposer({
     [images],
   );
   const hasErrors = images.some((img) => img.status === "error");
+  const reviewTargetTrimmed = reviewTarget.trim();
+  const hasReviewPayload = reviewModeEnabled && reviewTargetTrimmed.length > 0;
 
   const canSend =
     !disabled
     && !encoding
     && !hasErrors
-    && (value.trim().length > 0 || readyImages.length > 0);
+    && (value.trim().length > 0 || readyImages.length > 0 || hasReviewPayload);
+
+  useEffect(() => {
+    if (!reviewModeEnabled) {
+      setReviewDepth("full");
+      setReviewTargetType("github");
+      setReviewTarget("");
+    }
+  }, [reviewModeEnabled]);
 
   const slashQuery = useMemo(() => {
     if (disabled || slashMenuDismissed || !value.startsWith("/")) return null;
@@ -570,15 +615,41 @@ export function ThreadComposer({
             preview: { url: img.dataUrl, name: img.file.name },
           }))
         : undefined;
-    onSend(trimmed, payload);
+    const options: SendOptions | undefined = reviewModeEnabled
+      ? {
+          review: {
+            mode: reviewDepth,
+            target_type: reviewTargetType,
+            ...(reviewTargetTrimmed ? { target: reviewTargetTrimmed } : {}),
+          },
+        }
+      : undefined;
+    onSend(trimmed, payload, options);
     setValue("");
+    if (reviewModeEnabled) {
+      setReviewDepth("full");
+      setReviewTargetType("github");
+      setReviewTarget("");
+    }
     setInlineError(null);
     // Bubble owns the data URL copy; safe to revoke every staged blob
     // preview here without affecting the rendered message.
     clear();
     setSlashMenuDismissed(false);
     resizeTextarea();
-  }, [canSend, clear, onSend, readyImages, resizeTextarea, value]);
+  }, [
+    canSend,
+    clear,
+    onSend,
+    readyImages,
+    resizeTextarea,
+    reviewDepth,
+    reviewModeEnabled,
+    reviewTarget,
+    reviewTargetTrimmed,
+    reviewTargetType,
+    value,
+  ]);
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (showSlashMenu) {
@@ -656,7 +727,6 @@ export function ThreadComposer({
 
   const attachButtonDisabled = disabled || full;
   const showStopButton = isStreaming && !!onStop;
-  const showAssistanceModeGroup = !!(onReviewModeChange || onLongTaskModeChange);
   const reviewModeTitle = reviewModeEnabled ? "Disable review mode" : "Enable review mode";
   const longTaskModeTitle = longTaskModeEnabled ? "Disable long-task mode" : "Enable long-task mode";
 
@@ -682,6 +752,102 @@ export function ThreadComposer({
           onHover={setSelectedCommandIndex}
           onChoose={chooseSlashCommand}
         />
+      ) : null}
+      {reviewModeEnabled ? (
+        <div
+          className={cn(
+            "pointer-events-auto absolute bottom-full left-1/2 z-20 mb-2 w-[calc(100%-0.5rem)] -translate-x-1/2",
+            isHero ? "max-w-[58rem]" : "max-w-[49.5rem]",
+          )}
+        >
+          <div
+            className={cn(
+              "rounded-[16px] border border-blue-500/18 bg-card/95 px-3 py-2.5",
+              "shadow-[0_16px_42px_rgba(15,23,42,0.16)] backdrop-blur-md",
+              "dark:border-blue-300/18 dark:bg-card/94 dark:shadow-[0_18px_48px_rgba(0,0,0,0.45)]",
+            )}
+          >
+            <div className="flex flex-col gap-2.5 sm:flex-row sm:items-end">
+              <div className="grid gap-1.5">
+                <ReviewFieldLabel icon={Gauge}>
+                  {t("thread.composer.review.depth")}
+                </ReviewFieldLabel>
+                <div
+                  role="group"
+                  aria-label={t("thread.composer.review.depth")}
+                  className="inline-flex h-8 overflow-hidden rounded-full border border-border/60 bg-background/80 p-0.5"
+                >
+                  {REVIEW_DEPTH_OPTIONS.map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      disabled={disabled}
+                      aria-pressed={reviewDepth === mode}
+                      onClick={() => setReviewDepth(mode)}
+                      className={cn(
+                        "min-w-14 rounded-full px-2.5 text-[11.5px] font-medium transition-colors",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                        reviewDepth === mode
+                          ? "bg-blue-500/12 text-blue-700 dark:text-blue-300"
+                          : "text-muted-foreground hover:bg-muted/65 hover:text-foreground",
+                      )}
+                    >
+                      {reviewDepthLabel(mode)}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid gap-1.5">
+                <ReviewFieldLabel icon={Tag}>
+                  {t("thread.composer.review.targetType")}
+                </ReviewFieldLabel>
+                <div
+                  role="group"
+                  aria-label={t("thread.composer.review.targetType")}
+                  className="inline-flex h-8 overflow-hidden rounded-full border border-border/60 bg-background/80 p-0.5"
+                >
+                  {REVIEW_TARGET_TYPE_OPTIONS.map((targetType) => (
+                    <button
+                      key={targetType}
+                      type="button"
+                      disabled={disabled}
+                      aria-pressed={reviewTargetType === targetType}
+                      onClick={() => setReviewTargetType(targetType)}
+                      className={cn(
+                        "min-w-16 rounded-full px-2.5 font-mono text-[11.5px] font-medium transition-colors",
+                        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
+                        reviewTargetType === targetType
+                          ? "bg-blue-500/12 text-blue-700 dark:text-blue-300"
+                          : "text-muted-foreground hover:bg-muted/65 hover:text-foreground",
+                      )}
+                    >
+                      {targetType}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <label className="grid min-w-0 flex-1 gap-1.5">
+                <ReviewFieldLabel icon={Target}>
+                  {t("thread.composer.review.target")}
+                </ReviewFieldLabel>
+                <input
+                  type="text"
+                  value={reviewTarget}
+                  onChange={(e) => setReviewTarget(e.target.value)}
+                  disabled={disabled}
+                  aria-label={t("thread.composer.review.targetAria")}
+                  placeholder={t("thread.composer.review.targetPlaceholder")}
+                  className={cn(
+                    "h-8 min-w-0 rounded-full border border-border/60 bg-background/80 px-3 text-[12px]",
+                    "text-foreground placeholder:text-muted-foreground/58",
+                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    "disabled:cursor-not-allowed disabled:opacity-50",
+                  )}
+                />
+              </label>
+            </div>
+          </div>
+        </div>
       ) : null}
       <div
         className={cn(
@@ -826,63 +992,55 @@ export function ThreadComposer({
                 {t("permission.panelTitle")}
               </Button>
             ) : null}
-            {showAssistanceModeGroup ? (
-              <div
-                role="group"
-                aria-label={t("thread.composer.assistModeGroup", { defaultValue: "Assistance mode" })}
+            {onReviewModeChange ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={disabled}
+                aria-pressed={reviewModeEnabled}
+                aria-label={reviewModeTitle}
+                title={reviewModeTitle}
+                onClick={() => onReviewModeChange(!reviewModeEnabled)}
                 className={cn(
-                  "inline-flex shrink-0 items-center overflow-hidden rounded-full border border-border/55 bg-card px-0.5 font-medium",
-                  "shadow-[0_2px_8px_rgba(15,23,42,0.04)]",
+                  "rounded-full border border-border/55 px-2.5 font-medium shadow-[0_2px_8px_rgba(15,23,42,0.04)]",
                   isHero ? "h-9 text-[12px]" : "h-7.5 text-[10.5px]",
+                  reviewModeEnabled
+                    ? "border-blue-500/30 bg-blue-500/10 text-blue-700 hover:bg-blue-500/12 dark:text-blue-300"
+                    : "bg-card text-muted-foreground hover:bg-card hover:text-foreground",
                 )}
               >
-                {onReviewModeChange ? (
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    aria-pressed={reviewModeEnabled}
-                  aria-label={reviewModeTitle}
-                  title={reviewModeTitle}
-                  onClick={() => {
-                    const nextEnabled = !reviewModeEnabled;
-                    onReviewModeChange(nextEnabled);
-                  }}
-                    className={cn(
-                      "inline-flex h-[calc(100%-4px)] items-center justify-center gap-1.5 rounded-full px-3 font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-                      reviewModeEnabled
-                        ? "bg-blue-500/12 text-blue-700 shadow-[inset_0_0_0_1px_rgba(59,130,246,0.18)] dark:text-blue-300"
-                        : "text-muted-foreground hover:bg-muted/65 hover:text-foreground",
-                    )}
-                  >
-                    <FileSearch className={cn(isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
-                    <span>Review</span>
-                  </button>
-                ) : null}
-                {onLongTaskModeChange ? (
-                  <button
-                    type="button"
-                    disabled={disabled}
-                    aria-pressed={longTaskModeEnabled}
-                    aria-label={longTaskModeTitle}
-                    title={longTaskModeTitle}
-                    onClick={() => {
-                      onLongTaskModeChange(!longTaskModeEnabled);
-                    }}
-                    className={cn(
-                      "inline-flex h-[calc(100%-4px)] items-center justify-center gap-1.5 rounded-full px-3 font-medium transition-colors",
-                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50",
-                      longTaskModeEnabled
-                        ? "bg-amber-500/12 text-amber-700 shadow-[inset_0_0_0_1px_rgba(245,158,11,0.18)] dark:text-amber-300"
-                        : "text-muted-foreground hover:bg-muted/65 hover:text-foreground",
-                    )}
-                  >
-                    <Target className={cn(isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
-                    <span>Long Task</span>
-                  </button>
-                ) : null}
-              </div>
+                <FileSearch className={cn("mr-1.5", isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
+                <span>Review</span>
+              </Button>
             ) : null}
+            {onLongTaskModeChange ? (
+              <Button
+                type="button"
+                variant="ghost"
+                disabled={disabled}
+                aria-pressed={longTaskModeEnabled}
+                aria-label={longTaskModeTitle}
+                title={longTaskModeTitle}
+                onClick={() => onLongTaskModeChange(!longTaskModeEnabled)}
+                className={cn(
+                  "rounded-full border border-border/55 px-2.5 font-medium shadow-[0_2px_8px_rgba(15,23,42,0.04)]",
+                  isHero ? "h-9 text-[12px]" : "h-7.5 text-[10.5px]",
+                  longTaskModeEnabled
+                    ? "border-amber-500/30 bg-amber-500/10 text-amber-700 hover:bg-amber-500/12 dark:text-amber-300"
+                    : "bg-card text-muted-foreground hover:bg-card hover:text-foreground",
+                )}
+              >
+                <Target className={cn("mr-1.5", isHero ? "h-4 w-4" : "h-3.5 w-3.5")} />
+                <span>Long Task</span>
+              </Button>
+            ) : null}
+            {!isHero ? (
+              <span className="hidden select-none text-[10.5px] text-muted-foreground/60 sm:inline">
+                {t("thread.composer.sendHint")}
+              </span>
+            ) : null}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
             {modelLabel ? (
               <span
                 title={modelLabel}
@@ -901,38 +1059,32 @@ export function ThreadComposer({
                 <span className="truncate">{modelLabel}</span>
               </span>
             ) : null}
-            {!isHero ? (
-              <span className="hidden select-none text-[10.5px] text-muted-foreground/60 sm:inline">
-                {t("thread.composer.sendHint")}
-              </span>
-            ) : null}
+            <Button
+              type={showStopButton ? "button" : "submit"}
+              size="icon"
+              disabled={showStopButton ? disabled : !canSend}
+              aria-label={showStopButton ? t("thread.composer.stop") : t("thread.composer.send")}
+              onClick={showStopButton ? onStop : undefined}
+              className={cn(
+                "rounded-full transition-transform",
+                showStopButton
+                  ? "border border-border/70 bg-card text-foreground/85 shadow-[0_3px_10px_rgba(15,23,42,0.08)] hover:bg-muted/65 hover:text-foreground disabled:text-muted-foreground/50"
+                  : isHero
+                    ? "border border-foreground bg-foreground text-background shadow-[0_4px_12px_rgba(15,23,42,0.20)] hover:bg-foreground/90 disabled:border-foreground/35 disabled:bg-foreground/35 disabled:text-background/80"
+                    : "border border-foreground bg-foreground text-background shadow-[0_3px_10px_rgba(15,23,42,0.18)] hover:bg-foreground/90 disabled:border-foreground/35 disabled:bg-foreground/35 disabled:text-background/80",
+                isHero ? "" : "h-7.5 w-7.5",
+                (canSend || showStopButton) && "hover:scale-[1.03] active:scale-95",
+              )}
+            >
+              {showStopButton ? (
+                <Square className={cn("fill-current stroke-current", isHero ? "h-3 w-3" : "h-2.5 w-2.5")} />
+              ) : isStreaming ? (
+                <Loader2 className={cn(isHero ? "h-4.5 w-4.5" : "h-4 w-4", "animate-spin")} />
+              ) : (
+                <ArrowUp className={cn(isHero ? "h-4.5 w-4.5" : "h-4 w-4")} />
+              )}
+            </Button>
           </div>
-          <span className={cn(isHero ? "hidden" : "sm:hidden")} aria-hidden />
-          <Button
-            type={showStopButton ? "button" : "submit"}
-            size="icon"
-            disabled={showStopButton ? disabled : !canSend}
-            aria-label={showStopButton ? t("thread.composer.stop") : t("thread.composer.send")}
-            onClick={showStopButton ? onStop : undefined}
-            className={cn(
-              "rounded-full transition-transform",
-              showStopButton
-                ? "border border-border/70 bg-card text-foreground/85 shadow-[0_3px_10px_rgba(15,23,42,0.08)] hover:bg-muted/65 hover:text-foreground disabled:text-muted-foreground/50"
-                : isHero
-                  ? "border border-foreground bg-foreground text-background shadow-[0_4px_12px_rgba(15,23,42,0.20)] hover:bg-foreground/90 disabled:border-foreground/35 disabled:bg-foreground/35 disabled:text-background/80"
-                  : "border border-foreground bg-foreground text-background shadow-[0_3px_10px_rgba(15,23,42,0.18)] hover:bg-foreground/90 disabled:border-foreground/35 disabled:bg-foreground/35 disabled:text-background/80",
-              isHero ? "" : "h-7.5 w-7.5",
-              (canSend || showStopButton) && "hover:scale-[1.03] active:scale-95",
-            )}
-          >
-            {showStopButton ? (
-              <Square className={cn("fill-current stroke-current", isHero ? "h-3 w-3" : "h-2.5 w-2.5")} />
-            ) : isStreaming ? (
-              <Loader2 className={cn(isHero ? "h-4.5 w-4.5" : "h-4 w-4", "animate-spin")} />
-            ) : (
-              <ArrowUp className={cn(isHero ? "h-4.5 w-4.5" : "h-4 w-4")} />
-            )}
-          </Button>
         </div>
       </div>
     </form>

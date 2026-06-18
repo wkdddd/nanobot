@@ -31,6 +31,7 @@ type BootState =
       client: NanobotClient;
       token: string;
       modelName: string | null;
+      refreshAuth: () => Promise<string | null>;
     };
 
 const SIDEBAR_STORAGE_KEY = "nanobot-webui.sidebar";
@@ -106,6 +107,7 @@ function readSidebarOpen(): boolean {
 export default function App() {
   const { t } = useTranslation();
   const [state, setState] = useState<BootState>({ status: "loading" });
+  const authRefreshRef = useRef<Promise<string | null> | null>(null);
 
   const bootstrapWithSecret = useCallback(
     (secret: string) => {
@@ -118,20 +120,37 @@ export default function App() {
           if (secret) saveSecret(secret);
           const url = deriveWsUrl(boot.ws_path, boot.token);
           let client: NanobotClient;
+          const refreshAuth = async () => {
+            if (authRefreshRef.current) {
+              return authRefreshRef.current;
+            }
+            authRefreshRef.current = (async () => {
+              try {
+                const refreshed = await fetchBootstrap("", secret);
+                const refreshedUrl = deriveWsUrl(refreshed.ws_path, refreshed.token);
+                client.updateUrl(refreshedUrl);
+                setState((current) =>
+                  current.status === "ready" && current.client === client
+                    ? {
+                        ...current,
+                        token: refreshed.token,
+                        modelName: refreshed.model_name ?? current.modelName,
+                      }
+                    : current,
+                );
+                return refreshed.token;
+              } catch {
+                return null;
+              } finally {
+                authRefreshRef.current = null;
+              }
+            })();
+            return authRefreshRef.current;
+          };
           const reauth = async () => {
             try {
-              const refreshed = await fetchBootstrap("", secret);
-              const refreshedUrl = deriveWsUrl(refreshed.ws_path, refreshed.token);
-              setState((current) =>
-                current.status === "ready" && current.client === client
-                  ? {
-                      ...current,
-                      token: refreshed.token,
-                      modelName: refreshed.model_name ?? current.modelName,
-                    }
-                  : current,
-              );
-              return refreshedUrl;
+              const refreshedToken = await refreshAuth();
+              return refreshedToken ? deriveWsUrl(boot.ws_path, refreshedToken) : null;
             } catch {
               return null;
             }
@@ -146,6 +165,7 @@ export default function App() {
             client,
             token: boot.token,
             modelName: boot.model_name ?? null,
+            refreshAuth,
           });
         } catch (e) {
           if (cancelled) return;
@@ -225,6 +245,7 @@ export default function App() {
       client={state.client}
       token={state.token}
       modelName={state.modelName}
+      refreshAuth={state.refreshAuth}
     >
       <Shell onModelNameChange={handleModelNameChange} onLogout={handleLogout} />
     </ClientProvider>

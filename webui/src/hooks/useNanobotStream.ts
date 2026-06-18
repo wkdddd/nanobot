@@ -8,6 +8,7 @@ import type {
   InboundEvent,
   OutboundImageGeneration,
   OutboundMedia,
+  OutboundReviewContext,
   GoalStateWsPayload,
   PermissionRequest,
   UIImage,
@@ -202,6 +203,7 @@ export interface SendImage {
 
 export interface SendOptions {
   imageGeneration?: OutboundImageGeneration;
+  review?: OutboundReviewContext;
 }
 
 export function useNanobotStream(
@@ -614,9 +616,12 @@ export function useNanobotStream(
     (content: string, images?: SendImage[], options?: SendOptions) => {
       if (!chatId) return;
       const hasImages = !!images && images.length > 0;
+      const reviewTarget = options?.review?.target?.trim() ?? "";
+      const review = reviewTarget ? options?.review : undefined;
+      const hasReview = !!review;
       // Text is optional when images are attached — the agent will still see
       // the image blocks via ``media`` paths.
-      if (!hasImages && !content.trim()) return;
+      if (!hasImages && !hasReview && !content.trim()) return;
 
       const previews = hasImages ? images!.map((i) => i.preview) : undefined;
       setMessages((prev) => [
@@ -627,6 +632,7 @@ export function useNanobotStream(
           content,
           createdAt: Date.now(),
           ...(previews ? { images: previews } : {}),
+          ...(review ? { review } : {}),
         },
       ]);
       // Mark streaming immediately so the UI shows the loading indicator

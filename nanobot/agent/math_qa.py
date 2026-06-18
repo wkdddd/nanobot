@@ -398,7 +398,7 @@ class MathKnowledgeBase:
         from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE
         from nanobot.rag import RAGIndex, create_embedding_client_from_config
         from nanobot.rag.qdrant_store import (
-            QdrantMathVectorStore,
+            QdrantVectorStore,
             chunk_key,
             stable_point_id,
         )
@@ -412,7 +412,7 @@ class MathKnowledgeBase:
             )
             return
 
-        vector_store = QdrantMathVectorStore.from_config(
+        vector_store = QdrantVectorStore.from_config(
             self.qdrant_config,
             dimensions=getattr(embedding_client, "dimensions", 1024),
         )
@@ -481,7 +481,7 @@ class MathKnowledgeBase:
     async def async_search(self, query: str, *, limit: int = 4) -> list[KnowledgeHit]:
         from nanobot.agent.tools._mathrag.math_knowledge_chunker import MATH_SOURCE_TYPE
         from nanobot.rag import RAGIndex, create_embedding_client_from_config
-        from nanobot.rag.qdrant_store import QdrantMathVectorStore
+        from nanobot.rag.qdrant_store import QdrantVectorStore
         from nanobot.rag.rerank import create_rerank_client_from_config
 
         trace_id = uuid.uuid4().hex[:8]
@@ -519,7 +519,7 @@ class MathKnowledgeBase:
         )
 
         dense_hits: list[IndexedHit] = []
-        vector_store = QdrantMathVectorStore.from_config(
+        vector_store = QdrantVectorStore.from_config(
             self.qdrant_config,
             dimensions=getattr(embedding_client, "dimensions", 1024) if embedding_client else 1024,
         )

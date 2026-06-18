@@ -256,7 +256,7 @@ describe("ThreadShell", () => {
     expect(screen.getByPlaceholderText("Ask anything...")).toBeInTheDocument();
   });
 
-  it("keeps review mode as a plain prompt mode without a separate target field", async () => {
+  it("sends review metadata when the review card is filled", async () => {
     const client = makeClient();
 
     render(
@@ -271,22 +271,32 @@ describe("ThreadShell", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Enable review mode" }));
-    expect(screen.queryByRole("textbox", { name: "Review target address" })).not.toBeInTheDocument();
-
+    expect(screen.getByRole("textbox", { name: "Review target address" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("textbox", { name: "Review target address" }), {
+      target: { value: "./repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deep" }));
+    fireEvent.click(screen.getByRole("button", { name: "local" }));
     expect(client.sendSetReviewMode).toHaveBeenCalledTimes(1);
 
-    fireEvent.change(screen.getByLabelText("Message input"), {
-      target: { value: "请审查 https://github.com/test/repo 的登录逻辑" },
-    });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 
     await waitFor(() =>
-      expect(client.sendMessage).toHaveBeenCalledWith(
-        "chat-review",
-        "请审查 https://github.com/test/repo 的登录逻辑",
+      expect(client.sendMessage).toHaveBeenCalledWith("chat-review",
+        "",
         undefined,
+        {
+          review: {
+            mode: "deep",
+            target_type: "local",
+            target: "./repo",
+          },
+        },
       ),
     );
+    expect(screen.getByText("./repo")).toBeInTheDocument();
+    expect(screen.getByText("LOCAL")).toBeInTheDocument();
+    expect(screen.getByText("DEEP")).toBeInTheDocument();
   });
 
   it("creates a chat only when the blank landing sends a first message", async () => {

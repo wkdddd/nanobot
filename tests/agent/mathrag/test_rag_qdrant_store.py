@@ -5,7 +5,7 @@ import types
 from dataclasses import dataclass
 
 from nanobot.rag.qdrant_store import (
-    QdrantMathVectorStore,
+    QdrantVectorStore,
     chunk_key,
     stable_point_id,
 )
@@ -66,18 +66,24 @@ def _install_fake_qdrant(monkeypatch):
 
 
 def test_qdrant_store_from_config_uses_defaults() -> None:
-    assert QdrantMathVectorStore.from_config(QdrantConfig()) is None
+    assert QdrantVectorStore.from_config(QdrantConfig()) is None
 
-    store = QdrantMathVectorStore.from_config(
-        QdrantConfig(enable=True, url="http://qdrant:6333", apiKey="sk-test"),
+    store = QdrantVectorStore.from_config(
+        QdrantConfig(
+            enable=True,
+            url="http://qdrant:6333",
+            apiKey="sk-test",
+            checkCompatibility=True,
+        ),
         dimensions=1024,
     )
 
     assert store is not None
     assert store.url == "http://qdrant:6333"
-    assert store.collection == "nanobot_math_chunks"
+    assert store.collection == "nanobot_rag_chunks"
     assert store.api_key == "sk-test"
     assert store.dimensions == 1024
+    assert store.check_compatibility is True
 
 
 def test_stable_point_id_and_chunk_key_are_deterministic() -> None:
@@ -98,7 +104,7 @@ def test_stable_point_id_and_chunk_key_are_deterministic() -> None:
 
 def test_qdrant_upsert_builds_payload_and_skips_bad_vectors(monkeypatch) -> None:
     holder = _install_fake_qdrant(monkeypatch)
-    store = QdrantMathVectorStore(
+    store = QdrantVectorStore(
         url="http://localhost:6333",
         collection="math",
         dimensions=3,
@@ -122,6 +128,7 @@ def test_qdrant_upsert_builds_payload_and_skips_bad_vectors(monkeypatch) -> None
     )
 
     client = holder["client"]
+    assert client.kwargs["check_compatibility"] is False
     assert count == 1
     assert client.upserts[0][0] == "math"
     point = client.upserts[0][1][0]

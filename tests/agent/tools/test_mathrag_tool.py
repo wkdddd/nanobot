@@ -8,7 +8,7 @@ import pytest
 
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.loader import ToolLoader
-from nanobot.agent.tools.mathrag import MathRAGTool
+from nanobot.agent.tools._mathrag.mathrag import MathRAGTool
 from nanobot.agent.tools.registry import ToolRegistry
 
 

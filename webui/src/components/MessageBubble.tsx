@@ -6,7 +6,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Check, ChevronRight, Copy, FileIcon, ImageIcon, PlaySquare, Sparkles, Wrench } from "lucide-react";
+import { Check, ChevronRight, Copy, Download, FileIcon, FileSearch, ImageIcon, PlaySquare, Sparkles, Wrench } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import { ImageLightbox } from "@/components/ImageLightbox";
@@ -61,6 +61,18 @@ export function MessageBubble({
     });
   }, [message.content]);
 
+  const onDownloadMarkdown = useCallback(() => {
+    const blob = new Blob([message.content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "code-review-report.md";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [message.content]);
+
   if (message.kind === "trace") {
     return <TraceGroup message={message} animClass={baseAnim} />;
   }
@@ -68,6 +80,9 @@ export function MessageBubble({
   if (message.role === "user") {
     const images = message.images ?? [];
     const media = message.media ?? [];
+    const review = message.review;
+    const reviewTarget = review?.target?.trim() ?? "";
+    const hasReview = reviewTarget.length > 0;
     const hasImages = images.length > 0;
     const hasMedia = media.length > 0;
     const hasText = message.content.trim().length > 0;
@@ -78,6 +93,7 @@ export function MessageBubble({
           baseAnim,
         )}
       >
+        {hasReview ? <UserReviewReference review={review} /> : null}
         {hasImages ? <UserImages images={images} align="right" /> : null}
         {!hasImages && hasMedia ? (
           <MessageMedia media={media} align="right" />
@@ -104,13 +120,14 @@ export function MessageBubble({
 
   const showAssistantActions = message.role === "assistant" && !message.isStreaming && !empty;
   const showCopyButton = showAssistantCopyAction && showAssistantActions;
+  const showMarkdownDownload = showAssistantActions && isCodeReviewMarkdownReport(message.content);
   const latencyMs = message.latencyMs;
   const showLatencyFooter =
     message.role === "assistant"
     && latencyMs != null
     && !message.isStreaming
     && (!empty || hasReasoning || media.length > 0);
-  const showAssistantFooterRow = showCopyButton || showLatencyFooter;
+  const showAssistantFooterRow = showCopyButton || showMarkdownDownload || showLatencyFooter;
   return (
     <div className={cn("w-full text-[15px]", baseAnim)} style={{ lineHeight: "var(--cjk-line-height)" }}>
       {hasReasoning ? (
@@ -123,33 +140,50 @@ export function MessageBubble({
           <MarkdownText>{message.content}</MarkdownText>
           {media.length > 0 ? <MessageMedia media={media} align="left" /> : null}
           {showAssistantFooterRow ? (
-            <div className="mt-2 flex min-h-8 flex-wrap items-center gap-x-2 gap-y-1 text-muted-foreground">
-              {showCopyButton ? (
+            <div className="mt-2 flex min-h-8 flex-wrap items-center justify-between gap-x-2 gap-y-1 text-muted-foreground">
+              <div className="flex min-w-0 items-center gap-x-2 gap-y-1">
+                {showCopyButton ? (
+                  <button
+                    type="button"
+                    onClick={onCopyAssistantReply}
+                    aria-label={copied ? t("message.copiedReply") : t("message.copyReply")}
+                    title={copied ? t("message.copiedReply") : t("message.copyReply")}
+                    className={cn(
+                      "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+                      "transition-colors hover:bg-muted/55 hover:text-foreground",
+                      "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                    )}
+                  >
+                    {copied ? (
+                      <Check className="h-4 w-4" aria-hidden />
+                    ) : (
+                      <Copy className="h-4 w-4" aria-hidden />
+                    )}
+                  </button>
+                ) : null}
+                {showLatencyFooter ? (
+                  <span
+                    className="text-[11px] leading-none text-muted-foreground/70 tabular-nums"
+                    title={t("message.turnLatencyTitle")}
+                  >
+                    {formatTurnLatency(latencyMs)}
+                  </span>
+                ) : null}
+              </div>
+              {showMarkdownDownload ? (
                 <button
                   type="button"
-                  onClick={onCopyAssistantReply}
-                  aria-label={copied ? t("message.copiedReply") : t("message.copyReply")}
-                  title={copied ? t("message.copiedReply") : t("message.copyReply")}
+                  onClick={onDownloadMarkdown}
+                  aria-label={t("message.downloadMarkdown")}
+                  title={t("message.downloadMarkdown")}
                   className={cn(
-                    "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+                    "ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
                     "transition-colors hover:bg-muted/55 hover:text-foreground",
                     "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   )}
                 >
-                  {copied ? (
-                    <Check className="h-4 w-4" aria-hidden />
-                  ) : (
-                    <Copy className="h-4 w-4" aria-hidden />
-                  )}
+                  <Download className="h-4 w-4" aria-hidden />
                 </button>
-              ) : null}
-              {showLatencyFooter ? (
-                <span
-                  className="text-[11px] leading-none text-muted-foreground/70 tabular-nums"
-                  title={t("message.turnLatencyTitle")}
-                >
-                  {formatTurnLatency(latencyMs)}
-                </span>
               ) : null}
             </div>
           ) : null}
@@ -157,6 +191,47 @@ export function MessageBubble({
       )}
     </div>
   );
+}
+
+function UserReviewReference({
+  review,
+}: {
+  review: NonNullable<UIMessage["review"]>;
+}) {
+  const target = review.target?.trim() ?? "";
+  if (!target) return null;
+  const mode = review.mode ? review.mode.toUpperCase() : "";
+  const targetType = review.target_type ? review.target_type.toUpperCase() : "";
+  return (
+    <div className="ml-auto flex max-w-[min(85%,36rem)] justify-end">
+      <div
+        className={cn(
+          "inline-flex min-w-0 items-center gap-2 rounded-full border px-3 py-1.5",
+          "border-blue-500/15 bg-blue-500/[0.06] text-[11.5px] text-blue-800",
+          "dark:text-blue-200",
+        )}
+      >
+        <FileSearch className="h-3.5 w-3.5 flex-none text-blue-600/80 dark:text-blue-300/85" aria-hidden />
+        <span className="truncate font-medium">{target}</span>
+        {targetType ? (
+          <span className="shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700 dark:text-blue-200">
+            {targetType}
+          </span>
+        ) : null}
+        {mode ? (
+          <span className="shrink-0 rounded-full bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-blue-700 dark:text-blue-200">
+            {mode}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function isCodeReviewMarkdownReport(content: string): boolean {
+  const text = content.trim();
+  return /^#{1,3}\s+Code Review Report\b/im.test(text)
+    || /^#{1,3}\s+Code Review RAG (Context |Evaluation )?Report\b/im.test(text);
 }
 
 function MessageMedia({

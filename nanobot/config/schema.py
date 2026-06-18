@@ -248,7 +248,7 @@ class RerankConfig(Base):
 
 
 class QdrantConfig(Base):
-    """Qdrant vector store configuration for MathQA RAG."""
+    """Qdrant vector store configuration for RAG."""
 
     enable: bool = False
     url: str = "http://localhost:6333"
@@ -257,8 +257,13 @@ class QdrantConfig(Base):
         validation_alias=AliasChoices("apiKey", "api_key"),
         serialization_alias="apiKey",
     )
-    collection: str = "nanobot_math_chunks"
+    collection: str = "nanobot_rag_chunks"
     timeout: float = 30.0
+    check_compatibility: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("checkCompatibility", "check_compatibility"),
+        serialization_alias="checkCompatibility",
+    )
 
 
 class ApiConfig(Base):
@@ -331,6 +336,12 @@ class ReviewConfig(Base):
     max_subagents: int = Field(default=4, ge=1, le=10)
     output_format: str = "markdown"
     fail_on: str | None = None
+    rag_enable: bool = True
+    rag_max_results: int = Field(default=8, ge=1, le=30)
+    rag_budget_chars: int = Field(default=16000, ge=1000, le=100000)
+    rag_use_chonkie: bool = True
+    rag_use_rrf: bool = True
+    github_diff_enable: bool = True
 
 
 class Config(BaseSettings):

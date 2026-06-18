@@ -246,7 +246,7 @@ describe("ThreadComposer", () => {
     expect(onSessionApprovalChange).toHaveBeenCalledWith(true);
   });
 
-  it("groups assistance modes in one control", () => {
+  it("renders review and long-task as separate mode buttons", () => {
     const onReviewModeChange = vi.fn();
     const onLongTaskModeChange = vi.fn();
     render(
@@ -260,9 +260,9 @@ describe("ThreadComposer", () => {
       />,
     );
 
-    const group = screen.getByRole("group", { name: "Assistance mode" });
-    expect(group).toContainElement(screen.getByRole("button", { name: "Disable review mode" }));
-    expect(group).toContainElement(screen.getByRole("button", { name: "Enable long-task mode" }));
+    expect(screen.queryByRole("group", { name: "Assistance mode" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Disable review mode" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Enable long-task mode" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Enable long-task mode" }));
 
@@ -270,18 +270,46 @@ describe("ThreadComposer", () => {
     expect(onLongTaskModeChange).toHaveBeenCalledWith(true);
   });
 
-  it("does not show a separate review target field", () => {
+  it("shows a review reference card and sends structured review metadata", () => {
+    const onSend = vi.fn();
     render(
       <ThreadComposer
-        onSend={vi.fn()}
+        onSend={onSend}
         placeholder="Type your message..."
         reviewModeEnabled
         onReviewModeChange={vi.fn()}
       />,
     );
 
-    expect(screen.queryByRole("textbox", { name: "Review target address" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("group", { name: "Review target type" })).not.toBeInTheDocument();
+    expect(screen.getByText("Review depth")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Review depth" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Target type" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Review target address" })).toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("textbox", { name: "Review target address" })
+        .compareDocumentPosition(screen.getByLabelText("Message input"))
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Review target address" }), {
+      target: { value: "https://github.com/test/repo" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Deep" }));
+    fireEvent.click(screen.getByRole("button", { name: "local" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(onSend).toHaveBeenCalledWith(
+      "",
+      undefined,
+      {
+        review: {
+          mode: "deep",
+          target_type: "local",
+          target: "https://github.com/test/repo",
+        },
+      },
+    );
   });
 
 });

@@ -51,7 +51,7 @@ class EmbeddingClient:
     def __init__(
         self,
         api_key: str,
-        model: str = "text-embedding-v3",
+        model: str = "text-embedding-v1",
         base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1",
         dimensions: int = 1024,
         batch_size: int = 25,

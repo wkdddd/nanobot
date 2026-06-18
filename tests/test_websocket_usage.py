@@ -161,6 +161,7 @@ async def test_websocket_message_can_carry_review_target(tmp_path, monkeypatch) 
             "content": "请审查登录逻辑",
             "review_target": "https://github.com/test/repo",
             "review_target_type": "github",
+            "review_mode_variant": "deep",
             "webui": True,
         },
     )
@@ -169,6 +170,47 @@ async def test_websocket_message_can_carry_review_target(tmp_path, monkeypatch) 
     assert session.metadata["review_mode"] is True
     assert session.metadata["review_target"] == "https://github.com/test/repo"
     assert session.metadata["review_target_type"] == "github"
+    assert session.metadata["review_mode_variant"] == "deep"
     assert handled[0]["content"] == "请审查登录逻辑"
     assert handled[0]["metadata"]["review_target"] == "https://github.com/test/repo"
     assert handled[0]["metadata"]["review_target_type"] == "github"
+    assert handled[0]["metadata"]["review_mode_variant"] == "deep"
+
+
+@pytest.mark.asyncio
+async def test_websocket_message_can_send_review_metadata_without_content(tmp_path, monkeypatch) -> None:
+    manager = SessionManager(tmp_path)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    conn = _FakeConnection()
+    handled: list[dict] = []
+
+    async def fake_handle_message(**kwargs):
+        handled.append(kwargs)
+
+    monkeypatch.setattr(channel, "_handle_message", fake_handle_message)
+
+    await channel._dispatch_envelope(
+        conn,
+        "client",
+        {
+            "type": "message",
+            "chat_id": "chat",
+            "content": "",
+            "review_target": "./repo",
+            "review_target_type": "local",
+            "review_mode_variant": "full",
+            "webui": True,
+        },
+    )
+
+    session = manager.get_or_create("websocket:chat")
+    assert session.metadata["review_mode"] is True
+    assert session.metadata["review_target"] == "./repo"
+    assert session.metadata["review_target_type"] == "local"
+    assert session.metadata["review_mode_variant"] == "full"
+    assert handled[0]["content"] == ""
+    assert handled[0]["metadata"]["review_target"] == "./repo"

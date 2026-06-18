@@ -49,6 +49,8 @@ export interface UIMessage {
   traces?: string[];
   /** User turn: optimistic blob URLs for preview. Replay: placeholder chips. */
   images?: UIImage[];
+  /** User turn: structured code-review reference shown above the bubble. */
+  review?: OutboundReviewContext;
   /** Signed or local UI-renderable media attachments. */
   media?: UIMediaAttachment[];
   /** Assistant turn: accumulated model reasoning / thinking text. Built up
@@ -303,6 +305,15 @@ export interface OutboundImageGeneration {
   aspect_ratio?: string | null;
 }
 
+export type ReviewDepth = "quick" | "full" | "deep";
+export type ReviewTargetType = "github" | "local";
+
+export interface OutboundReviewContext {
+  mode?: ReviewDepth;
+  target_type?: ReviewTargetType;
+  target?: string;
+}
+
 /** Response shape for ``GET .../webui-thread`` (server-built transcript replay). */
 export interface WebuiThreadPersistedPayload {
   schemaVersion: number;
@@ -330,6 +341,9 @@ export type Outbound =
       content: string;
       media?: OutboundMedia[];
       image_generation?: OutboundImageGeneration;
+      review_mode_variant?: ReviewDepth;
+      review_target?: string;
+      review_target_type?: ReviewTargetType;
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;
