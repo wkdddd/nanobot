@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from nanobot.agent.loop import AgentLoop
 from nanobot.agent.review import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
@@ -12,11 +13,9 @@ from nanobot.agent.review import (
     Finding,
     ReviewReport,
     build_code_review_context,
-    build_review_prompt,
     build_review_plan,
     normalize_focus,
 )
-from nanobot.agent.loop import AgentLoop
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
 
@@ -54,14 +53,11 @@ def test_review_role_sets() -> None:
     assert len(ALL_REVIEW_ROLES) == 7
 
 
-def test_build_review_prompt_quick_mode_caps_subagents() -> None:
-    roles, _ = normalize_focus(None)
-    prompt = build_review_prompt(
-        target_url="https://github.com/test/repo",
-        target_name="test/repo",
-        roles=roles,
+def test_build_code_review_context_quick_mode_caps_subagents() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
+        focus="security,tests",
         max_subagents=6,
-        forced=True,
         mode="quick",
     )
 
@@ -70,14 +66,10 @@ def test_build_review_prompt_quick_mode_caps_subagents() -> None:
     assert "up to 2 total" in prompt
 
 
-def test_build_review_prompt_deep_mode_mentions_thorough() -> None:
-    roles, _ = normalize_focus(None)
-    prompt = build_review_prompt(
-        target_url="https://github.com/test/repo",
-        target_name="test/repo",
-        roles=roles,
+def test_build_code_review_context_deep_mode_mentions_thorough() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
         max_subagents=4,
-        forced=False,
         mode="deep",
     )
 
@@ -85,14 +77,10 @@ def test_build_review_prompt_deep_mode_mentions_thorough() -> None:
     assert "thorough" in prompt.lower()
 
 
-def test_build_review_prompt_full_mode_mentions_full() -> None:
-    roles, _ = normalize_focus(None)
-    prompt = build_review_prompt(
-        target_url="https://github.com/test/repo",
-        target_name="test/repo",
-        roles=roles,
+def test_build_code_review_context_full_mode_mentions_full() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
         max_subagents=4,
-        forced=False,
         mode="full",
     )
 
@@ -100,28 +88,15 @@ def test_build_review_prompt_full_mode_mentions_full() -> None:
     assert "- Action: full_repo" in prompt
 
 
-def test_build_review_prompt_json_and_markdown_formats() -> None:
-    roles, _ = normalize_focus(None)
-    json_prompt = build_review_prompt(
-        target_url="https://github.com/test/repo",
-        target_name="test/repo",
-        roles=roles,
+def test_build_code_review_context_includes_subagent_candidate_schema() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
         max_subagents=4,
-        forced=False,
-        output_format="json",
     )
-    markdown_prompt = build_review_prompt(
-        target_url="https://github.com/test/repo",
-        target_name="test/repo",
-        roles=roles,
-        max_subagents=4,
-        forced=False,
-        output_format="markdown",
-    )
-
-    assert "JSON object" in json_prompt
-    assert '"findings"' in json_prompt
-    assert "## Code Review Report" in markdown_prompt
+    assert "Subagent Output Format" in prompt
+    assert '"severity"' in prompt
+    assert '"evidence"' in prompt
+    assert "JSON array" in prompt
 
 
 def test_build_code_review_context_extracts_github_target() -> None:
@@ -173,6 +148,20 @@ def test_build_code_review_context_uses_user_requirements() -> None:
     )
 
     assert "User requirements: 重点检查鉴权和回归风险" in prompt
+
+
+def test_dimension_contract_uses_forced_focus_dimensions() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
+        target_type="github",
+        focus="security,tests",
+    )
+
+    assert "Cover ONLY these dimensions" in prompt
+    assert "Security Reviewer" in prompt
+    assert "Test Reviewer" in prompt
+    assert "Architecture Reviewer" not in prompt
+    assert "Performance Reviewer" not in prompt
 
 
 def test_review_plan_resolves_pr_url_to_pr_diff() -> None:

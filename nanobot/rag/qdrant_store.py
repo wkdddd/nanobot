@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.rag.utils import ChunkKey, IndexedChunk
+from nanobot.rag.utils import ChunkKey, IndexedChunk, chunk_key
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,10 +21,6 @@ class QdrantVectorHit:
 def stable_point_id(source_type: str, key: ChunkKey) -> str:
     raw = f"{source_type}:{key[0]}:{key[1]}:{key[2]}:{key[3]}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"nanobot-rag:{raw}"))
-
-
-def chunk_key(chunk: IndexedChunk) -> ChunkKey:
-    return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
 
 
 class QdrantVectorStore:
@@ -53,9 +49,9 @@ class QdrantVectorStore:
         if not getattr(config, "enable", False):
             return None
         return cls(
-            url=str(getattr(config, "url", "http://localhost:6333")),
+            url=str(getattr(config, "url", "Url","http://localhost:6333")),
             collection=str(getattr(config, "collection", "nanobot_rag_chunks")),
-            api_key=str(getattr(config, "api_key", "") or ""),
+            api_key=str(getattr(config, "api_key", "apiKey") or ""),
             timeout=float(getattr(config, "timeout", 30.0) or 30.0),
             dimensions=dimensions,
             check_compatibility=bool(getattr(config, "check_compatibility", False)),

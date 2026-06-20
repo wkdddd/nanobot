@@ -15,7 +15,7 @@ from typing import Any, Iterable
 from loguru import logger
 
 from nanobot.rag.qdrant_store import stable_point_id
-from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row
+from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row, hit_key
 
 
 def _vec_norm(vec: list[float]) -> float:
@@ -172,14 +172,14 @@ class RAGIndex:
                 )
                 if len(qdrant_hits) < max_hits:
                     lexical_hits = self._fts5_search(source_type, query, limit=100)
-                    qdrant_keys = {self._hit_key(hit) for hit in qdrant_hits}
+                    qdrant_keys = {hit_key(hit) for hit in qdrant_hits}
                     supplemental = self._hits_from_scores(
                         lexical_hits,
                         source_type=source_type,
                         reason="bm25",
                     )
                     for hit in supplemental:
-                        if self._hit_key(hit) in qdrant_keys:
+                        if hit_key(hit) in qdrant_keys:
                             continue
                         qdrant_hits.append(hit)
                         if len(qdrant_hits) >= max_hits * 3:
@@ -405,11 +405,6 @@ class RAGIndex:
         ]
         hits.sort(key=lambda hit: -hit.score)
         return hits
-
-    @staticmethod
-    def _hit_key(hit: IndexedHit) -> ChunkKey:
-        chunk = hit.chunk
-        return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
 
     def _sync_vector_store_from_sqlite(self, source_type: str) -> None:
         if not self.embedding_client or not self.vector_store:

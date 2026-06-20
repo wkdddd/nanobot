@@ -246,8 +246,8 @@ function UserReviewReference({
 
 function isCodeReviewMarkdownReport(content: string): boolean {
   const text = content.trim();
-  return /^#{1,3}\s+Code Review Report\b/im.test(text)
-    || /^#{1,3}\s+Code Review RAG (Context |Evaluation )?Report\b/im.test(text);
+  return /^#{1,3}\s+Code Review (Report|RAG\b)/im.test(text)
+    || /^#{1,3}\s+代码审查报告/im.test(text);
 }
 
 function MessageMedia({

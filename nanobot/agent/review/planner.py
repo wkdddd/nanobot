@@ -14,12 +14,14 @@ from nanobot.agent.review.types import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
     ReviewAction,
-    ReviewMode,
+    ReviewDepth,
+    ReviewMetaKey,
     ReviewPlan,
     ReviewRole,
     ReviewTargetType,
     review_action_values,
 )
+from nanobot.agent.review.utils import parse_pr_target, parse_repo
 from nanobot.session.manager import Session
 
 _GITHUB_RE = re.compile(r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)", re.I)
@@ -78,7 +80,7 @@ def normalize_review_action(raw: str | None) -> ReviewAction:
     raise ValueError(f"Unknown review action '{value}'. Available action values: {allowed}")
 
 
-def normalize_mode(raw: Any) -> ReviewMode:
+def normalize_mode(raw: Any) -> ReviewDepth:
     value = str(raw or "full").strip().lower()
     if value in {"quick", "full", "deep"}:
         return value  # type: ignore[return-value]
@@ -125,26 +127,14 @@ def extract_review_target(text: str) -> tuple[str, str] | None:
     return None
 
 
-def parse_pr_target(target: str | None) -> tuple[str | None, int | None]:
-    if not target:
-        return None, None
-    match = _GITHUB_PR_RE.search(target.strip())
-    if not match:
-        return None, None
-    owner, repo, pr_number = match.group(1), match.group(2).removesuffix(".git"), int(match.group(3))
-    return f"{owner}/{repo}", pr_number
-
-
 def parse_repo_target(target: str | None) -> str | None:
     if not target:
         return None
-    match = _GITHUB_RE.search(target.strip())
-    if match:
-        return f"{match.group(1)}/{match.group(2).removesuffix('.git')}"
-    parts = target.strip().rstrip("/").split("/")
-    if len(parts) == 2 and all(parts):
-        return f"{parts[0]}/{parts[1].removesuffix('.git')}"
-    return None
+    try:
+        owner, repo = parse_repo(target)
+    except ValueError:
+        return None
+    return f"{owner}/{repo}"
 
 
 def _resolve_action(
@@ -166,8 +156,7 @@ def build_review_plan(
     target: str | None = None,
     user_content: str = "",
     focus: str | list[str] | None = None,
-    mode: Any = "full",
-    output_format: str = "markdown",
+    depth: Any = "full",
     max_subagents: Any = 4,
     target_type: str | None = None,
     action: str | None = None,
@@ -213,8 +202,6 @@ def build_review_plan(
     if target_repo is None and target_type_value == "github":
         target_repo = parse_repo_target(target)
 
-    if output_format not in {"markdown", "json"}:
-        output_format = "markdown"
     try:
         max_subagents_int = int(max_subagents)
     except (TypeError, ValueError):
@@ -226,10 +213,9 @@ def build_review_plan(
         target_name=target_name or target,
         target_type=target_type_value,
         action=resolved_action,
-        mode=normalize_mode(mode),
+        depth=normalize_mode(depth),
         roles=roles,
         forced_focus=forced,
-        output_format=output_format,
         max_subagents=max_subagents_int,
         user_requirements=user_content.strip(),
         target_repo=target_repo,
@@ -238,11 +224,13 @@ def build_review_plan(
         prefetch_summary=prefetch_summary,
     )
     logger.info(
-        "review.plan.done trace_id={} action={} target_type={} forced_focus={} paths_count={} elapsed_ms={:.1f}",
+        "review.plan.done trace_id={} action={} target_type={} forced_focus={} roles={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
         trace_id,
         plan.action.value,
         plan.target_type,
         plan.forced_focus,
+        plan.roles,
+        plan.user_requirements,
         len(plan.target_paths),
         (time.perf_counter() - started) * 1000,
     )
@@ -283,15 +271,14 @@ async def resolve_code_review_context(
 
     user_content = latest_user_text(initial_messages)
     plan = build_review_plan(
-        target=session_meta.get("review_target") if isinstance(session_meta.get("review_target"), str) else None,
+        target=session_meta.get(ReviewMetaKey.TARGET) if isinstance(session_meta.get(ReviewMetaKey.TARGET), str) else None,
         user_content=user_content,
-        focus=session_meta.get("review_focus"),
-        mode=session_meta.get("review_mode_variant") or session_meta.get("review_mode_name") or "full",
-        output_format=session_meta.get("review_output_format") or "markdown",
-        max_subagents=session_meta.get("review_max_subagents") or 4,
-        target_type=session_meta.get("review_target_type") if isinstance(session_meta.get("review_target_type"), str) else None,
-        action=session_meta.get("review_action") if isinstance(session_meta.get("review_action"), str) else None,
-        target_paths=session_meta.get("review_target_paths"),
+        focus=session_meta.get(ReviewMetaKey.FOCUS),
+        depth=session_meta.get(ReviewMetaKey.MODE_VARIANT) or session_meta.get("review_mode_name") or "full",
+        max_subagents=session_meta.get(ReviewMetaKey.MAX_SUBAGENTS) or 4,
+        target_type=session_meta.get(ReviewMetaKey.TARGET_TYPE) if isinstance(session_meta.get(ReviewMetaKey.TARGET_TYPE), str) else None,
+        action=session_meta.get(ReviewMetaKey.ACTION) if isinstance(session_meta.get(ReviewMetaKey.ACTION), str) else None,
+        target_paths=session_meta.get(ReviewMetaKey.TARGET_PATHS),
     )
     if plan is None:
         return build_review_fallback_prompt()
@@ -307,7 +294,6 @@ def build_code_review_context(
     user_content: str = "",
     focus: str | None = None,
     mode: str = "full",
-    output_format: str = "markdown",
     max_subagents: int = 4,
     target_type: str | None = None,
     action: str | None = None,
@@ -319,8 +305,7 @@ def build_code_review_context(
         target=target,
         user_content=user_content,
         focus=focus,
-        mode=mode,
-        output_format=output_format,
+        depth=mode,
         max_subagents=max_subagents,
         target_type=target_type,
         action=action,
@@ -328,36 +313,6 @@ def build_code_review_context(
     )
     if plan is None:
         return build_review_fallback_prompt()
-    return render_review_prompt(plan)
-
-
-def build_review_prompt(
-    *,
-    target_url: str,
-    target_name: str,
-    roles: list[ReviewRole],
-    max_subagents: int,
-    forced: bool,
-    mode: str = "full",
-    output_format: str = "markdown",
-    target_type: str | None = None,
-    action: str | None = None,
-) -> str:
-    from nanobot.agent.review.prompt import render_review_prompt
-
-    plan = ReviewPlan(
-        target=target_url,
-        target_name=target_name,
-        target_type=(normalize_review_target_type(target_type, target_url) or "auto"),  # type: ignore[arg-type]
-        action=normalize_review_action(action or ReviewAction.FULL_REPO.value),
-        mode=normalize_mode(mode),
-        roles=roles,
-        forced_focus=forced,
-        output_format=output_format if output_format in {"markdown", "json"} else "markdown",
-        max_subagents=min(max(int(max_subagents), 1), 10),
-        target_repo=parse_repo_target(target_url),
-        pr_number=parse_pr_target(target_url)[1],
-    )
     return render_review_prompt(plan)
 
 
@@ -369,12 +324,12 @@ def apply_review_metadata_from_message(
     if not isinstance(metadata, dict):
         return False
     keys = (
-        "review_target",
-        "review_target_type",
-        "review_mode_variant",
-        "review_action",
-        "review_focus",
-        "review_target_paths",
+        ReviewMetaKey.TARGET,
+        ReviewMetaKey.TARGET_TYPE,
+        ReviewMetaKey.MODE_VARIANT,
+        ReviewMetaKey.ACTION,
+        ReviewMetaKey.FOCUS,
+        ReviewMetaKey.TARGET_PATHS,
     )
     if not any(key in metadata for key in keys):
         return False
@@ -393,48 +348,48 @@ def apply_review_metadata_from_message(
             session.metadata.pop(key, None)
             changed = True
 
-    _set_meta("review_mode", True)
+    _set_meta(ReviewMetaKey.MODE, True)
 
-    raw_mode = metadata.get("review_mode_variant")
+    raw_mode = metadata.get(ReviewMetaKey.MODE_VARIANT)
     if isinstance(raw_mode, str):
         mode = raw_mode.strip().lower()
         if mode in {"quick", "full", "deep"}:
-            _set_meta("review_mode_variant", mode)
+            _set_meta(ReviewMetaKey.MODE_VARIANT, mode)
         else:
-            _pop_meta("review_mode_variant")
+            _pop_meta(ReviewMetaKey.MODE_VARIANT)
 
-    raw_target = metadata.get("review_target")
+    raw_target = metadata.get(ReviewMetaKey.TARGET)
     if isinstance(raw_target, str):
         target = raw_target.strip()
         if target:
-            _set_meta("review_target", target)
+            _set_meta(ReviewMetaKey.TARGET, target)
         else:
-            _pop_meta("review_target")
+            _pop_meta(ReviewMetaKey.TARGET)
 
-    raw_action = metadata.get("review_action")
+    raw_action = metadata.get(ReviewMetaKey.ACTION)
     if isinstance(raw_action, str):
         try:
-            _set_meta("review_action", normalize_review_action(raw_action).value)
+            _set_meta(ReviewMetaKey.ACTION, normalize_review_action(raw_action).value)
         except ValueError:
-            _pop_meta("review_action")
+            _pop_meta(ReviewMetaKey.ACTION)
 
-    raw_focus = metadata.get("review_focus")
+    raw_focus = metadata.get(ReviewMetaKey.FOCUS)
     if isinstance(raw_focus, (str, list)):
-        _set_meta("review_focus", raw_focus)
+        _set_meta(ReviewMetaKey.FOCUS, raw_focus)
 
-    paths = parse_target_paths(metadata.get("review_target_paths"))
+    paths = parse_target_paths(metadata.get(ReviewMetaKey.TARGET_PATHS))
     if paths:
-        _set_meta("review_target_paths", paths)
-    elif "review_target_paths" in metadata:
-        _pop_meta("review_target_paths")
+        _set_meta(ReviewMetaKey.TARGET_PATHS, paths)
+    elif ReviewMetaKey.TARGET_PATHS in metadata:
+        _pop_meta(ReviewMetaKey.TARGET_PATHS)
 
     target_type = normalize_review_target_type(
-        metadata.get("review_target_type") if isinstance(metadata.get("review_target_type"), str) else None,
-        session.metadata.get("review_target"),
+        metadata.get(ReviewMetaKey.TARGET_TYPE) if isinstance(metadata.get(ReviewMetaKey.TARGET_TYPE), str) else None,
+        session.metadata.get(ReviewMetaKey.TARGET),
     )
     if target_type:
-        _set_meta("review_target_type", target_type)
+        _set_meta(ReviewMetaKey.TARGET_TYPE, target_type)
     else:
-        _pop_meta("review_target_type")
+        _pop_meta(ReviewMetaKey.TARGET_TYPE)
 
     return changed

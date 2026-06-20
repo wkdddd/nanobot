@@ -44,6 +44,52 @@ class FailingTool(Tool):
         raise ValueError("boom")
 
 
+class SystemExitTool(Tool):
+    @property
+    def name(self) -> str:
+        return "system_exit_tool"
+
+    @property
+    def description(self) -> str:
+        return "Raises SystemExit."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: Any) -> Any:
+        raise SystemExit("stop")
+
+
+class ErrorTextTool(Tool):
+    @property
+    def name(self) -> str:
+        return "error_text_tool"
+
+    @property
+    def description(self) -> str:
+        return "Returns a legitimate result that begins with Error."
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {}}
+
+    async def execute(self, **kwargs: Any) -> Any:
+        return "Error handling best practices: keep the real result intact."
+
+
+def make_spec(tools: ToolRegistry | None = None, **overrides: Any) -> AgentRunSpec:
+    values: dict[str, Any] = {
+        "initial_messages": [],
+        "tools": tools or ToolRegistry(),
+        "model": "dummy",
+        "max_iterations": 1,
+        "max_tool_result_chars": 1000,
+    }
+    values.update(overrides)
+    return AgentRunSpec(**values)
+
+
 @pytest.mark.asyncio
 async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeypatch) -> None:
     log_calls: list[tuple[str, str]] = []
@@ -56,13 +102,7 @@ async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeyp
     tools = ToolRegistry()
     tools.register(FailingTool())
     runner = AgentRunner(DummyProvider())
-    spec = AgentRunSpec(
-        initial_messages=[],
-        tools=tools,
-        model="dummy",
-        max_iterations=1,
-        max_tool_result_chars=1000,
-    )
+    spec = make_spec(tools)
 
     result, event, error = await runner._run_tool(
         spec,
@@ -79,3 +119,55 @@ async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeyp
     }
     assert error is None
     assert log_calls == [("Tool 'fail_tool' execution failed for call_id=call_1", "call_1")]
+
+
+@pytest.mark.asyncio
+async def test_run_tool_does_not_catch_system_exit() -> None:
+    tools = ToolRegistry()
+    tools.register(SystemExitTool())
+    runner = AgentRunner(DummyProvider())
+
+    with pytest.raises(SystemExit):
+        await runner._run_tool(
+            make_spec(tools),
+            ToolCallRequest(id="call_1", name="system_exit_tool", arguments={}),
+            external_lookup_counts={},
+            workspace_violation_counts={},
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_tool_does_not_treat_error_word_as_error_status() -> None:
+    tools = ToolRegistry()
+    tools.register(ErrorTextTool())
+    runner = AgentRunner(DummyProvider())
+
+    result, event, error = await runner._run_tool(
+        make_spec(tools),
+        ToolCallRequest(id="call_1", name="error_text_tool", arguments={}),
+        external_lookup_counts={},
+        workspace_violation_counts={},
+    )
+
+    assert result == "Error handling best practices: keep the real result intact."
+    assert event["status"] == "ok"
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_drain_injections_falls_back_when_signature_is_unavailable(monkeypatch) -> None:
+    class OpaqueInjectionCallback:
+        async def __call__(self, *, limit: int) -> list[dict[str, str]]:
+            return [{"role": "user", "content": f"limit={limit}"}]
+
+    monkeypatch.setattr(
+        "nanobot.agent.runner.inspect.signature",
+        lambda _callback: (_ for _ in ()).throw(ValueError("opaque")),
+    )
+
+    runner = AgentRunner(DummyProvider())
+    injected = await runner._drain_injections(
+        make_spec(injection_callback=OpaqueInjectionCallback())
+    )
+
+    assert injected == [{"role": "user", "content": "limit=3"}]

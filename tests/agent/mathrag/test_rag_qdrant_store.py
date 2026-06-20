@@ -10,7 +10,7 @@ from nanobot.rag.qdrant_store import (
     stable_point_id,
 )
 from nanobot.rag.utils import IndexedChunk
-from nanobot.config.schema import QdrantConfig
+from nanobot.rag.config import QdrantConfig
 
 
 class _ModelFactory:

@@ -965,8 +965,7 @@ nanobot agent -m "/pairing approve ABCD-EFGH"
 
 
 ## Subagent Concurrency
-
-By default, nanobot only allows one spawned subagent at a time. When the limit is
+ When the limit is
 reached, the `spawn` tool returns an error so the agent can decide to wait or
 rearrange its work. This protects local LLM servers from loading multiple KV caches
 at once. If your provider can handle more parallel work, raise the limit:

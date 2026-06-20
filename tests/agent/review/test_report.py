@@ -1,0 +1,94 @@
+"""Tests for the fixed Markdown report renderer."""
+from __future__ import annotations
+
+import pytest
+
+from nanobot.agent.review.report import render_review_report
+from nanobot.agent.review.types import (
+    FindingVerdict,
+    ReviewDimensionResult,
+    ReviewFindingCandidate,
+    ReviewFindingVerdict,
+)
+
+
+def _candidate(severity="high", file="src/main.py", line=10, title="Bug", **kw):
+    defaults = {
+        "dimension": "security",
+        "evidence": "some code",
+        "impact": "Bad things",
+        "recommendation": "Fix it",
+    }
+    defaults.update(kw)
+    return ReviewFindingCandidate(
+        severity=severity, file=file, line=line, title=title, **defaults
+    )
+
+
+def _dim(name, accepted=None, uncertain=None, rejected=None):
+    return ReviewDimensionResult(
+        dimension=name,
+        status="validated",
+        accepted=accepted or [],
+        uncertain=uncertain or [],
+        rejected=rejected or [],
+    )
+
+
+class TestReportStructure:
+    def test_empty_findings(self):
+        report = render_review_report("myproject", [_dim("security")])
+        assert "## Code Review Report: myproject" in report
+        assert "No actionable issues found" in report
+
+    def test_findings_sorted_by_severity(self):
+        dims = [_dim("security", accepted=[
+            _candidate(severity="medium", title="Med issue"),
+            _candidate(severity="critical", title="Crit issue"),
+        ])]
+        report = render_review_report("repo", dims)
+        crit_pos = report.index("Critical")
+        med_pos = report.index("Medium")
+        assert crit_pos < med_pos
+
+    def test_checks_performed_listed(self):
+        dims = [_dim("security"), _dim("performance")]
+        report = render_review_report("repo", dims)
+        assert "- [x] security" in report
+        assert "- [x] performance" in report
+
+    def test_needs_confirmation_section(self):
+        uncertain = [(_candidate(title="Maybe bug"), ReviewFindingVerdict(
+            verdict=FindingVerdict.UNCERTAIN, reason="unclear evidence"
+        ))]
+        dims = [_dim("security", uncertain=uncertain)]
+        report = render_review_report("repo", dims)
+        assert "### Needs Confirmation" in report
+        assert "Maybe bug" in report
+
+    def test_rejected_summary_section(self):
+        rejected = [(_candidate(title="False positive"), ReviewFindingVerdict(
+            verdict=FindingVerdict.REJECTED, reason="file not found"
+        ))]
+        dims = [_dim("security", rejected=rejected)]
+        report = render_review_report("repo", dims)
+        assert "### Rejected/Skipped Summary" in report
+        assert "False positive" in report
+
+    def test_recommendations_from_critical_high(self):
+        dims = [_dim("security", accepted=[
+            _candidate(severity="critical", recommendation="Fix auth"),
+            _candidate(severity="low", title="Minor", recommendation="Whatever"),
+        ])]
+        report = render_review_report("repo", dims)
+        assert "Fix auth" in report
+
+    def test_severity_stats_in_summary(self):
+        dims = [_dim("security", accepted=[
+            _candidate(severity="critical"),
+            _candidate(severity="critical", title="Another", file="b.py"),
+            _candidate(severity="high", title="High one", file="c.py"),
+        ])]
+        report = render_review_report("repo", dims)
+        assert "2 critical" in report
+        assert "1 high" in report

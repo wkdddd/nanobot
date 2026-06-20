@@ -27,6 +27,7 @@ class ToolContext:
     workspace: str
     provider: Any | None = None
     model: str | None = None
+    rag_config: Any | None = None
     embedding_config: Any | None = None
     rerank_config: Any | None = None
     qdrant_config: Any | None = None

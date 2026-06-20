@@ -8,7 +8,7 @@ from typing import Any
 
 from loguru import logger
 
-_DASHSCOPE_MAX_INPUT_CHARS = 2048
+_DASHSCOPE_MAX_INPUT_CHARS = 1024
 
 
 def create_embedding_client_from_config(
@@ -28,11 +28,12 @@ def create_embedding_client_from_config(
     return EmbeddingClient(
         api_key=api_key,
         model=getattr(config, "model", "text-embedding-v3"),
-        base_url=_config_value(config, "base_url", "apiBase")
+        base_url=_config_value(config, "baseUrl", "apiBase")
         or "https://dashscope.aliyuncs.com/compatible-mode/v1",
         dimensions=getattr(config, "dimensions", 1024),
-        batch_size=getattr(config, "batch_size", 25),
-        max_input_chars=getattr(config, "max_input_chars", _DASHSCOPE_MAX_INPUT_CHARS),
+        batch_size=_config_value(config, "batch_size", "batchSize") or 25,
+        max_input_chars=_config_value(config, "max_input_chars", "maxInputChars")
+        or _DASHSCOPE_MAX_INPUT_CHARS,
     )
 
 

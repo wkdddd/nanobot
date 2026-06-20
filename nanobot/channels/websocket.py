@@ -96,7 +96,6 @@ def _clear_review_metadata(meta: dict[str, Any]) -> None:
         "review_target_paths",
         "review_mode_variant",
         "review_mode_name",
-        "review_output_format",
         "review_max_subagents",
     ):
         meta.pop(key, None)
@@ -1782,6 +1781,16 @@ class WebSocketChannel(BaseChannel):
                 metadata["review_focus"] = [str(item).strip() for item in raw_review_focus if str(item).strip()]
             if isinstance(raw_review_target_paths, list):
                 metadata["review_target_paths"] = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
+            # Normalize empty text for review-only turns so the model receives
+            # an explicit user intent rather than inheriting the previous turn.
+            if has_review_payload and not content.strip():
+                content = "审查"
+                logger.debug(
+                    "ws.review_default_prompt cid={} action={} focus_count={}",
+                    cid,
+                    raw_review_action,
+                    len(raw_review_focus) if isinstance(raw_review_focus, list) else 0,
+                )
             await self._handle_message(
                 sender_id=client_id,
                 chat_id=cid,

@@ -1,0 +1,742 @@
+"""Repository-oriented RAG retrieval for code review evidence."""
+
+from __future__ import annotations
+
+import asyncio
+import fnmatch
+import hashlib
+import json
+import os
+import re
+import time
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Iterable
+
+from loguru import logger
+
+from nanobot.rag.chunk_filter import should_skip_file_embedding
+from nanobot.rag.chunker import TreeSitterChunker
+from nanobot.rag.config import RAGRetrievalConfig
+from nanobot.rag.index import RAGIndex
+from nanobot.rag.runtime import RAGRuntime
+from nanobot.rag.utils import ChunkKey, IndexedChunk, IndexedHit, best_snippet, hit_key, query_terms
+
+SOURCE_TYPE = "code_review"
+REMOTE_SOURCE_TYPE = "code_review_github"
+
+DEFAULT_IGNORE_DIRS = {
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    "htmlcov",
+}
+
+DEFAULT_TEXT_EXTS = {
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".json",
+    ".md",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".css",
+    ".html",
+    ".txt",
+}
+
+REVIEW_RISK_TERMS = {
+    "security": {
+        "auth",
+        "token",
+        "password",
+        "secret",
+        "jwt",
+        "oauth",
+        "permission",
+        "csrf",
+        "cors",
+        "encrypt",
+        "decrypt",
+        "sql",
+        "query",
+        "exec",
+        "shell",
+        "subprocess",
+        "path",
+        "upload",
+        "download",
+        "ssrf",
+    },
+    "entrypoint": {
+        "main",
+        "app",
+        "server",
+        "router",
+        "handler",
+        "controller",
+        "middleware",
+        "api",
+    },
+    "config": {
+        "config",
+        "settings",
+        "env",
+        "dockerfile",
+        "compose",
+        "workflow",
+        "ci",
+        "pyproject",
+        "package",
+    },
+    "test": {"test", "spec", "fixture", "mock"},
+}
+
+DEFAULT_IGNORE_GLOBS = (
+    "*.pyc",
+    "*.pyo",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.webp",
+    "*.gif",
+    "*.ico",
+    "*.lock",
+)
+
+
+@dataclass(slots=True)
+class RepoReviewHit:
+    """单条命中的文件片段"""
+    path: str
+    score: float
+    reason: list[str] = field(default_factory=list)
+    symbols: list[str] = field(default_factory=list)
+    snippet: str = ""
+    start_line: int = 1
+    end_line: int = 1
+    kind: str = "text"
+
+
+@dataclass(slots=True)
+class RepositoryRAGOptions:
+    """检索参数"""
+    max_files: int = 2000
+    max_file_chars: int = 80_000
+    max_results: int = 8
+    snippet_lines: int = 8
+    chunk_lines: int = 80
+    chunk_overlap: int = 12
+    max_chunks_per_file: int = 40
+    include_tests: bool = True
+    enable_chonkie: bool = True
+    enable_rrf: bool = True
+    semantic_weight: float = 0.6
+    text_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_TEXT_EXTS))
+    ignore_dirs: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_DIRS))
+    ignore_globs: tuple[str, ...] = DEFAULT_IGNORE_GLOBS
+
+    @classmethod
+    def from_retrieval_config(cls, config: RAGRetrievalConfig) -> "RepositoryRAGOptions":
+        return cls(
+            max_files=config.max_files,
+            max_file_chars=config.max_file_chars,
+            max_results=config.max_results,
+            snippet_lines=config.snippet_lines,
+            chunk_lines=config.chunk_lines,
+            chunk_overlap=config.chunk_overlap,
+            max_chunks_per_file=config.max_chunks_per_file,
+            enable_chonkie=config.enable_chonkie,
+            enable_rrf=config.enable_rrf,
+            semantic_weight=config.semantic_weight,
+        )
+
+
+@dataclass(slots=True)
+class RepositoryRAGRequest:
+    """一次检索请求"""
+    source_type: str
+    review_query: str
+    max_results: int | None = None
+    files: Iterable[Path] | None = None
+    snapshot_files: dict[str, str] | None = None
+    snapshot_name: str | None = None
+    touched_lines: dict[str, list[int]] | None = None
+    include_tests: bool | None = None
+    related_tests: bool = True
+    trace_id: str = ""
+
+
+@dataclass(slots=True)
+class RepositoryRAGResult:
+    hits: list[RepoReviewHit]
+    context: str
+    cache_root: Path | None = None
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _safe_slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "repo"
+
+
+def rrf_merge(
+    ranked_lists: list[tuple[str, list[IndexedHit]]],
+    *,
+    limit: int,
+    k: int = 60,
+) -> list[IndexedHit]:
+    """Merge ranked retrieval lanes with reciprocal-rank fusion."""
+
+    scores: dict[ChunkKey, float] = {}
+    hits: dict[ChunkKey, IndexedHit] = {}
+    reasons: dict[ChunkKey, list[str]] = {}
+    for lane_name, lane_hits in ranked_lists:
+        for rank, hit in enumerate(lane_hits, start=1):
+            key = hit_key(hit)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            hits.setdefault(key, hit)
+            merged_reasons = reasons.setdefault(key, [])
+            if lane_name not in merged_reasons:
+                merged_reasons.append(lane_name)
+            for reason in hit.reason:
+                if reason not in merged_reasons:
+                    merged_reasons.append(reason)
+
+    merged: list[IndexedHit] = []
+    for key, score in scores.items():
+        original = hits[key]
+        merged.append(IndexedHit(chunk=original.chunk, score=score, reason=reasons.get(key, [])))
+    merged.sort(key=lambda hit: -hit.score)
+    return merged[:limit]
+
+
+def _path_role_tags(rel_path: str, text: str = "") -> list[str]:
+    path_low = rel_path.lower()
+    text_low = text[:10_000].lower()
+    tags: list[str] = []
+    for tag, terms in REVIEW_RISK_TERMS.items():
+        if any(term in path_low or term in text_low for term in terms):
+            tags.append(f"review:{tag}")
+    suffix = Path(rel_path).suffix.lower()
+    if suffix in {".json", ".toml", ".yaml", ".yml", ".ini", ".env"}:
+        tags.append("review:config")
+    if Path(rel_path).name.lower() in {"dockerfile", "makefile"}:
+        tags.append("review:config")
+    return list(dict.fromkeys(tags))
+
+
+class RepositoryRAGService:
+    """RAG service for repository evidence retrieval."""
+
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        runtime: RAGRuntime | None = None,
+        options: RepositoryRAGOptions | None = None,
+        source_type: str = SOURCE_TYPE,
+    ) -> None:
+        self.workspace = workspace.expanduser().resolve()
+        self.runtime = runtime or RAGRuntime()
+        self.options = options or RepositoryRAGOptions.from_retrieval_config(self.runtime.retrieval)
+        self.source_type = source_type
+        self._chunker = TreeSitterChunker()
+        self.index = RAGIndex(
+            self.workspace,
+            embedding_client=self.runtime.embedding_client,
+            rerank_client=self.runtime.rerank_client,
+            vector_store=self.runtime.vector_store,
+            dimensions=(
+                getattr(self.runtime.embedding_client, "dimensions", 1024)
+                if self.runtime.embedding_client
+                else 1024
+            ),
+        )
+
+    async def retrieve(self, request: RepositoryRAGRequest) -> RepositoryRAGResult:
+        trace_id = request.trace_id or "no-trace"
+        started = time.perf_counter()
+        if not request.review_query.strip():
+            logger.info(
+                "rag.review.done 🔎 trace_id={} source_type={} status=empty_query hits=0 context_chars={} elapsed_ms={:.1f}",
+                trace_id,
+                request.source_type,
+                len("No relevant repository review references found."),
+                (time.perf_counter() - started) * 1000,
+            )
+            return RepositoryRAGResult(hits=[], context="No relevant repository review references found.")
+
+        files = list(request.files or [])
+        cache_root: Path | None = None
+        if request.snapshot_files is not None:
+            cache_root = self.write_snapshot(request.snapshot_name or request.source_type, request.snapshot_files)
+            files = list(self.iter_candidate_files(cache_root))
+
+        logger.info(
+            "rag.review.start trace_id={} source_type={} files={} query_chars={} max_results={}",
+            trace_id,
+            request.source_type,
+            len(files),
+            len(request.review_query),
+            request.max_results or self.options.max_results,
+        )
+        await asyncio.to_thread(
+            self.sync_files,
+            source_type=request.source_type,
+            files=files,
+            trace_id=trace_id,
+        )
+        hits = await self.retrieve_hits(
+            source_type=request.source_type,
+            review_query=request.review_query,
+            max_results=request.max_results,
+            trace_id=trace_id,
+        )
+        if request.touched_lines:
+            touched_paths = set(request.touched_lines)
+            for hit in hits:
+                if hit.path in touched_paths:
+                    hit.reason = list(dict.fromkeys(["diff-touched", *hit.reason]))
+                    hit.score += 1.0
+            hits.sort(key=lambda hit: -hit.score)
+            hits = hits[: request.max_results or self.options.max_results]
+        context = self.format_review_block(
+            hits,
+            include_tests=request.include_tests,
+            related_tests=request.related_tests,
+        )
+        status = "success" if hits else "no_hits"
+        logger.info(
+            "rag.review.done {} trace_id={} source_type={} status={} hits={} context_chars={} elapsed_ms={:.1f}",
+            "✅" if hits else "🔎",
+            trace_id,
+            request.source_type,
+            status,
+            len(hits),
+            len(context),
+            (time.perf_counter() - started) * 1000,
+        )
+        return RepositoryRAGResult(hits=hits, context=context, cache_root=cache_root)
+
+    def sync_files(self, *, source_type: str, files: list[Path], trace_id: str) -> None:
+        start = time.perf_counter()
+        self.index.sync_files(
+            source_type=source_type,
+            files=files,
+            chunker=lambda path, text: self.chunk_file(path, text, source_type=source_type),
+            max_file_chars=self.options.max_file_chars,
+            skip_embed_filter=should_skip_file_embedding,
+        )
+        logger.info(
+            "rag.review.index.done trace_id={} source_type={} files={} chunks={} elapsed_ms={:.1f}",
+            trace_id,
+            source_type,
+            len(files),
+            self.index.count(source_type),
+            (time.perf_counter() - start) * 1000,
+        )
+
+    async def retrieve_hits(
+        self,
+        *,
+        source_type: str,
+        review_query: str,
+        max_results: int | None = None,
+        trace_id: str = "no-trace",
+    ) -> list[RepoReviewHit]:
+        start = time.perf_counter()
+        terms = query_terms(review_query)
+        if not terms:
+            logger.info(
+                "rag.review.search.done 🔎 trace_id={} source_type={} status=no_terms terms=0 hits=0 elapsed_ms={:.1f}",
+                trace_id,
+                source_type,
+                (time.perf_counter() - start) * 1000,
+            )
+            return []
+        limit = max_results or self.options.max_results
+        broad_hits = await self.index.search(
+            source_type=source_type,
+            query=review_query,
+            max_hits=max(limit * 3, 20),
+            semantic_weight=self.options.semantic_weight,
+        )
+        if self.options.enable_rrf:
+            lanes: list[tuple[str, list[IndexedHit]]] = [("broad", broad_hits)]
+            for lane_name, lane_query in self.review_lane_queries(review_query):
+                lane_hits = self.index.lexical_search(
+                    source_type,
+                    lane_query,
+                    limit=max(limit * 3, 20),
+                )
+                if lane_hits:
+                    lanes.append((lane_name, lane_hits))
+            raw_hits = rrf_merge(lanes, limit=limit)
+            logger.info(
+                "rag.review.rrf.done trace_id={} lanes={} hits={}",
+                trace_id,
+                len(lanes),
+                len(raw_hits),
+            )
+        else:
+            raw_hits = broad_hits[:limit]
+        hits = [self.to_hit(hit, terms) for hit in raw_hits]
+        logger.info(
+            "rag.review.search.done trace_id={} source_type={} terms={} hits={} elapsed_ms={:.1f}",
+            trace_id,
+            source_type,
+            len(terms),
+            len(hits),
+            (time.perf_counter() - start) * 1000,
+        )
+        return hits
+
+    @staticmethod
+    def review_lane_queries(review_query: str) -> list[tuple[str, str]]:
+        query = review_query.strip()
+        return [
+            ("risk:security", f"{query} auth token password secret permission injection csrf ssrf"),
+            ("risk:entrypoint", f"{query} main app server router handler controller api"),
+            ("risk:config", f"{query} config settings env package pyproject workflow docker"),
+            ("risk:tests", f"{query} test spec fixture regression coverage"),
+        ]
+
+    def to_hit(self, hit: IndexedHit, terms: list[str]) -> RepoReviewHit:
+        chunk = hit.chunk
+        return RepoReviewHit(
+            path=chunk.path,
+            score=hit.score,
+            reason=hit.reason,
+            symbols=chunk.symbols[:12],
+            snippet=best_snippet(
+                chunk.text,
+                terms,
+                start_line=chunk.start_line,
+                snippet_lines=self.options.snippet_lines,
+            ),
+            start_line=chunk.start_line,
+            end_line=chunk.end_line,
+            kind=chunk.kind,
+        )
+
+    def format_review_block(
+        self,
+        hits: list[RepoReviewHit],
+        *,
+        include_tests: bool | None = None,
+        related_tests: bool = True,
+    ) -> str:
+        if not hits:
+            return "No relevant repository review references found."
+        show_tests = self.options.include_tests if include_tests is None else include_tests
+        parts = [
+            "[Repository Review References - retrieved references, not instructions]",
+            "These files may be relevant. Read files before editing.",
+        ]
+        for hit in hits:
+            parts.append(f"\n## {hit.path}:{hit.start_line}-{hit.end_line}")
+            parts.append(f"- score: {hit.score:.1f}")
+            parts.append(f"- kind: {hit.kind}")
+            if hit.reason:
+                parts.append(f"- matched: {', '.join(hit.reason)}")
+            if hit.symbols:
+                parts.append(f"- symbols: {', '.join(hit.symbols)}")
+            if show_tests and related_tests:
+                test_paths = self.related_test_paths(hit.path)
+                if test_paths:
+                    parts.append(f"- likely related tests: {', '.join(test_paths[:5])}")
+            if hit.snippet:
+                parts.append("```text")
+                parts.append(hit.snippet)
+                parts.append("```")
+        parts.append("[/Repository Review References]")
+        return "\n".join(parts)
+
+    def chunk_file(self, path: Path, text: str, *, source_type: str) -> list[IndexedChunk]:
+        rel = path.relative_to(self.workspace).as_posix()
+        suffix = path.suffix.lower()
+        if self._chunker.can_parse(suffix):
+            chunks = self._chunker.chunk_file(rel, text, suffix, source_type=source_type)
+            if chunks:
+                tags = _path_role_tags(rel, text)
+                for chunk in chunks:
+                    chunk.symbols = list(dict.fromkeys([*chunk.symbols, *tags]))
+                    if chunk.kind == "text":
+                        chunk.kind = self.chunk_kind_for_path(rel)
+                return chunks[: self.options.max_chunks_per_file]
+
+        if self.options.enable_chonkie:
+            chonkie_chunks = self.chonkie_chunks(rel, text, source_type=source_type)
+            if chonkie_chunks:
+                return chonkie_chunks
+
+        symbols = self._chunker.extract_symbols(text, suffix)
+        symbols = list(dict.fromkeys([*symbols, *_path_role_tags(rel, text)]))
+        return self.line_window_chunks(rel, text, symbols=symbols, source_type=source_type)
+
+    def chonkie_chunks(self, rel_path: str, text: str, *, source_type: str) -> list[IndexedChunk]:
+        try:
+            from chonkie import RecursiveChunker  # type: ignore
+        except Exception as exc:
+            logger.debug("rag.review.chonkie_unavailable path={} reason={}", rel_path, exc)
+            return []
+        try:
+            chunker = RecursiveChunker(chunk_size=1800, min_characters_per_chunk=120)
+            raw_chunks = chunker.chunk(text)
+        except Exception as exc:
+            logger.warning("rag.review.chonkie_failed path={} reason={}", rel_path, exc)
+            return []
+
+        chunks: list[IndexedChunk] = []
+        cursor = 0
+        tags = _path_role_tags(rel_path, text)
+        for raw in raw_chunks[: self.options.max_chunks_per_file]:
+            chunk_text = getattr(raw, "text", str(raw)).strip()
+            if not chunk_text:
+                continue
+            start_at = text.find(chunk_text[:80], cursor)
+            if start_at < 0:
+                start_at = cursor
+            start_line = text.count("\n", 0, start_at) + 1
+            end_line = start_line + chunk_text.count("\n")
+            cursor = max(cursor, start_at + len(chunk_text))
+            chunks.append(
+                IndexedChunk(
+                    source_type=source_type,
+                    path=rel_path,
+                    start_line=start_line,
+                    end_line=max(start_line, end_line),
+                    text=chunk_text,
+                    symbols=tags[:12],
+                    kind=self.chunk_kind_for_path(rel_path),
+                )
+            )
+        return chunks
+
+    def line_window_chunks(
+        self,
+        rel_path: str,
+        text: str,
+        *,
+        symbols: list[str],
+        source_type: str,
+    ) -> list[IndexedChunk]:
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        if not lines:
+            return []
+        chunk_size = max(1, self.options.chunk_lines)
+        overlap = min(max(0, self.options.chunk_overlap), chunk_size - 1)
+        step = max(1, chunk_size - overlap)
+        chunks: list[IndexedChunk] = []
+        start_index = 0
+        while start_index < len(lines) and len(chunks) < self.options.max_chunks_per_file:
+            end_index = min(len(lines), start_index + chunk_size)
+            chunks.append(
+                IndexedChunk(
+                    source_type=source_type,
+                    path=rel_path,
+                    start_line=start_index + 1,
+                    end_line=end_index,
+                    text="\n".join(lines[start_index:end_index]),
+                    symbols=symbols[:12],
+                    kind=self.chunk_kind_for_path(rel_path),
+                )
+            )
+            if end_index >= len(lines):
+                break
+            start_index += step
+        return chunks
+
+    @staticmethod
+    def chunk_kind_for_path(rel_path: str) -> str:
+        suffix = Path(rel_path).suffix.lower()
+        if suffix in {".md", ".txt"}:
+            return "document"
+        if suffix in {".json", ".toml", ".yaml", ".yml"}:
+            return "config"
+        return "text"
+
+    def iter_candidate_files(self, root: Path | None = None) -> Iterable[Path]:
+        base = (root or self.workspace).expanduser().resolve()
+        count = 0
+        for dirpath, dirnames, filenames in os.walk(base):
+            current = Path(dirpath)
+            try:
+                rel_parts = current.relative_to(base).parts
+            except ValueError:
+                dirnames[:] = []
+                continue
+            if self.ignored_dir_parts(rel_parts):
+                dirnames[:] = []
+                continue
+            dirnames[:] = [
+                name
+                for name in dirnames
+                if not self.ignored_dir_parts((*rel_parts, name))
+            ]
+            for filename in filenames:
+                if count >= self.options.max_files:
+                    return
+                path = current / filename
+                if self.is_ignored(path, base=base):
+                    continue
+                if path.suffix.lower() not in self.options.text_extensions:
+                    continue
+                count += 1
+                yield path
+
+    def is_ignored(self, path: Path, *, base: Path | None = None) -> bool:
+        root = (base or self.workspace).resolve()
+        try:
+            rel_parts = path.relative_to(root).parts
+        except ValueError:
+            return True
+        if self.ignored_dir_parts(rel_parts):
+            return True
+        return any(fnmatch.fnmatch(path.name, pattern) for pattern in self.options.ignore_globs)
+
+    def ignored_dir_parts(self, rel_parts: tuple[str, ...]) -> bool:
+        if any(part in self.options.ignore_dirs for part in rel_parts):
+            return True
+        if rel_parts[:3] == ("references", "web", "pages"):
+            return True
+        return bool(rel_parts and rel_parts[0] == ".nanobot")
+
+    def related_test_paths(self, rel_path: str) -> list[str]:
+        source = PureRepoPath(rel_path)
+        found: list[str] = []
+        for candidate in source.test_candidates():
+            if (self.workspace / candidate).is_file():
+                found.append(candidate)
+        if found:
+            return found
+        stem_terms = [source.stem.lower()]
+        if source.stem.startswith("test_"):
+            stem_terms.append(source.stem[5:].lower())
+        tests_dir = self.workspace / "tests"
+        if not tests_dir.is_dir():
+            return []
+        matches = []
+        for path in tests_dir.rglob("*.py"):
+            rel = path.relative_to(self.workspace).as_posix()
+            name = path.stem.lower()
+            if any(term and term in name for term in stem_terms):
+                matches.append(rel)
+        return sorted(dict.fromkeys(matches))[:5]
+
+    def write_snapshot(self, snapshot_name: str, files: dict[str, str]) -> Path:
+        digest = hashlib.sha256(snapshot_name.encode("utf-8")).hexdigest()[:12]
+        cache_root = self.workspace / ".nanobot" / "review_github" / f"{_safe_slug(snapshot_name)}_{digest}"
+        start = time.perf_counter()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        manifest = {
+            "snapshot": snapshot_name,
+            "created_at": _now_iso(),
+            "files": sorted(files),
+        }
+        for rel, text in files.items():
+            target = (cache_root / rel).resolve()
+            try:
+                target.relative_to(cache_root)
+            except ValueError:
+                logger.warning("rag.review.snapshot.skip unsafe_path={}", rel)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8", newline="\n")
+        (cache_root / ".nanobot_snapshot.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+            newline="\n",
+        )
+        logger.info(
+            "rag.review.snapshot.done snapshot={} cache={} files={} elapsed_ms={:.1f}",
+            snapshot_name,
+            cache_root,
+            len(files),
+            (time.perf_counter() - start) * 1000,
+        )
+        return cache_root
+
+
+@dataclass(frozen=True, slots=True)
+class PureRepoPath:
+    rel_path: str
+
+    @property
+    def path(self) -> Path:
+        return Path(self.rel_path)
+
+    @property
+    def stem(self) -> str:
+        return self.path.stem
+
+    def test_candidates(self) -> list[str]:
+        path = self.path
+        if not path.suffix:
+            return []
+        stem = path.stem
+        suffix = path.suffix
+        candidates = [
+            Path("tests") / path.parent / f"test_{stem}{suffix}",
+            Path("tests") / path.parent / f"{stem}_test{suffix}",
+            Path("tests") / f"test_{stem}{suffix}",
+            Path("tests") / f"{stem}_test{suffix}",
+        ]
+        if stem.startswith("test_"):
+            base = stem[5:]
+            candidates.extend(
+                [
+                    Path("tests") / f"test_{base}{suffix}",
+                    Path("tests") / f"{base}_test{suffix}",
+                ]
+            )
+        return list(dict.fromkeys(candidate.as_posix() for candidate in candidates))
+
+
+class RepositoryRAGEvaluator:
+    """Evaluate repository RAG evidence coverage."""
+
+    def __init__(self, retrieve_context: Any) -> None:
+        self.retrieve_context = retrieve_context
+
+    async def evaluate(self, rows: list[dict[str, Any]], *, max_results: int, trace_id: str) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for i, row in enumerate(rows, start=1):
+            query = str(row.get("question") or row.get("review_query") or "")
+            if not query:
+                continue
+            context = await self.retrieve_context(row, query, max_results, trace_id)
+            expected_files = [str(x) for x in row.get("expected_files", [])]
+            expected_symbols = [str(x) for x in row.get("expected_symbols", [])]
+            file_hits = sum(1 for item in expected_files if item and item in context)
+            symbol_hits = sum(1 for item in expected_symbols if item and item in context)
+            denom = max(1, len(expected_files) + len(expected_symbols))
+            results.append(
+                {
+                    "id": row.get("id", i),
+                    "query": query,
+                    "expected_files": len(expected_files),
+                    "expected_symbols": len(expected_symbols),
+                    "file_hits": file_hits,
+                    "symbol_hits": symbol_hits,
+                    "evidence_coverage": round((file_hits + symbol_hits) / denom, 4),
+                    "context_chars": len(context),
+                }
+            )
+        logger.info("rag.review.evaluate.done trace_id={} samples={}", trace_id, len(results))
+        return results

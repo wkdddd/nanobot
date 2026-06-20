@@ -8,6 +8,7 @@ import pytest
 from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
 from nanobot.bus.queue import MessageBus
+from nanobot.config.schema import Config, _resolve_tool_config_refs
 from nanobot.providers.base import LLMProvider, LLMResponse
 from nanobot.session.manager import Session
 
@@ -60,6 +61,41 @@ class RunningSubagents:
 class FailingMCPStack:
     async def aclose(self) -> None:
         raise RuntimeError("disconnect failed")
+
+
+def _config(data: dict[str, Any]) -> Config:
+    _resolve_tool_config_refs()
+    return Config.model_validate(data)
+
+
+def test_agent_loop_applies_configured_subagent_concurrency(tmp_path) -> None:
+    config = _config(
+        {
+            "agents": {
+                "defaults": {
+                    "workspace": str(tmp_path),
+                    "maxConcurrentSubagents": 5,
+                }
+            }
+        }
+    )
+    loop = AgentLoop.from_config(config, bus=MessageBus(), provider=DummyProvider())
+
+    assert loop.subagents.max_concurrent_subagents == 5
+
+
+def test_config_accepts_subagent_concurrency_below_five() -> None:
+    config = _config(
+        {
+            "agents": {
+                "defaults": {
+                    "maxConcurrentSubagents": 2,
+                }
+            }
+        }
+    )
+
+    assert config.agents.defaults.max_concurrent_subagents == 2
 
 
 @pytest.mark.asyncio

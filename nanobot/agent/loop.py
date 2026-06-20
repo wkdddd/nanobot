@@ -17,13 +17,15 @@ from loguru import logger
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
+from nanobot.agent.memory import Consolidator, Dream
+from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.review import (
     apply_review_metadata_from_message,
     resolve_code_review_context,
 )
-from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
-from nanobot.agent.memory import Consolidator, Dream
-from nanobot.agent.progress_hook import AgentProgressHook
+from nanobot.agent.review.finalizer import ReviewFinalizer
+from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
@@ -68,6 +70,7 @@ class TurnState(Enum):
     COMMAND = auto()
     BUILD = auto()
     RUN = auto()
+    FINALIZE = auto()
     SAVE = auto()
     RESPOND = auto()
     DONE = auto()
@@ -150,7 +153,8 @@ class AgentLoop:
         (TurnState.COMMAND, "dispatch"): TurnState.BUILD,
         (TurnState.COMMAND, "shortcut"): TurnState.DONE,
         (TurnState.BUILD, "ok"): TurnState.RUN,
-        (TurnState.RUN, "ok"): TurnState.SAVE,
+        (TurnState.RUN, "ok"): TurnState.FINALIZE,
+        (TurnState.FINALIZE, "ok"): TurnState.SAVE,
         (TurnState.SAVE, "ok"): TurnState.RESPOND,
         (TurnState.RESPOND, "ok"): TurnState.DONE,
     }
@@ -167,6 +171,7 @@ class AgentLoop:
         max_tool_result_chars: int | None = None,
         provider_retry_mode: str = "standard",
         tool_hint_max_length: int | None = None,
+        max_concurrent_subagents: int | None = None,
         cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
@@ -183,6 +188,7 @@ class AgentLoop:
         embedding_config: Any | None = None,
         rerank_config: Any | None = None,
         qdrant_config: Any | None = None,
+        rag_config: Any | None = None,
         provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
         model_presets: dict[str, ModelPresetConfig] | None = None,
@@ -193,20 +199,16 @@ class AgentLoop:
         unsplash_provider_configs: dict[str, ProviderConfig] | None = None,
     ):
         from nanobot.config.schema import (
-            EmbeddingConfig,
-            RerankConfig,
             ToolsConfig,
             _resolve_tool_config_refs,
         )
+        from nanobot.rag.config import RAGConfig
 
         _resolve_tool_config_refs()
         _tc = tools_config or ToolsConfig()
-        _embedding_config = (
-            embedding_config if embedding_config is not None else EmbeddingConfig()
-        )
-        _rerank_config = (
-            rerank_config if rerank_config is not None else RerankConfig()
-        )
+        _rag_config = rag_config if rag_config is not None else RAGConfig()
+        _embedding_config = embedding_config if embedding_config is not None else _rag_config.embedding
+        _rerank_config = rerank_config if rerank_config is not None else _rag_config.rerank
         defaults = AgentDefaults()
         self.bus = bus
         self.channels_config = channels_config
@@ -242,7 +244,8 @@ class AgentLoop:
         self.permissions_config = _tc
         self.embedding_config = _embedding_config
         self.rerank_config = _rerank_config
-        self.qdrant_config = qdrant_config
+        self.qdrant_config = qdrant_config if qdrant_config is not None else _rag_config.qdrant
+        self.rag_config = _rag_config
         self.web_config = _tc.web
         self.exec_config = _tc.exec
         self._unsplash_provider_config = unsplash_provider_config
@@ -278,6 +281,11 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
             disabled_skills=disabled_skills,
             max_iterations=self.max_iterations,
+            max_concurrent_subagents=(
+                max_concurrent_subagents
+                if max_concurrent_subagents is not None
+                else defaults.max_concurrent_subagents
+            ),
             llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
         )
         self._unified_session = unified_session
@@ -369,6 +377,7 @@ class AgentLoop:
             max_tool_result_chars=defaults.max_tool_result_chars,
             provider_retry_mode=defaults.provider_retry_mode,
             tool_hint_max_length=defaults.tool_hint_max_length,
+            max_concurrent_subagents=defaults.max_concurrent_subagents,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,
@@ -379,9 +388,10 @@ class AgentLoop:
             consolidation_ratio=defaults.consolidation_ratio,
             max_messages=defaults.max_messages,
             tools_config=config.tools,
-            embedding_config=config.embedding,
-            rerank_config=config.rerank,
-            qdrant_config=config.qdrant,
+            rag_config=config.rag,
+            embedding_config=config.rag.embedding,
+            rerank_config=config.rag.rerank,
+            qdrant_config=config.rag.qdrant,
             model_presets=preset_helpers.configured_model_presets(config),
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
@@ -478,6 +488,7 @@ class AgentLoop:
             workspace=str(self.workspace),
             provider=self.provider,
             model=self.model,
+            rag_config=self.rag_config,
             embedding_config=self.embedding_config,
             rerank_config=self.rerank_config,
             qdrant_config=self.qdrant_config,
@@ -785,10 +796,11 @@ class AgentLoop:
             )
 
             specialist_prompt: str | None = None
-            if _session_meta.get("review_mode", False):
+            if _session_meta.get(ReviewMetaKey.MODE, False):
                 review_meta = dict(_session_meta)
                 if repo_review_tool := self.tools.get("repo_review"):
-                    review_meta["_repo_review_tool"] = repo_review_tool
+                    if evidence_provider := getattr(repo_review_tool, "evidence_provider", None):
+                        review_meta[ReviewMetaKey.EVIDENCE_PROVIDER] = evidence_provider
                 specialist_prompt = await resolve_code_review_context(initial_messages, review_meta)
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
@@ -1589,7 +1601,36 @@ class AgentLoop:
         ctx.all_messages = all_msgs
         ctx.stop_reason = stop_reason
         ctx.had_injections = had_injections
-        return "ok"  # 下一个状态是 SAVE
+        return "ok"  # 下一个状态是 FINALIZE
+
+    async def _state_finalize(self, ctx: TurnContext) -> str:
+        """FINALIZE: run review finalizer if review mode is active."""
+        session_meta = ctx.session.metadata if ctx.session else {}
+        if not session_meta.get(ReviewMetaKey.MODE, False):
+            return "ok"
+
+        finalizer = ReviewFinalizer(
+            workspace=str(self.workspace),
+            changed_files=session_meta.get(ReviewMetaKey.TARGET_PATHS) or [],
+        )
+        for msg in (ctx.all_messages or []):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and "subagent_result" in (msg.get("metadata") or content):
+                pass
+            meta = msg.get("metadata") or {}
+            if meta.get("injected_event") == "subagent_result":
+                dimension = meta.get("subagent_label", "unknown")
+                finalizer.ingest_subagent_output(dimension, content if isinstance(content, str) else "")
+
+        result = finalizer.finalize(
+            target_name=session_meta.get(ReviewMetaKey.TARGET, "target")
+        )
+        if result.report_markdown:
+            ctx.final_content = result.report_markdown
+
+        return "ok"
 
     async def _state_save(self, ctx: TurnContext) -> str:
         """SAVE 状态：保存本轮次的消息到 session。
@@ -1657,7 +1698,13 @@ class AgentLoop:
         filtered: list[dict[str, Any]] = []
         for block in content:
             if not isinstance(block, dict):
-                filtered.append(block)
+                if isinstance(block, bytes):
+                    text = "[binary content omit]"
+                else:
+                    text = str(block)
+                if should_truncate_text or isinstance(block, bytes):
+                    text = truncate_text_fn(text, self.max_tool_result_chars)
+                filtered.append({"type": "text", "text": text})
                 continue
 
             if (

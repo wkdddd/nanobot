@@ -1135,7 +1135,6 @@ def review(
                 session.metadata["review_target_paths"] = [
                     item.strip() for item in paths.split(",") if item.strip()
                 ]
-            session.metadata["review_output_format"] = format
             session.metadata["review_max_subagents"] = effective_max_subagents
             agent_loop.sessions.save(session)
 

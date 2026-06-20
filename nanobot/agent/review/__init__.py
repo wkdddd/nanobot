@@ -1,11 +1,12 @@
 """Public code review coordination API."""
 from __future__ import annotations
 
+from nanobot.agent.review.evidence import ReviewEvidenceService
+from nanobot.agent.review.github import GitHubRepoConfig, GitHubRepoReader
 from nanobot.agent.review.planner import (
     apply_review_metadata_from_message,
     build_code_review_context,
     build_review_plan,
-    build_review_prompt,
     extract_review_target,
     infer_review_target_type,
     latest_user_text,
@@ -20,7 +21,11 @@ from nanobot.agent.review.types import (
     OPTIONAL_REVIEW_ROLES,
     SEVERITY_ORDER,
     Finding,
+    FindingVerdict,
     ReviewAction,
+    ReviewDimensionResult,
+    ReviewFindingCandidate,
+    ReviewFindingVerdict,
     ReviewPlan,
     ReviewReport,
     ReviewRole,
@@ -33,14 +38,20 @@ __all__ = [
     "OPTIONAL_REVIEW_ROLES",
     "SEVERITY_ORDER",
     "Finding",
+    "FindingVerdict",
+    "GitHubRepoConfig",
+    "GitHubRepoReader",
     "ReviewAction",
+    "ReviewDimensionResult",
+    "ReviewEvidenceService",
+    "ReviewFindingCandidate",
+    "ReviewFindingVerdict",
     "ReviewPlan",
     "ReviewReport",
     "ReviewRole",
     "apply_review_metadata_from_message",
     "build_code_review_context",
     "build_review_plan",
-    "build_review_prompt",
     "extract_review_target",
     "infer_review_target_type",
     "latest_user_text",

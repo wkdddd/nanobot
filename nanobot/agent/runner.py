@@ -51,6 +51,12 @@ _COMPACTABLE_TOOLS = frozenset({
     "web_search", "web_fetch", "list_dir",
 })
 _BACKFILL_CONTENT = "[Tool result unavailable — call was interrupted or lost]"
+_STREAM_OUTER_TIMEOUT_MULTIPLIER = 3.0
+_TOOL_ERROR_PREFIXES = ("Error:", "Error executing ")
+
+
+def _is_tool_error_result(result: Any) -> bool:
+    return isinstance(result, str) and result.startswith(_TOOL_ERROR_PREFIXES)
 
 
 
@@ -199,16 +205,25 @@ class AgentRunner:
         if spec.injection_callback is None:
             return []
         try:
-            signature = inspect.signature(spec.injection_callback)
-            accepts_limit = (
-                "limit" in signature.parameters
-                or any(
-                    parameter.kind is inspect.Parameter.VAR_KEYWORD
-                    for parameter in signature.parameters.values()
+            signature = None
+            try:
+                signature = inspect.signature(spec.injection_callback)
+                accepts_limit = (
+                    "limit" in signature.parameters
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in signature.parameters.values()
+                    )
                 )
-            )
+            except (TypeError, ValueError):
+                accepts_limit = True
             if accepts_limit:
-                items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
+                try:
+                    items = await spec.injection_callback(limit=_MAX_INJECTIONS_PER_TURN)
+                except TypeError:
+                    if signature is not None:
+                        raise
+                    items = await spec.injection_callback()
             else:
                 items = await spec.injection_callback()
         except Exception:
@@ -672,11 +687,12 @@ class AgentRunner:
         else:
             coro = self.provider.chat_with_retry(**kwargs)
 
-        # Streaming requests already have provider-level idle timeouts
-        # (NANOBOT_STREAM_IDLE_TIMEOUT_S). Do not also apply the outer wall-clock
-        # LLM timeout here, or healthy long reasoning streams can be killed just
-        # because total elapsed time exceeded NANOBOT_LLM_TIMEOUT_S.
-        outer_timeout_s = None if (wants_streaming or wants_progress_streaming) else timeout_s
+        # Streaming requests have provider-level idle timeouts
+        # (NANOBOT_STREAM_IDLE_TIMEOUT_S), plus a longer wall-clock cap here as
+        # a last-resort guard for providers that fail to enforce idle timeouts.
+        outer_timeout_s = timeout_s
+        if (wants_streaming or wants_progress_streaming) and timeout_s is not None:
+            outer_timeout_s = timeout_s * _STREAM_OUTER_TIMEOUT_MULTIPLIER
         try:
             response = (
                 await coro if outer_timeout_s is None
@@ -848,7 +864,7 @@ class AgentRunner:
                 result = await spec.tools.execute(tool_call.name, params)
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
+        except Exception as exc:
             logger.exception(
                 "Tool '{}' execution failed for call_id={}",
                 tool_call.name,
@@ -875,7 +891,7 @@ class AgentRunner:
                 return payload, event, exc
             return payload, event, None
 
-        if isinstance(result, str) and result.startswith("Error"):
+        if _is_tool_error_result(result):
             event = {
                 "name": tool_call.name,
                 "status": "error",

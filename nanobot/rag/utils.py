@@ -37,6 +37,14 @@ ChunkKey = tuple[str, int, int, str]
 ChunkerFn = Callable[[Path, str], list[IndexedChunk]]
 
 
+def chunk_key(chunk: IndexedChunk) -> ChunkKey:
+    return (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind)
+
+
+def hit_key(hit: IndexedHit) -> ChunkKey:
+    return chunk_key(hit.chunk)
+
+
 _STOP_WORDS = {
     "the", "and", "for", "with", "from", "this", "that",
     "怎么", "如何", "什么", "一个", "这个", "那个",

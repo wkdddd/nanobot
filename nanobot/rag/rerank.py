@@ -12,7 +12,7 @@ _DASHSCOPE_COMPATIBLE_MODE_BASE = "https://dashscope.aliyuncs.com/compatible-mod
 _DASHSCOPE_QWEN3_RERANK_BASE = "https://dashscope.aliyuncs.com/compatible-api/v1"
 _DASHSCOPE_TEXT_RERANK_BASE = "https://dashscope.aliyuncs.com"
 _DASHSCOPE_TEXT_RERANK_PATH = "/api/v1/services/rerank/text-rerank/text-rerank"
-_QWEN3_RERANK_INSTRUCT = (
+_RERANK_INSTRUCT = (
     "Given a web search query, retrieve relevant passages that answer the query."
 )
 
@@ -106,7 +106,7 @@ class RerankClient:
                 "documents": documents,
                 "top_n": top_n,
             }
-            body["instruct"] = self.instruct or _QWEN3_RERANK_INSTRUCT
+            body["instruct"] = self.instruct or _RERANK_INSTRUCT
             return body
 
         if self.model in {"qwen3-vl-rerank", "gte-rerank-v2"}:

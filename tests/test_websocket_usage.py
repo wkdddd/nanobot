@@ -212,5 +212,5 @@ async def test_websocket_message_can_send_review_metadata_without_content(tmp_pa
     assert session.metadata["review_target"] == "./repo"
     assert session.metadata["review_target_type"] == "local"
     assert session.metadata["review_mode_variant"] == "full"
-    assert handled[0]["content"] == ""
+    assert handled[0]["content"] == "审查"
     assert handled[0]["metadata"]["review_target"] == "./repo"

@@ -4,12 +4,26 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 SEVERITY_ORDER = ("critical", "high", "medium", "low")
 
+
+class ReviewMetaKey:
+    """Session metadata keys for code review state."""
+
+    MODE = "review_mode"
+    TARGET = "review_target"
+    TARGET_TYPE = "review_target_type"
+    MODE_VARIANT = "review_mode_variant"
+    ACTION = "review_action"
+    FOCUS = "review_focus"
+    TARGET_PATHS = "review_target_paths"
+    MAX_SUBAGENTS = "review_max_subagents"
+    EVIDENCE_PROVIDER = "_review_evidence_service"
+
 ReviewTargetType = Literal["auto", "github", "local"]
-ReviewMode = Literal["quick", "full", "deep"]
+ReviewDepth = Literal["quick", "full", "deep"]
 
 
 class ReviewAction(StrEnum):
@@ -160,13 +174,112 @@ class ReviewPlan:
     target_name: str | None
     target_type: ReviewTargetType
     action: ReviewAction
-    mode: ReviewMode
+    depth: ReviewDepth
     roles: list[ReviewRole]
     forced_focus: bool
-    output_format: str
     max_subagents: int
     user_requirements: str = ""
     target_repo: str | None = None
     pr_number: int | None = None
     target_paths: list[str] = field(default_factory=list)
     prefetch_summary: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFindingCandidate:
+    """A candidate finding produced by a dimension subagent."""
+
+    severity: str
+    dimension: str
+    file: str
+    line: int | None
+    title: str
+    evidence: str
+    impact: str
+    recommendation: str
+    confidence: str = "high"
+    source: str = ""
+
+
+class FindingVerdict(StrEnum):
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewFindingVerdict:
+    """Verdict on a candidate finding after validation or semantic review."""
+
+    verdict: FindingVerdict
+    reason: str = ""
+    missing_evidence: str = ""
+    suggested_verification: str = ""
+
+
+@dataclass
+class ReviewDimensionResult:
+    """Aggregated result for one review dimension."""
+
+    dimension: str
+    status: str = "pending"
+    candidates: list[ReviewFindingCandidate] = field(default_factory=list)
+    accepted: list[ReviewFindingCandidate] = field(default_factory=list)
+    rejected: list[tuple[ReviewFindingCandidate, ReviewFindingVerdict]] = field(
+        default_factory=list
+    )
+    uncertain: list[tuple[ReviewFindingCandidate, ReviewFindingVerdict]] = field(
+        default_factory=list
+    )
+    errors: list[str] = field(default_factory=list)
+
+
+@runtime_checkable
+class ReviewEvidenceProvider(Protocol):
+    """Structural protocol for evidence retrieval used by prefetch and loop."""
+
+    async def local_context(
+        self, *, review_query: str | None, max_results: int, include_tests: bool | None
+    ) -> str: ...
+
+    async def local_changed_context(
+        self,
+        *,
+        review_query: str | None,
+        target_paths: list[str],
+        max_results: int,
+        include_tests: bool | None,
+    ) -> str: ...
+
+    async def local_targeted_context(
+        self,
+        *,
+        review_query: str | None,
+        target_paths: list[str],
+        max_results: int,
+        include_tests: bool | None,
+    ) -> str: ...
+
+    async def github_context(
+        self,
+        *,
+        repo: str,
+        ref: str | None,
+        tree_pattern: str | None,
+        review_query: str | None,
+        max_results: int,
+        include_tests: bool | None,
+        trace_id: str,
+    ) -> str: ...
+
+    async def github_diff_context(
+        self,
+        *,
+        repo: str,
+        pr_number: int,
+        target_paths: list[str],
+        review_query: str | None,
+        max_results: int,
+        include_tests: bool | None,
+        trace_id: str,
+    ) -> str: ...

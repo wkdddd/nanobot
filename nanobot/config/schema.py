@@ -9,9 +9,10 @@ from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
 from nanobot.cron.types import CronSchedule
+from nanobot.rag.config import EmbeddingConfig, QdrantConfig, RAGConfig, RAGRetrievalConfig, RerankConfig
 
 if TYPE_CHECKING:
-    from nanobot.agent.tools.repo_review import GitHubRepoConfig
+    from nanobot.agent.review.github import GitHubRepoConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
@@ -121,7 +122,7 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = 200
-    max_concurrent_subagents: int = Field(default=1, ge=5)
+    max_concurrent_subagents: int = Field(default=1, ge=1)
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     tool_hint_max_length: int = Field(
@@ -216,56 +217,6 @@ class HeartbeatConfig(Base):
     keep_recent_messages: int = 8
 
 
-class EmbeddingConfig(Base):
-    """Embedding model configuration for semantic search."""
-
-    enable: bool = False
-    api_key: str = ""
-    base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
-        serialization_alias="baseUrl",
-    )
-    model: str = "BAAI/bge-m3"
-    dimensions: int = 1024
-    batch_size: int = 10
-    max_input_chars: int = 2048
-    semantic_weight: float = 0.6
-
-
-class RerankConfig(Base):
-    """Reranking model configuration for retrieval refinement."""
-
-    enable: bool = False
-    api_key: str = ""
-    base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-api/v1",
-        validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
-        serialization_alias="baseUrl",
-    )
-    model: str = "qwen3-rerank"
-    top_n: int = 20
-
-
-class QdrantConfig(Base):
-    """Qdrant vector store configuration for RAG."""
-
-    enable: bool = False
-    url: str = "http://localhost:6333"
-    api_key: str = Field(
-        default="",
-        validation_alias=AliasChoices("apiKey", "api_key"),
-        serialization_alias="apiKey",
-    )
-    collection: str = "nanobot_rag_chunks"
-    timeout: float = 30.0
-    check_compatibility: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("checkCompatibility", "check_compatibility"),
-        serialization_alias="checkCompatibility",
-    )
-
-
 class ApiConfig(Base):
     """OpenAI-compatible API server configuration."""
 
@@ -338,7 +289,7 @@ class ToolsConfig(Base):
         default_factory=lambda:_lazy_default("nanobot.agent.tools.unsplash","UnsplashSearchToolConfig")
     )
     github_repo: GitHubRepoConfig = Field(
-        default_factory=lambda: _lazy_default("nanobot.agent.tools.repo_review", "GitHubRepoConfig")
+        default_factory=lambda: _lazy_default("nanobot.agent.review.github", "GitHubRepoConfig")
     )
 
     def __init__(self, **data: Any) -> None:
@@ -355,7 +306,6 @@ class ReviewConfig(Base):
         "security", "tests", "architecture", "performance"
     ])
     max_subagents: int = Field(default=4, ge=1, le=10)
-    output_format: str = "markdown"
     fail_on: str | None = None
     rag_enable: bool = True
     rag_max_results: int = Field(default=8, ge=1, le=30)
@@ -371,9 +321,7 @@ class Config(BaseSettings):
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
-    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
-    rerank: RerankConfig = Field(default_factory=RerankConfig)
-    qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
+    rag: RAGConfig = Field(default_factory=RAGConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     gateway: GatewayConfig = Field(default_factory=GatewayConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
@@ -556,7 +504,7 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
-    from nanobot.agent.tools.repo_review import GitHubRepoConfig
+    from nanobot.agent.review.github import GitHubRepoConfig
     from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
     from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig

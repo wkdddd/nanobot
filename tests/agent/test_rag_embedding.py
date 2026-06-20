@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from nanobot.rag.config import EmbeddingConfig
 from nanobot.rag.embedding import EmbeddingClient, create_embedding_client_from_config
-from nanobot.config.schema import EmbeddingConfig
 
 
 class _Embedding:

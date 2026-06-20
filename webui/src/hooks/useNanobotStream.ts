@@ -619,13 +619,18 @@ export function useNanobotStream(
       // the image blocks via ``media`` paths.
       if (!hasImages && !hasReview && !content.trim()) return;
 
+      // When review params are present but text is empty, default to "审查"
+      // so the model receives an explicit user intent rather than inheriting
+      // the previous turn's content.
+      const normalizedContent = (!content.trim() && hasReview) ? "审查" : content;
+
       const previews = hasImages ? images!.map((i) => i.preview) : undefined;
       setMessages((prev) => [
         ...pruneReasoningOnlyPlaceholders(prev),
         {
           id: crypto.randomUUID(),
           role: "user",
-          content,
+          content: normalizedContent,
           createdAt: Date.now(),
           ...(previews ? { images: previews } : {}),
           ...(review ? { review } : {}),
@@ -636,9 +641,9 @@ export function useNanobotStream(
       setIsStreaming(true);
       const wireMedia = hasImages ? images!.map((i) => i.media) : undefined;
       if (options) {
-        client.sendMessage(chatId, content, wireMedia, options);
+        client.sendMessage(chatId, normalizedContent, wireMedia, options);
       } else {
-        client.sendMessage(chatId, content, wireMedia);
+        client.sendMessage(chatId, normalizedContent, wireMedia);
       }
     },
     [chatId, client],

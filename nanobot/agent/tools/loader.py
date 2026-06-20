@@ -34,11 +34,17 @@ class ToolLoader:
             return self._discovered
         seen: set[int] = set()
         results: list[type[Tool]] = []
-        for _importer, module_name, _ispkg in pkgutil.iter_modules(self._package.__path__):
-            if module_name.startswith("_") or module_name in _SKIP_MODULES:
+        prefix = f"{self._package.__name__}."
+        for _importer, module_name, _ispkg in pkgutil.walk_packages(self._package.__path__, prefix):
+            short_name = module_name.removeprefix(prefix)
+            root_name = short_name.split(".", 1)[0]
+            leaf_name = short_name.rsplit(".", 1)[-1]
+            if "." not in short_name and (root_name.startswith("_") or root_name in _SKIP_MODULES):
+                continue
+            if leaf_name in _SKIP_MODULES or leaf_name.startswith("__"):
                 continue
             try:
-                module = importlib.import_module(f".{module_name}", self._package.__name__)
+                module = importlib.import_module(module_name)
             except Exception:
                 logger.exception("Failed to import tool module: %s", module_name)
                 continue
