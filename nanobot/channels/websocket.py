@@ -1709,6 +1709,13 @@ class WebSocketChannel(BaseChannel):
                 or isinstance(raw_review_focus, list)
                 or isinstance(raw_review_target_paths, list)
             )
+            normalized_review_action: str | None = None
+            if isinstance(raw_review_action, str):
+                try:
+                    normalized_review_action = normalize_review_action(raw_review_action).value
+                except ValueError as exc:
+                    await self._send_event(connection, "error", detail=str(exc))
+                    return
 
             # Allow image-only and review-only turns.
             if not content.strip() and not media_paths and not has_review_payload:
@@ -1738,10 +1745,7 @@ class WebSocketChannel(BaseChannel):
                     else:
                         session.metadata.pop("review_target", None)
                 if isinstance(raw_review_action, str):
-                    try:
-                        session.metadata["review_action"] = normalize_review_action(raw_review_action).value
-                    except ValueError:
-                        session.metadata.pop("review_action", None)
+                    session.metadata["review_action"] = normalized_review_action
                 if isinstance(raw_review_focus, list):
                     focus = [str(item).strip() for item in raw_review_focus if str(item).strip()]
                     if focus:
@@ -1773,10 +1777,7 @@ class WebSocketChannel(BaseChannel):
             if isinstance(raw_review_mode_variant, str):
                 metadata["review_mode_variant"] = raw_review_mode_variant
             if isinstance(raw_review_action, str):
-                try:
-                    metadata["review_action"] = normalize_review_action(raw_review_action).value
-                except ValueError:
-                    pass
+                metadata["review_action"] = normalized_review_action
             if isinstance(raw_review_focus, list):
                 metadata["review_focus"] = [str(item).strip() for item in raw_review_focus if str(item).strip()]
             if isinstance(raw_review_target_paths, list):

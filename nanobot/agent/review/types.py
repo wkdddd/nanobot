@@ -1,7 +1,6 @@
 """Shared code-review data types."""
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
@@ -27,9 +26,8 @@ ReviewDepth = Literal["quick", "full", "deep"]
 
 
 class ReviewAction(StrEnum):
-    FULL_REPO = "full_repo"
-    PR_DIFF = "pr_diff"
-    LOCAL_CHANGED = "local_changed"
+    REPO = "repo"
+    DIFF = "diff"
 
 
 def review_action_values() -> tuple[str, ...]:
@@ -63,36 +61,6 @@ class ReviewReport:
     checks_performed: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
     recommendations: list[str] = field(default_factory=list)
-
-    def to_json(self) -> str:
-        return json.dumps(self._to_dict(), indent=2, ensure_ascii=False)
-
-    def _to_dict(self) -> dict[str, object]:
-        stats = {s: 0 for s in SEVERITY_ORDER}
-        for finding in self.findings:
-            if finding.severity in stats:
-                stats[finding.severity] += 1
-        return {
-            "target": self.target,
-            "mode": self.mode,
-            "dimensions": self.dimensions,
-            "summary": self.summary,
-            "statistics": stats,
-            "findings": [
-                {
-                    "severity": finding.severity,
-                    "file": finding.file,
-                    "line": finding.line,
-                    "title": finding.title,
-                    "impact": finding.impact,
-                    "recommendation": finding.recommendation,
-                }
-                for finding in self.findings
-            ],
-            "checks_performed": self.checks_performed,
-            "checks_skipped": self.checks_skipped,
-            "recommendations": self.recommendations,
-        }
 
     def max_severity(self) -> str | None:
         if not self.findings:
@@ -209,7 +177,7 @@ class FindingVerdict(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ReviewFindingVerdict:
-    """Verdict on a candidate finding after validation or semantic review."""
+    """Verdict on a candidate finding after hard validation."""
 
     verdict: FindingVerdict
     reason: str = ""
@@ -282,4 +250,20 @@ class ReviewEvidenceProvider(Protocol):
         max_results: int,
         include_tests: bool | None,
         trace_id: str,
+    ) -> str: ...
+
+    async def dispatch(
+        self,
+        *,
+        target_type: str,
+        action: str,
+        repo: str = "",
+        ref: str | None = None,
+        pr_number: int = 0,
+        target_paths: list[str] | None = None,
+        tree_pattern: str | None = None,
+        review_query: str | None = None,
+        max_results: int = 5,
+        include_tests: bool | None = None,
+        trace_id: str = "",
     ) -> str: ...

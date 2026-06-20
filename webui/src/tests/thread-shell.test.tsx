@@ -283,13 +283,13 @@ describe("ThreadShell", () => {
 
     await waitFor(() =>
       expect(client.sendMessage).toHaveBeenCalledWith("chat-review",
-        "",
+        "审查",
         undefined,
         {
           review: {
             mode: "deep",
             target_type: "local",
-            action: "full_repo",
+            action: "repo",
             target: "./repo",
           },
         },

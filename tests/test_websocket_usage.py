@@ -162,6 +162,7 @@ async def test_websocket_message_can_carry_review_target(tmp_path, monkeypatch) 
             "review_target": "https://github.com/test/repo",
             "review_target_type": "github",
             "review_mode_variant": "deep",
+            "review_action": "diff",
             "webui": True,
         },
     )
@@ -171,10 +172,12 @@ async def test_websocket_message_can_carry_review_target(tmp_path, monkeypatch) 
     assert session.metadata["review_target"] == "https://github.com/test/repo"
     assert session.metadata["review_target_type"] == "github"
     assert session.metadata["review_mode_variant"] == "deep"
+    assert session.metadata["review_action"] == "diff"
     assert handled[0]["content"] == "请审查登录逻辑"
     assert handled[0]["metadata"]["review_target"] == "https://github.com/test/repo"
     assert handled[0]["metadata"]["review_target_type"] == "github"
     assert handled[0]["metadata"]["review_mode_variant"] == "deep"
+    assert handled[0]["metadata"]["review_action"] == "diff"
 
 
 @pytest.mark.asyncio
@@ -214,3 +217,35 @@ async def test_websocket_message_can_send_review_metadata_without_content(tmp_pa
     assert session.metadata["review_mode_variant"] == "full"
     assert handled[0]["content"] == "审查"
     assert handled[0]["metadata"]["review_target"] == "./repo"
+
+
+@pytest.mark.asyncio
+async def test_websocket_message_rejects_old_review_action(tmp_path, monkeypatch) -> None:
+    manager = SessionManager(tmp_path)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    conn = _FakeConnection()
+    handled: list[dict] = []
+
+    async def fake_handle_message(**kwargs):
+        handled.append(kwargs)
+
+    monkeypatch.setattr(channel, "_handle_message", fake_handle_message)
+
+    await channel._dispatch_envelope(
+        conn,
+        "client",
+        {
+            "type": "message",
+            "chat_id": "chat",
+            "content": "review",
+            "review_action": "full_repo",
+        },
+    )
+
+    assert handled == []
+    assert conn.sent[-1]["event"] == "error"
+    assert "Unknown review action 'full_repo'" in conn.sent[-1]["detail"]

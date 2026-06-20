@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from nanobot.agent.review.evidence import ReviewEvidenceService
 from nanobot.agent.review.github import GitHubRepoConfig, GitHubRepoReader
+from nanobot.agent.review.local import LocalRepoReader
 from nanobot.agent.review.planner import (
     apply_review_metadata_from_message,
     build_code_review_context,
@@ -41,6 +42,7 @@ __all__ = [
     "FindingVerdict",
     "GitHubRepoConfig",
     "GitHubRepoReader",
+    "LocalRepoReader",
     "ReviewAction",
     "ReviewDimensionResult",
     "ReviewEvidenceService",

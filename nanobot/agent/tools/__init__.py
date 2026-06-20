@@ -29,5 +29,6 @@ __all__ = [
     "tool_parameters",
     "tool_parameters_schema",
     "unsplash",
-    "repo_review",
+    "local_review",
+    "github_review",
 ]

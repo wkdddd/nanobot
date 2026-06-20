@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -27,7 +28,7 @@ def _make_candidate(**overrides) -> ReviewFindingCandidate:
         "file": "src/main.py",
         "line": 2,
         "title": "SQL Injection risk",
-        "evidence": "query = f'SELECT * FROM users WHERE id={user_id}'",
+        "evidence": "line2",
         "impact": "Remote code execution",
         "recommendation": "Use parameterized queries",
     }
@@ -42,6 +43,18 @@ class TestValidatorAccepts:
         assert len(result.accepted) == 1
         assert len(result.rejected) == 0
         assert result.status == "validated"
+
+    def test_windows_separator_candidate_matches_changed_file(self, workspace):
+        v = ReviewValidator(ValidationContext(
+            workspace=workspace,
+            changed_files=["src/main.py"],
+        ))
+        c = _make_candidate(file="src\\main.py")
+
+        result = v.validate_candidates([c], "security")
+
+        assert len(result.accepted) == 1
+        assert len(result.uncertain) == 0
 
     def test_no_line_still_accepted(self, workspace):
         v = ReviewValidator(ValidationContext(workspace=workspace))
@@ -70,6 +83,20 @@ class TestValidatorRejects:
         result = v.validate_candidates([c], "security")
         assert len(result.rejected) == 1
         assert "not found" in result.rejected[0][1].reason
+
+    def test_absolute_path_rejected(self, workspace):
+        v = ReviewValidator(ValidationContext(workspace=workspace))
+        c = _make_candidate(file=str(Path(workspace) / "src" / "main.py"))
+        result = v.validate_candidates([c], "security")
+        assert len(result.rejected) == 1
+        assert "outside workspace" in result.rejected[0][1].reason
+
+    def test_parent_traversal_rejected(self, workspace):
+        v = ReviewValidator(ValidationContext(workspace=workspace))
+        c = _make_candidate(file="../outside.py")
+        result = v.validate_candidates([c], "security")
+        assert len(result.rejected) == 1
+        assert "outside workspace" in result.rejected[0][1].reason
 
     def test_line_out_of_range_rejected(self, workspace):
         v = ReviewValidator(ValidationContext(workspace=workspace))
@@ -104,3 +131,10 @@ class TestValidatorUncertain:
         result = v.validate_candidates([c], "security")
         assert len(result.uncertain) == 1
         assert "no evidence" in result.uncertain[0][1].reason
+
+    def test_evidence_not_found_uncertain(self, workspace):
+        v = ReviewValidator(ValidationContext(workspace=workspace))
+        c = _make_candidate(evidence="not present in file")
+        result = v.validate_candidates([c], "security")
+        assert len(result.uncertain) == 1
+        assert "evidence not found" in result.uncertain[0][1].reason

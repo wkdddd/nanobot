@@ -92,9 +92,9 @@ interface ThreadComposerProps {
 const REVIEW_DEPTH_OPTIONS: ReviewDepth[] = ["quick", "full", "deep"];
 const REVIEW_TARGET_TYPE_OPTIONS: ReviewTargetType[] = ["auto", "github", "local"];
 const REVIEW_ACTION_OPTIONS_BY_TARGET: Record<ReviewTargetType, ReviewAction[]> = {
-  auto: ["full_repo", "pr_diff", "local_changed"],
-  github: ["full_repo", "pr_diff"],
-  local: ["full_repo", "local_changed"],
+  auto: ["repo", "diff"],
+  github: ["repo", "diff"],
+  local: ["repo", "diff"],
 };
 const REVIEW_FOCUS_GROUPS: { key: "necessary" | "advanced"; options: ReviewFocus[] }[] = [
   {
@@ -114,9 +114,6 @@ function reviewDepthLabel(mode: ReviewDepth): string {
 }
 
 function reviewActionLabel(action: ReviewAction): string {
-  if (action === "full_repo") return "full_repo";
-  if (action === "pr_diff") return "pr_diff";
-  if (action === "local_changed") return "local_changed";
   return action;
 }
 
@@ -436,7 +433,7 @@ export function ThreadComposer({
   const [reviewDepth, setReviewDepth] = useState<ReviewDepth>("full");
   const [reviewTargetType, setReviewTargetType] = useState<ReviewTargetType>("auto");
   const [reviewTarget, setReviewTarget] = useState("");
-  const [reviewAction, setReviewAction] = useState<ReviewAction>("full_repo");
+  const [reviewAction, setReviewAction] = useState<ReviewAction>("repo");
   const [reviewFocus, setReviewFocus] = useState<ReviewFocus[]>([]);
   const [reviewTargetPaths, setReviewTargetPaths] = useState("");
   const [reviewAdvancedOpen, setReviewAdvancedOpen] = useState(false);
@@ -507,14 +504,14 @@ export function ThreadComposer({
   const reviewActionOptions = REVIEW_ACTION_OPTIONS_BY_TARGET[reviewTargetType];
   const hasReviewPayload = reviewModeEnabled && (
     reviewTargetTrimmed.length > 0
-    || reviewAction !== "full_repo"
+    || reviewAction !== "repo"
     || reviewFocus.length > 0
     || reviewTargetPathItems.length > 0
   );
 
   useEffect(() => {
     if (!reviewActionOptions.includes(reviewAction)) {
-      setReviewAction("full_repo");
+      setReviewAction("repo");
     }
   }, [reviewAction, reviewActionOptions]);
 
@@ -529,7 +526,7 @@ export function ThreadComposer({
       setReviewDepth("full");
       setReviewTargetType("auto");
       setReviewTarget("");
-      setReviewAction("full_repo");
+      setReviewAction("repo");
       setReviewFocus([]);
       setReviewTargetPaths("");
       setReviewAdvancedOpen(false);
@@ -685,7 +682,7 @@ export function ThreadComposer({
       setReviewDepth("full");
       setReviewTargetType("auto");
       setReviewTarget("");
-      setReviewAction("full_repo");
+      setReviewAction("repo");
       setReviewFocus([]);
       setReviewTargetPaths("");
       setReviewAdvancedOpen(false);

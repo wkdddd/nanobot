@@ -1,6 +1,6 @@
 ---
 name: repo-reader
-description: Used when users provide GitHub/GitLab repo links or request full repository comprehension, analysis, or code review; systematically inspects repository structure, entry points, source code, tests, and call chains using local files and repo_review where appropriate.
+description: Used when users provide GitHub/GitLab repo links or request full repository comprehension, analysis, or code review; systematically inspects repository structure, entry points, source code, tests, and call chains using local files and local_review/github_review where appropriate.
 ---
 
 # repo-reader
@@ -14,7 +14,7 @@ Use this skill when the user wants repository-level understanding:
 - The user wants to understand a code repository before changing it.
 
 Do not use this skill when:
-- The user asks a narrow question about files already in the current workspace; use `repo_review(target_type="local", review_query="...")` or read the known files directly.
+- The user asks a narrow question about files already in the current workspace; use `local_review(review_query="...")` or read the known files directly.
 - The user only needs online documentation, API references, or external facts; use `web_search` and `web_fetch`.
 - The user only asks for a small code edit in a known area; inspect the relevant local files directly.
 
@@ -30,11 +30,11 @@ Do not use this skill when:
 
 ## Repository Access
 
-- For the current local workspace, inspect files directly and use `repo_review(target_type="local", review_query="...")` to find relevant code when the important files are not obvious.
+- For the current local workspace, inspect files directly and use `local_review(review_query="...")` to find relevant code when the important files are not obvious.
 - For GitHub repositories, start with read-only API inspection:
-  - `repo_review(target_type="github", action="meta", target_repo="owner/repo")`
-  - `repo_review(target_type="github", action="tree", target_repo="owner/repo", tree_pattern="*.py", tree_limit=500)`
-  - `repo_review(target_type="github", action="file", target_repo="owner/repo", repo_path="README.md")`
+  - `github_review(action="meta", target_repo="owner/repo")`
+  - `github_review(action="tree", target_repo="owner/repo", tree_pattern="*.py", tree_limit=500)`
+  - `github_review(action="file", target_repo="owner/repo", repo_path="README.md")`
 - If deep full-repository analysis is needed, clone read-only or otherwise get source files locally, then apply the local workflow.
 - GitHub mode reads metadata, tree entries, and file contents through the GitHub API; it does not perform RAG over the remote repository.
 
@@ -43,7 +43,7 @@ Do not use this skill when:
 - Do not modify code unless the user explicitly asks.
 - Prefer facts from files over assumptions.
 - Do not summarize a repository from README alone.
-- Do not summarize a repository from `repo_review` snippets alone.
+- Do not summarize a repository from review snippets alone.
 - Read source files that establish the directory map, entry points, and call chain.
 - Keep explanations beginner-friendly when the user is learning.
 - Mention uncertainty clearly.

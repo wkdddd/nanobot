@@ -12,7 +12,6 @@ from nanobot.rag.embedding import EmbeddingClient, create_embedding_client_from_
 from nanobot.rag.index import RAGIndex
 from nanobot.rag.qdrant_store import QdrantVectorHit, QdrantVectorStore
 from nanobot.rag.rerank import RerankClient, create_rerank_client_from_config
-from nanobot.rag.review import rrf_merge
 from nanobot.rag.runtime import RAGRuntime, create_rag_runtime
 from nanobot.rag.utils import (
     ChunkerFn,
@@ -23,6 +22,7 @@ from nanobot.rag.utils import (
     chunk_key,
     hit_key,
     query_terms,
+    rrf_merge,
 )
 
 __all__ = [

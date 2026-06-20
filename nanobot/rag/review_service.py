@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 from loguru import logger
 
@@ -21,7 +21,13 @@ from nanobot.rag.chunker import TreeSitterChunker
 from nanobot.rag.config import RAGRetrievalConfig
 from nanobot.rag.index import RAGIndex
 from nanobot.rag.runtime import RAGRuntime
-from nanobot.rag.utils import ChunkKey, IndexedChunk, IndexedHit, best_snippet, hit_key, query_terms
+from nanobot.rag.utils import (
+    IndexedChunk,
+    IndexedHit,
+    best_snippet,
+    query_terms,
+    rrf_merge,
+)
 
 SOURCE_TYPE = "code_review"
 REMOTE_SOURCE_TYPE = "code_review_github"
@@ -192,37 +198,6 @@ def _now_iso() -> str:
 
 def _safe_slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "repo"
-
-
-def rrf_merge(
-    ranked_lists: list[tuple[str, list[IndexedHit]]],
-    *,
-    limit: int,
-    k: int = 60,
-) -> list[IndexedHit]:
-    """Merge ranked retrieval lanes with reciprocal-rank fusion."""
-
-    scores: dict[ChunkKey, float] = {}
-    hits: dict[ChunkKey, IndexedHit] = {}
-    reasons: dict[ChunkKey, list[str]] = {}
-    for lane_name, lane_hits in ranked_lists:
-        for rank, hit in enumerate(lane_hits, start=1):
-            key = hit_key(hit)
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
-            hits.setdefault(key, hit)
-            merged_reasons = reasons.setdefault(key, [])
-            if lane_name not in merged_reasons:
-                merged_reasons.append(lane_name)
-            for reason in hit.reason:
-                if reason not in merged_reasons:
-                    merged_reasons.append(reason)
-
-    merged: list[IndexedHit] = []
-    for key, score in scores.items():
-        original = hits[key]
-        merged.append(IndexedHit(chunk=original.chunk, score=score, reason=reasons.get(key, [])))
-    merged.sort(key=lambda hit: -hit.score)
-    return merged[:limit]
 
 
 def _path_role_tags(rel_path: str, text: str = "") -> list[str]:
@@ -706,37 +681,3 @@ class PureRepoPath:
                 ]
             )
         return list(dict.fromkeys(candidate.as_posix() for candidate in candidates))
-
-
-class RepositoryRAGEvaluator:
-    """Evaluate repository RAG evidence coverage."""
-
-    def __init__(self, retrieve_context: Any) -> None:
-        self.retrieve_context = retrieve_context
-
-    async def evaluate(self, rows: list[dict[str, Any]], *, max_results: int, trace_id: str) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        for i, row in enumerate(rows, start=1):
-            query = str(row.get("question") or row.get("review_query") or "")
-            if not query:
-                continue
-            context = await self.retrieve_context(row, query, max_results, trace_id)
-            expected_files = [str(x) for x in row.get("expected_files", [])]
-            expected_symbols = [str(x) for x in row.get("expected_symbols", [])]
-            file_hits = sum(1 for item in expected_files if item and item in context)
-            symbol_hits = sum(1 for item in expected_symbols if item and item in context)
-            denom = max(1, len(expected_files) + len(expected_symbols))
-            results.append(
-                {
-                    "id": row.get("id", i),
-                    "query": query,
-                    "expected_files": len(expected_files),
-                    "expected_symbols": len(expected_symbols),
-                    "file_hits": file_hits,
-                    "symbol_hits": symbol_hits,
-                    "evidence_coverage": round((file_hits + symbol_hits) / denom, 4),
-                    "context_chars": len(context),
-                }
-            )
-        logger.info("rag.review.evaluate.done trace_id={} samples={}", trace_id, len(results))
-        return results

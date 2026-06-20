@@ -18,7 +18,7 @@ from pydantic import AliasChoices, Field
 
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_repo
 from nanobot.config.schema import Base
-from nanobot.rag.review import DEFAULT_TEXT_EXTS
+from nanobot.rag.review_service import DEFAULT_TEXT_EXTS
 
 _DEFAULT_TEXT_EXTS = DEFAULT_TEXT_EXTS
 

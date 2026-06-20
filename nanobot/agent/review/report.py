@@ -126,7 +126,7 @@ def _render_needs_confirmation(
     lines.append("The following items could not be definitively verified:\n")
     for c, v in items:
         loc = f"{c.file}:{c.line}" if c.line else c.file
-        lines.append(f"- **{c.title}** ({loc}) — {v.reason}")
+        lines.append(f"- **{c.title}** ({loc}) - {v.reason}")
     lines.append("")
     return "\n".join(lines)
 
@@ -137,7 +137,7 @@ def _render_rejected_summary(
     lines = ["### Rejected/Skipped Summary\n"]
     lines.append(f"{len(items)} candidates rejected during validation:\n")
     for c, v in items[:10]:
-        lines.append(f"- {c.title} ({c.file}) — {v.reason}")
+        lines.append(f"- {c.title} ({c.file}) - {v.reason}")
     if len(items) > 10:
         lines.append(f"- ... and {len(items) - 10} more")
     lines.append("")

@@ -24,7 +24,7 @@ from nanobot.agent.review import (
     apply_review_metadata_from_message,
     resolve_code_review_context,
 )
-from nanobot.agent.review.finalizer import ReviewFinalizer
+from nanobot.agent.review.finalizer import ReviewFinalizerHook
 from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
@@ -70,7 +70,6 @@ class TurnState(Enum):
     COMMAND = auto()
     BUILD = auto()
     RUN = auto()
-    FINALIZE = auto()
     SAVE = auto()
     RESPOND = auto()
     DONE = auto()
@@ -101,6 +100,7 @@ class TurnContext:
     all_messages: list[dict[str, Any]] = field(default_factory=list)
     stop_reason: str = ""
     had_injections: bool = False
+    content_replaced: bool = False
 
     user_persisted_early: bool = False
     save_skip: int = 0
@@ -153,8 +153,7 @@ class AgentLoop:
         (TurnState.COMMAND, "dispatch"): TurnState.BUILD,
         (TurnState.COMMAND, "shortcut"): TurnState.DONE,
         (TurnState.BUILD, "ok"): TurnState.RUN,
-        (TurnState.RUN, "ok"): TurnState.FINALIZE,
-        (TurnState.FINALIZE, "ok"): TurnState.SAVE,
+        (TurnState.RUN, "ok"): TurnState.SAVE,
         (TurnState.SAVE, "ok"): TurnState.RESPOND,
         (TurnState.RESPOND, "ok"): TurnState.DONE,
     }
@@ -730,7 +729,7 @@ class AgentLoop:
         ``resuming=True`` means tool calls follow (spinner should restart);
         ``resuming=False`` means this is the final response.
 
-        Returns (final_content, tools_used, messages, stop_reason, had_injections).
+        Returns (final_content, tools_used, messages, stop_reason, had_injections, content_replaced).
         """
         self._sync_subagent_runtime_limits()
 
@@ -747,8 +746,23 @@ class AgentLoop:
             set_tool_context=self._set_tool_context,
             on_iteration=lambda iteration: setattr(self, "_current_iteration", iteration),
         )
+        review_hook: AgentHook | None = None
+        if session is not None and session.metadata.get(ReviewMetaKey.MODE, False):
+            review_hook = ReviewFinalizerHook(
+                workspace=str(self.workspace),
+                target_name=str(session.metadata.get(ReviewMetaKey.TARGET) or "target"),
+                changed_files=session.metadata.get(ReviewMetaKey.TARGET_PATHS) or [],
+            )
+            # Suppress streaming during review — the finalizer replaces all content,
+            # so streamed deltas are discarded noise. Progress events still flow.
+            on_stream = None
+            on_stream_end = None
+        hooks: list[AgentHook] = [loop_hook]
+        if review_hook is not None:
+            hooks.append(review_hook)
+        hooks.extend(self._extra_hooks)
         hook: AgentHook = (
-            CompositeHook([loop_hook] + self._extra_hooks) if self._extra_hooks else loop_hook
+            CompositeHook(hooks) if len(hooks) > 1 else loop_hook
         )
 
         async def _checkpoint(payload: dict[str, Any]) -> None:
@@ -774,7 +788,10 @@ class AgentLoop:
                     content, media = extract_documents(content, media)
                     media = media or None
                 user_content = self.context._build_user_content(content, media)
-                return {"role": "user", "content": user_content}
+                message: dict[str, Any] = {"role": "user", "content": user_content}
+                if pending_msg.metadata:
+                    message["_metadata"] = dict(pending_msg.metadata)
+                return message
 
             items: list[dict[str, Any]] = []
             while len(items) < limit:
@@ -798,10 +815,15 @@ class AgentLoop:
             specialist_prompt: str | None = None
             if _session_meta.get(ReviewMetaKey.MODE, False):
                 review_meta = dict(_session_meta)
-                if repo_review_tool := self.tools.get("repo_review"):
-                    if evidence_provider := getattr(repo_review_tool, "evidence_provider", None):
+                review_tool = self.tools.get("local_review") or self.tools.get("github_review")
+                if review_tool is not None:
+                    if evidence_provider := getattr(review_tool, "evidence_provider", None):
                         review_meta[ReviewMetaKey.EVIDENCE_PROVIDER] = evidence_provider
-                specialist_prompt = await resolve_code_review_context(initial_messages, review_meta)
+                specialist_prompt = await resolve_code_review_context(
+                    initial_messages,
+                    review_meta,
+                    progress_callback=on_progress,
+                )
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
@@ -868,7 +890,7 @@ class AgentLoop:
                 await on_stream_end(resuming=False)
         elif result.stop_reason == "error":
             logger.error("LLM returned error: {}", (result.final_content or "")[:200])
-        return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections
+        return result.final_content, result.tools_used, result.messages, result.stop_reason, result.had_injections, result.content_replaced
 
     def _accumulate_total_usage(self, usage: dict[str, int]) -> None:
         usage_total: int | None = None
@@ -1515,20 +1537,7 @@ class AgentLoop:
         return "dispatch"
 
     async def _state_build(self, ctx: TurnContext) -> str:
-        """BUILD 状态：为 LLM 构建初始提示词和历史上下文。
-        
-        它会：
-        1. 根据 token 预算数量进行会话压缩（触发 Dream 二阶段压缩）
-        2. 为所有工具设置上下文（渠道、chat_id 等）
-        3. 获取 session 的历史消息
-        4. 使用 ContextBuilder 构建初始消息序列：
-           - 系统提示词
-           - 历史消息
-           - 当前用户消息
-           - 技能定义
-        5. 提前持久化用户消息（方便 WebUI 历史水合）
-        6. 构建進度回调
-        """
+        """Build the prompt, history, tool context, and progress callbacks."""
         await self.consolidator.maybe_consolidate_by_tokens(
             ctx.session,
             replay_max_messages=self._max_messages,
@@ -1542,7 +1551,7 @@ class AgentLoop:
         )
         if message_tool := self.tools.get("message"):
             if isinstance(message_tool, MessageTool):
-                message_tool.start_turn()  # 告诉 message 工具新的轮次开始
+                message_tool.start_turn()
 
         _hist_kwargs: dict[str, Any] = {
             "max_messages": self._max_messages,
@@ -1551,7 +1560,14 @@ class AgentLoop:
         }
         ctx.history = ctx.session.get_history(**_hist_kwargs)
 
-        # 技能定义缘来主要借由这个方法提供，因为 BUILD 术上下文内容相对稳定
+        # Filter stale subagent results from prior reviews — the LLM would
+        # otherwise try to continue old review work instead of starting fresh.
+        if ctx.session.metadata.get(ReviewMetaKey.MODE, False):
+            ctx.history = [
+                m for m in ctx.history
+                if m.get("_metadata", {}).get("injected_event") != "subagent_result"
+            ]
+
         ctx.initial_messages = self._build_initial_messages(
             ctx.msg, ctx.session, ctx.history, ctx.pending_summary
         )
@@ -1564,21 +1580,10 @@ class AgentLoop:
         if ctx.on_retry_wait is None:
             ctx.on_retry_wait = await self._build_retry_wait_callback(ctx.msg)
 
-        return "ok"  # 下一个状态是 RUN
+        return "ok"
 
     async def _state_run(self, ctx: TurnContext) -> str:
-        """RUN 状态：实际调用 LLM 并执行工具。
-        
-        这是整个轮次的【程】：
-        1. 发送 initial_messages 给 LLM
-        2. LLM 返回应答 + 工具调用
-        3. 触发工具执行、收集结果
-        4. 将结果注入 LLM 上下文，继续轮次
-        5. 直到 LLM 不再有工具调用（给出了最终回答）
-        
-        并发执行：不同的工具可以并发执行，不需要排队
-        中途注入：轮转中到来的新消息会被 'drain_pending' 回调提取，注入为新的 user 消息
-        """
+        """Run the model/tool loop and collect the final turn state."""
         await publish_turn_run_status(self.bus, ctx.msg, "running")
         result = await self._run_agent_loop(
             ctx.initial_messages,
@@ -1594,58 +1599,20 @@ class AgentLoop:
             session_key=ctx.session_key,
             pending_queue=ctx.pending_queue,
         )
-        final_content, tools_used, all_msgs, stop_reason, had_injections = result
-        # 把结果保存到 ctx 中，使竞刎 SAVE 状态会用到
+        final_content, tools_used, all_msgs, stop_reason, had_injections, content_replaced = result
         ctx.final_content = final_content
         ctx.tools_used = tools_used
         ctx.all_messages = all_msgs
         ctx.stop_reason = stop_reason
         ctx.had_injections = had_injections
-        return "ok"  # 下一个状态是 FINALIZE
-
-    async def _state_finalize(self, ctx: TurnContext) -> str:
-        """FINALIZE: run review finalizer if review mode is active."""
-        session_meta = ctx.session.metadata if ctx.session else {}
-        if not session_meta.get(ReviewMetaKey.MODE, False):
-            return "ok"
-
-        finalizer = ReviewFinalizer(
-            workspace=str(self.workspace),
-            changed_files=session_meta.get(ReviewMetaKey.TARGET_PATHS) or [],
-        )
-        for msg in (ctx.all_messages or []):
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, str) and "subagent_result" in (msg.get("metadata") or content):
-                pass
-            meta = msg.get("metadata") or {}
-            if meta.get("injected_event") == "subagent_result":
-                dimension = meta.get("subagent_label", "unknown")
-                finalizer.ingest_subagent_output(dimension, content if isinstance(content, str) else "")
-
-        result = finalizer.finalize(
-            target_name=session_meta.get(ReviewMetaKey.TARGET, "target")
-        )
-        if result.report_markdown:
-            ctx.final_content = result.report_markdown
-
+        ctx.content_replaced = content_replaced
         return "ok"
 
     async def _state_save(self, ctx: TurnContext) -> str:
-        """SAVE 状态：保存本轮次的消息到 session。
-        
-        关键逻辑：
-        1. 计算要跳过的消息数（帶了历史 + 提前持久化的策略）
-        2. 丢叫过長時傳的工具结果（帧接採策略上限为 max_tool_result_chars）
-        3. 提取本轮生成的图象 媽媽的
-        4. 保存各轮子消息 + 宗合延迟 媽媽的
-        5. 清除运行时检查点和 pending 位标
-        """
+        """Persist the turn, media metadata, latency, and runtime cleanup."""
         if ctx.final_content is None or not ctx.final_content.strip():
             ctx.final_content = EMPTY_FINAL_RESPONSE_MESSAGE
 
-        # 计算 skip 数量：需要跳过已经在历史里的消息
         ctx.save_skip = 1 + len(ctx.history) + (1 if ctx.user_persisted_early else 0)
         skip_msgs = ctx.all_messages[ctx.save_skip:]
         ctx.generated_media = generated_image_paths_from_messages(skip_msgs)
@@ -1653,9 +1620,7 @@ class AgentLoop:
         extra = getattr(mt, "turn_delivered_media_paths", lambda: [])() if mt else []
         merge_turn_media_into_last_assistant(ctx.all_messages, ctx.generated_media, extra)
 
-        # 计算本轮的延迟
         ctx.turn_latency_ms = max(0, int((time.time() - ctx.turn_wall_started_at) * 1000))
-        # 保存新消息（忽略已的）
         self._save_turn(
             ctx.session, ctx.all_messages, ctx.save_skip,
             turn_latency_ms=ctx.turn_latency_ms,
@@ -1672,7 +1637,7 @@ class AgentLoop:
                 replay_max_messages=self._max_messages,
             )
         )
-        return "ok"  # 下一个状态是 RESPOND
+        return "ok"
 
     async def _state_respond(self, ctx: TurnContext) -> str:
         ctx.outbound = self._assemble_outbound(
@@ -1685,6 +1650,9 @@ class AgentLoop:
             ctx.on_stream,
             turn_latency_ms=ctx.turn_latency_ms,
         )
+        if ctx.outbound and ctx.content_replaced:
+            ctx.outbound.metadata.pop("_streamed", None)
+        return "ok"
         return "ok"
 
     def _sanitize_persisted_blocks(
@@ -1747,6 +1715,7 @@ class AgentLoop:
         last_assistant_idx: int | None = None
         for m in messages[skip:]:
             entry = dict(m)
+            entry.pop("_metadata", None)
             role, content = entry.get("role"), entry.get("content")
             if role == "assistant" and not content and not entry.get("tool_calls"):
                 continue  # skip empty assistant messages — they poison session context
@@ -1795,12 +1764,23 @@ class AgentLoop:
             for m in session.messages
         ):
             return False
+        metadata = msg.metadata if isinstance(msg.metadata, dict) else {}
+        structured = {
+            key: metadata[key]
+            for key in (
+                "subagent_label",
+                "subagent_status",
+                "subagent_result",
+            )
+            if key in metadata
+        }
         session.add_message(
             "assistant",
             msg.content,
             sender_id=msg.sender_id,
             injected_event="subagent_result",
             subagent_task_id=task_id,
+            **structured,
         )
         return True
 

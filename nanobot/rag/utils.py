@@ -107,3 +107,34 @@ def chunk_from_row(row: tuple) -> IndexedChunk:
         mtime=float(row[11] or 0.0),
         content_hash=str(row[12] or ""),
     )
+
+
+def rrf_merge(
+    ranked_lists: list[tuple[str, list[IndexedHit]]],
+    *,
+    limit: int,
+    k: int = 60,
+) -> list[IndexedHit]:
+    """Merge ranked retrieval lanes with reciprocal-rank fusion."""
+
+    scores: dict[ChunkKey, float] = {}
+    hits: dict[ChunkKey, IndexedHit] = {}
+    reasons: dict[ChunkKey, list[str]] = {}
+    for lane_name, lane_hits in ranked_lists:
+        for rank, hit in enumerate(lane_hits, start=1):
+            key = hit_key(hit)
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+            hits.setdefault(key, hit)
+            merged_reasons = reasons.setdefault(key, [])
+            if lane_name not in merged_reasons:
+                merged_reasons.append(lane_name)
+            for reason in hit.reason:
+                if reason not in merged_reasons:
+                    merged_reasons.append(reason)
+
+    merged: list[IndexedHit] = []
+    for key, score in scores.items():
+        original = hits[key]
+        merged.append(IndexedHit(chunk=original.chunk, score=score, reason=reasons.get(key, [])))
+    merged.sort(key=lambda hit: -hit.score)
+    return merged[:limit]

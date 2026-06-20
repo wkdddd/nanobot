@@ -6,8 +6,8 @@ import re
 
 from loguru import logger
 
-_GITHUB_URL_RE = re.compile(r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)")
-_GITHUB_PR_URL_RE = re.compile(
+GITHUB_URL_RE = re.compile(r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)", re.I)
+GITHUB_PR_URL_RE = re.compile(
     r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)/pull/(\d+)",
     re.I,
 )
@@ -16,7 +16,7 @@ _GITHUB_PR_URL_RE = re.compile(
 def parse_pr_target(target: str | None) -> tuple[str | None, int | None]:
     if not target:
         return None, None
-    match = _GITHUB_PR_URL_RE.search(target.strip())
+    match = GITHUB_PR_URL_RE.search(target.strip())
     if not match:
         return None, None
     owner, repo, pr_number = match.group(1), match.group(2).removesuffix(".git"), int(match.group(3))
@@ -25,7 +25,7 @@ def parse_pr_target(target: str | None) -> tuple[str | None, int | None]:
 
 def parse_repo(repo: str) -> tuple[str, str]:
     repo = repo.strip().rstrip("/")
-    match = _GITHUB_URL_RE.search(repo)
+    match = GITHUB_URL_RE.search(repo)
     if match:
         return match.group(1), match.group(2).removesuffix(".git")
     parts = repo.split("/")

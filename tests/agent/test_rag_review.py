@@ -11,7 +11,7 @@ from nanobot.agent.review.utils import (
     parse_pr_target,
     parse_repo,
 )
-from nanobot.rag.review import (
+from nanobot.rag.review_service import (
     RepositoryRAGRequest,
     RepositoryRAGOptions,
     RepositoryRAGService,

@@ -60,26 +60,32 @@ def _mode_instruction(plan: ReviewPlan) -> str:
     )
 
 
+def _review_tool_name(plan: ReviewPlan) -> str:
+    return "github_review" if plan.target_type == "github" else "local_review"
+
+
 def _action_instruction(plan: ReviewPlan) -> str:
     scope_suffix = " Limit evidence collection to Target paths when provided." if plan.target_paths else ""
-    if plan.action == ReviewAction.FULL_REPO:
+    tool_name = _review_tool_name(plan)
+    if plan.action == ReviewAction.REPO:
         return (
-            "Action full_repo: review the target repository, directory, file, or selected scope as complete content. "
-            "Use repo_review(action='full_repo', ...) for evidence only if the prefetched summary is insufficient."
+            "Action repo: review the target repository, directory, file, or selected scope as complete content. "
+            f"If there is no prefetched evidence summary, call {tool_name}(action='repo', ...) before spawning reviewers."
             + scope_suffix
         )
-    if plan.action == ReviewAction.PR_DIFF:
+    if plan.action == ReviewAction.DIFF and plan.target_type == "github":
         return (
-            "Action pr_diff: review the GitHub pull request changes. Focus on changed files, changed lines, "
+            "Action diff: review the GitHub pull request changes. Focus on changed files, changed lines, "
             "regressions, and related tests."
             + scope_suffix
         )
-    if plan.action == ReviewAction.LOCAL_CHANGED:
+    if plan.action == ReviewAction.DIFF:
         return (
-            "Action local_changed: review current local git changes, including unstaged, staged, and untracked text files."
+            "Action diff: review current local git changes, including unstaged, staged, and untracked text files. "
+            f"If there is no prefetched evidence summary, call {tool_name}(action='diff', ...) before spawning reviewers."
             + scope_suffix
         )
-    return "Action full_repo: review the target scope as complete content."
+    return "Action repo: review the target scope as complete content."
 
 
 def _scope_instruction(plan: ReviewPlan) -> str:
@@ -157,8 +163,10 @@ def render_review_prompt(plan: ReviewPlan) -> str:
     )
     output_section = _SUBAGENT_CANDIDATE_SCHEMA
     requirements = plan.user_requirements.strip() or "(none)"
+    tool_name = _review_tool_name(plan)
     evidence = plan.prefetch_summary or (
-        "No prefetched evidence. Use read-only inspection tools and repo_review only when evidence is needed."
+        f"No prefetched evidence. You MUST call {tool_name} with the ReviewPlan action and target before spawning reviewers. "
+        f"If {tool_name} returns no hits or an error, continue with read-only file inspection and mention the fallback in your reasoning."
     )
     prompt = f"""\
 You are CodeReviewAgent, the main code review coordinator.
@@ -188,6 +196,7 @@ You are CodeReviewAgent, the main code review coordinator.
 
 ### Phase 1 - Inspect
 Use the ReviewPlan and prefetched summary to identify the smallest useful set of files to inspect.
+If the Prefetched Evidence Summary says there is no prefetched evidence, first call `{tool_name}` with the ReviewPlan action, target, target paths, and user requirements. Only fall back to direct file reads when that retrieval has no useful result or errors.
 
 ### Phase 2 - Plan
 {_scope_instruction(plan)}
@@ -210,9 +219,10 @@ After spawning subagents, wait for all to complete. The system will:
 - Parse structured findings from each subagent
 - Validate file existence, line ranges, and evidence
 - Deduplicate across dimensions
+- Put unverifiable candidates in Needs Confirmation with the validation reason
 - Render the final report automatically
 
-If the system flags uncertain findings for your review, evaluate them and respond with accept/reject/uncertain for each. Otherwise your work is done after Phase 3.
+Your work is done after Phase 3. Do not write the final report yourself.
 
 ## Available Review Roles
 {role_lines}

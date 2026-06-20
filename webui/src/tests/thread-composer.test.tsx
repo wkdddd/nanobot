@@ -284,7 +284,7 @@ describe("ThreadComposer", () => {
     expect(screen.queryByPlaceholderText("Type your message...")).not.toBeInTheDocument();
   });
 
-  it("limits review actions by target type", async () => {
+  it("shows repo and diff actions for every target type", async () => {
     render(
       <ThreadComposer
         onSend={vi.fn()}
@@ -298,17 +298,17 @@ describe("ThreadComposer", () => {
     const optionValues = () =>
       Array.from(actionSelect.querySelectorAll("option")).map((option) => option.value);
 
-    expect(optionValues()).toEqual(["full_repo", "pr_diff", "local_changed"]);
+    expect(optionValues()).toEqual(["repo", "diff"]);
 
     fireEvent.click(screen.getByRole("button", { name: "github" }));
-    expect(optionValues()).toEqual(["full_repo", "pr_diff"]);
+    expect(optionValues()).toEqual(["repo", "diff"]);
 
-    fireEvent.change(actionSelect, { target: { value: "pr_diff" } });
-    expect(actionSelect.value).toBe("pr_diff");
+    fireEvent.change(actionSelect, { target: { value: "diff" } });
+    expect(actionSelect.value).toBe("diff");
 
     fireEvent.click(screen.getByRole("button", { name: "local" }));
-    expect(optionValues()).toEqual(["full_repo", "local_changed"]);
-    await waitFor(() => expect(actionSelect.value).toBe("full_repo"));
+    expect(optionValues()).toEqual(["repo", "diff"]);
+    await waitFor(() => expect(actionSelect.value).toBe("diff"));
   });
 
   it("shows a review reference card and sends structured review metadata", () => {
@@ -343,7 +343,7 @@ describe("ThreadComposer", () => {
     expect(screen.getByText("Necessary")).toBeInTheDocument();
     expect(screen.getAllByText("Advanced").length).toBeGreaterThanOrEqual(2);
     fireEvent.change(screen.getByRole("combobox", { name: "Action" }), {
-      target: { value: "full_repo" },
+      target: { value: "repo" },
     });
     fireEvent.click(screen.getByRole("button", { name: "security" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Limited scope" }), {
@@ -358,7 +358,7 @@ describe("ThreadComposer", () => {
         review: {
           mode: "deep",
           target_type: "local",
-          action: "full_repo",
+          action: "repo",
           target: "https://github.com/test/repo",
           focus: ["security"],
           target_paths: ["src/auth.ts", "tests/auth.test.ts"],

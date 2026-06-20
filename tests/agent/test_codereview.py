@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from nanobot.agent.loop import AgentLoop
@@ -15,6 +13,7 @@ from nanobot.agent.review import (
     build_code_review_context,
     build_review_plan,
     normalize_focus,
+    normalize_review_action,
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
@@ -85,7 +84,7 @@ def test_build_code_review_context_full_mode_mentions_full() -> None:
     )
 
     assert "FULL review" in prompt
-    assert "- Action: full_repo" in prompt
+    assert "- Action: repo" in prompt
 
 
 def test_build_code_review_context_includes_subagent_candidate_schema() -> None:
@@ -97,6 +96,17 @@ def test_build_code_review_context_includes_subagent_candidate_schema() -> None:
     assert '"severity"' in prompt
     assert '"evidence"' in prompt
     assert "JSON array" in prompt
+
+
+def test_build_code_review_context_matches_system_finalizer_boundary() -> None:
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
+        max_subagents=4,
+    )
+
+    assert "Do not write the final report yourself" in prompt
+    assert "Needs Confirmation" in prompt
+    assert "respond with accept/reject/uncertain" not in prompt
 
 
 def test_build_code_review_context_extracts_github_target() -> None:
@@ -117,7 +127,7 @@ def test_build_code_review_context_uses_local_target_type() -> None:
 
     assert "- Type: local" in prompt
     assert "- URL/Path: C:\\work\\repo\\src\\app.py" in prompt
-    assert "Action full_repo" in prompt
+    assert "Action repo" in prompt
 
 
 def test_build_code_review_context_extracts_local_path_inside_prompt() -> None:
@@ -136,8 +146,22 @@ def test_build_code_review_context_uses_github_target_type() -> None:
     )
 
     assert "- Type: github" in prompt
-    assert "repo_review(action='full_repo'" in prompt
+    assert "github_review(action='repo'" in prompt
+    assert "repo_review" not in prompt
     assert "github_repo_read" not in prompt
+
+
+def test_build_code_review_context_requires_local_review_without_prefetch() -> None:
+    prompt = build_code_review_context(
+        target=r"C:\work\repo\src\app.py",
+        target_type="local",
+        action="diff",
+    )
+
+    assert "No prefetched evidence" in prompt
+    assert "MUST call local_review" in prompt
+    assert "local_review(action='diff'" in prompt
+    assert "repo_review" not in prompt
 
 
 def test_build_code_review_context_uses_user_requirements() -> None:
@@ -164,51 +188,33 @@ def test_dimension_contract_uses_forced_focus_dimensions() -> None:
     assert "Performance Reviewer" not in prompt
 
 
-def test_review_plan_resolves_pr_url_to_pr_diff() -> None:
+def test_review_plan_resolves_pr_url_to_diff() -> None:
     plan = build_review_plan(target="https://github.com/test/repo/pull/42", target_type="github")
 
     assert plan is not None
-    assert plan.action == "pr_diff"
+    assert plan.action == "diff"
     assert plan.target_repo == "test/repo"
     assert plan.pr_number == 42
 
 
-def test_review_plan_target_paths_keep_full_repo_scope() -> None:
-    plan = build_review_plan(target="./repo", target_paths=["src/auth.py"], action="full_repo")
+def test_review_plan_target_paths_keep_repo_scope() -> None:
+    plan = build_review_plan(target="./repo", target_paths=["src/auth.py"], action="repo")
 
     assert plan is not None
-    assert plan.action == "full_repo"
+    assert plan.action == "repo"
     assert plan.target_paths == ["src/auth.py"]
+
+
+@pytest.mark.parametrize("action", ["full_repo", "pr_diff", "local_changed"])
+def test_review_action_rejects_old_values(action: str) -> None:
+    with pytest.raises(ValueError, match=f"Unknown review action '{action}'"):
+        normalize_review_action(action)
 
 
 def test_build_code_review_context_returns_fallback_without_target() -> None:
     prompt = build_code_review_context(user_content="how should I do a review?")
 
     assert "Code review workflow is active" in prompt
-
-
-def test_report_to_json_has_correct_structure() -> None:
-    report = ReviewReport(
-        target="https://github.com/test/repo",
-        mode="full",
-        dimensions=["security", "tests"],
-        summary="No critical issues found.",
-        findings=[
-            Finding("high", "src/auth.py", 10, "Weak hash", "Brute force", "Use bcrypt"),
-            Finding("low", "src/utils.py", None, "Unused import", "Dead code", "Remove it"),
-        ],
-        checks_performed=["security", "tests"],
-        checks_skipped=[],
-        recommendations=["Fix the weak hash"],
-    )
-    data = json.loads(report.to_json())
-
-    assert data["target"] == "https://github.com/test/repo"
-    assert data["mode"] == "full"
-    assert data["statistics"]["high"] == 1
-    assert data["statistics"]["low"] == 1
-    assert data["statistics"]["critical"] == 0
-    assert len(data["findings"]) == 2
 
 
 def test_max_severity_and_order() -> None:
@@ -233,4 +239,6 @@ def test_code_review_is_not_registered_as_a_tool(tmp_path) -> None:
 
     assert "code_review" not in loop.tool_names
     assert "github_repo_read" not in loop.tool_names
-    assert "repo_review" in loop.tool_names
+    assert "repo_review" not in loop.tool_names
+    assert "local_review" in loop.tool_names
+    assert "github_review" in loop.tool_names

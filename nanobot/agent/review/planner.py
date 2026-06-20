@@ -21,14 +21,9 @@ from nanobot.agent.review.types import (
     ReviewTargetType,
     review_action_values,
 )
-from nanobot.agent.review.utils import parse_pr_target, parse_repo
+from nanobot.agent.review.utils import GITHUB_PR_URL_RE, GITHUB_URL_RE, parse_pr_target, parse_repo
 from nanobot.session.manager import Session
 
-_GITHUB_RE = re.compile(r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)", re.I)
-_GITHUB_PR_RE = re.compile(
-    r"(?:https?://)?github\.com/([^/\s]+)/([^/\s.,;!?)#]+)/pull/(\d+)",
-    re.I,
-)
 _LOCAL_CHANGED_HINT_RE = re.compile(
     r"(?i)\b(changed|changes|diff|local\s+diff|working\s+tree|unstaged|staged|untracked|当前改动|本地改动|变更)\b"
 )
@@ -58,7 +53,7 @@ def normalize_focus(raw: str | list[str] | None) -> tuple[list[ReviewRole], bool
 def infer_review_target_type(target: str | None) -> str | None:
     if not target:
         return None
-    if _GITHUB_RE.search(target):
+    if GITHUB_URL_RE.search(target):
         return "github"
     return "local"
 
@@ -71,7 +66,7 @@ def normalize_review_target_type(raw: str | None, target: str | None = None) -> 
 
 
 def normalize_review_action(raw: str | None) -> ReviewAction:
-    value = (raw or ReviewAction.FULL_REPO.value).strip().lower()
+    value = (raw or ReviewAction.REPO.value).strip().lower()
     try:
         return ReviewAction(value)
     except ValueError:
@@ -99,11 +94,11 @@ def parse_target_paths(raw: Any) -> list[str]:
 
 
 def extract_review_target(text: str) -> tuple[str, str] | None:
-    github_match = _GITHUB_RE.search(text)
+    github_match = GITHUB_URL_RE.search(text)
     if github_match:
         owner, repo = github_match.group(1), github_match.group(2).removesuffix(".git")
         target = f"https://github.com/{owner}/{repo}"
-        if pr_match := _GITHUB_PR_RE.search(text):
+        if pr_match := GITHUB_PR_URL_RE.search(text):
             target = f"https://github.com/{pr_match.group(1)}/{pr_match.group(2)}/pull/{pr_match.group(3)}"
         return target, f"{owner}/{repo}"
 
@@ -146,8 +141,8 @@ def _resolve_action(
     user_content: str,
 ) -> ReviewAction:
     pr_repo, _ = parse_pr_target(target)
-    if pr_repo and requested == ReviewAction.FULL_REPO:
-        return ReviewAction.PR_DIFF
+    if pr_repo and requested == ReviewAction.REPO:
+        return ReviewAction.DIFF
     return requested
 
 
@@ -264,6 +259,7 @@ def latest_user_text(messages: list[dict[str, Any]]) -> str:
 async def resolve_code_review_context(
     initial_messages: list[dict[str, Any]],
     session_meta: dict[str, Any],
+    progress_callback: Any | None = None,
 ) -> str:
     """Build the Review-mode system prompt from metadata or the user prompt."""
     from nanobot.agent.review.prefetch import maybe_prefetch_review_context
@@ -282,7 +278,11 @@ async def resolve_code_review_context(
     )
     if plan is None:
         return build_review_fallback_prompt()
-    prefetch_summary = await maybe_prefetch_review_context(plan, session_meta)
+    prefetch_summary = await maybe_prefetch_review_context(
+        plan,
+        session_meta,
+        progress_callback=progress_callback,
+    )
     if prefetch_summary:
         plan = replace(plan, prefetch_summary=prefetch_summary)
     return render_review_prompt(plan)

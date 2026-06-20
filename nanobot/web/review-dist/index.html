@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <meta name="description" content="nanobot Review Agent — 代码审查工作台" />
+    <meta name="theme-color" content="#FAF8F5" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <style>
+      html,
+      body,
+      #root {
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        background: #FAF8F5;
+        color: #2A2420;
+        font-family:
+          "DM Sans",
+          system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Noto Sans", "Noto Sans SC", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+      }
+
+      .boot-splash {
+        display: flex;
+        height: 100%;
+        align-items: center;
+        justify-content: center;
+      }
+
+      .boot-splash-inner {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: rgba(42, 36, 32, 0.64);
+        font-size: 14px;
+      }
+
+      .boot-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 9999px;
+        background: #7A5C4C;
+        opacity: 0.75;
+        animation: boot-pulse 1s ease-in-out infinite;
+      }
+
+      @keyframes boot-pulse {
+        0%, 100% { transform: scale(0.9); opacity: 0.45; }
+        50% { transform: scale(1); opacity: 0.85; }
+      }
+    </style>
+    <title>Review Agent</title>
+    <script type="module" crossorigin src="/assets/index-C3jlPeov.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-D6z5GdhL.css">
+  </head>
+  <body class="antialiased">
+    <div id="root">
+      <div class="boot-splash">
+        <div class="boot-splash-inner">
+          <span class="boot-dot" aria-hidden="true"></span>
+          <span>Loading Review Agent...</span>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

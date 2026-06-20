@@ -8,9 +8,9 @@ from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoConfig
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_pr_target, parse_repo
-from nanobot.agent.tools.repo_review import RepoReviewTool
+from nanobot.agent.tools.repo_review import GitHubReviewTool, LocalReviewTool
 from nanobot.config.schema import Config
-from nanobot.rag.review import rrf_merge
+from nanobot.rag.review_service import rrf_merge
 from nanobot.rag.utils import IndexedChunk, IndexedHit
 
 
@@ -60,33 +60,120 @@ def test_parse_github_repo_from_url_and_owner_repo() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repo_review_github_requires_target_repo(tmp_path: Path) -> None:
-    tool = RepoReviewTool(workspace=tmp_path)
+async def test_github_review_requires_target_repo(tmp_path: Path) -> None:
+    tool = GitHubReviewTool(workspace=tmp_path)
 
-    result = await tool.execute(target_type="github", action="full_repo")
+    result = await tool.execute(action="repo")
 
-    assert result == "Error: target_repo is required when target_type='github'."
+    assert result == "Error: target_repo is required for github_review."
 
 
 @pytest.mark.asyncio
-async def test_repo_review_github_respects_disabled_config(tmp_path: Path) -> None:
-    tool = RepoReviewTool(
+async def test_github_review_respects_disabled_config(tmp_path: Path) -> None:
+    tool = GitHubReviewTool(
         workspace=tmp_path,
         github_config=GitHubRepoConfig(enable=False),
     )
 
-    result = await tool.execute(target_type="github", action="full_repo", target_repo="test/repo")
+    result = await tool.execute(action="repo", target_repo="test/repo")
 
     assert result == "Error: GitHub repository access is disabled by tools.githubRepo.enable."
 
 
 @pytest.mark.asyncio
-async def test_repo_review_rejects_old_actions(tmp_path: Path) -> None:
-    tool = RepoReviewTool(workspace=tmp_path)
+@pytest.mark.parametrize("action", ["full_repo", "pr_diff", "local_changed", "targeted_files"])
+async def test_local_review_rejects_unknown_or_old_actions(tmp_path: Path, action: str) -> None:
+    tool = LocalReviewTool(workspace=tmp_path)
 
-    result = await tool.execute(action="targeted_files", review_query="auth")
+    result = await tool.execute(action=action, review_query="auth")
 
-    assert "unknown repo_review action 'targeted_files'" in result
+    assert f"unknown local_review action '{action}'" in result
+
+
+@pytest.mark.asyncio
+async def test_local_review_meta_tree_and_file_actions(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "auth.py").write_text("def login(token):\n    return token\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+    tool = LocalReviewTool(workspace=tmp_path)
+
+    meta = await tool.execute(action="meta")
+    tree = await tool.execute(action="tree", tree_pattern="*.py")
+    content = await tool.execute(action="file", repo_path="src/auth.py")
+
+    assert "Repository:" in meta
+    assert "Text files:" in meta
+    assert "src/auth.py" in tree
+    assert "def login" in content
+
+
+@pytest.mark.asyncio
+async def test_local_review_file_blocks_outside_workspace(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "outside_local_review.txt"
+    outside.write_text("secret\n", encoding="utf-8")
+    tool = LocalReviewTool(workspace=tmp_path)
+
+    result = await tool.execute(action="file", repo_path=str(outside))
+
+    assert result.startswith("Error:")
+    assert "outside workspace" in result
+
+
+@pytest.mark.asyncio
+async def test_github_review_reader_actions_pass_aligned_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = GitHubReviewTool(workspace=tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_execute(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(tool.github, "execute", fake_execute)
+
+    result = await tool.execute(
+        action="file",
+        target_repo="test/repo",
+        repo_path="README.md",
+        ref="main",
+        tree_pattern="*.md",
+        tree_limit=25,
+    )
+
+    assert result == "ok"
+    assert calls == [
+        {
+            "action": "file",
+            "repo": "test/repo",
+            "path": "README.md",
+            "ref": "main",
+            "pattern": "*.md",
+            "max_entries": 25,
+            "pr_number": 0,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_github_review_pr_url_defaults_to_diff(tmp_path: Path) -> None:
+    tool = GitHubReviewTool(workspace=tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_dispatch(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "diff context"
+
+    tool.evidence_service.dispatch = fake_dispatch  # type: ignore[method-assign]
+
+    result = await tool.execute(target="https://github.com/test/repo/pull/42")
+
+    assert result == "diff context"
+    assert calls[0]["target_type"] == "github"
+    assert calls[0]["action"] == "diff"
+    assert calls[0]["repo"] == "test/repo"
+    assert calls[0]["pr_number"] == 42
 
 
 def test_repo_review_github_token_prefers_workspace_config_json(tmp_path: Path) -> None:
@@ -94,7 +181,7 @@ def test_repo_review_github_token_prefers_workspace_config_json(tmp_path: Path) 
         '{"tools":{"githubRepo":{"token":"workspace-token"}}}',
         encoding="utf-8",
     )
-    tool = RepoReviewTool(
+    tool = GitHubReviewTool(
         workspace=tmp_path,
         github_config=GitHubRepoConfig(token="runtime-token"),
     )
@@ -130,10 +217,10 @@ def test_rrf_merge_combines_ranked_lists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_repo_review_full_repo_limited_scope_requires_paths_for_targeted_helper(tmp_path: Path) -> None:
+async def test_local_review_repo_limited_scope_requires_paths_for_targeted_helper(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "auth.py").write_text("def login(token):\n    return token\n", encoding="utf-8")
-    tool = RepoReviewTool(workspace=tmp_path)
+    tool = LocalReviewTool(workspace=tmp_path)
 
     result = await tool.evidence_service.local_targeted_context(
         review_query="login token",
@@ -142,7 +229,7 @@ async def test_repo_review_full_repo_limited_scope_requires_paths_for_targeted_h
         include_tests=True,
     )
 
-    assert result == "Error: target_paths is required for limited full_repo review."
+    assert result == "Error: target_paths is required for limited repo review."
 
 
 @pytest.mark.asyncio
@@ -150,7 +237,7 @@ async def test_github_api_success_logs_structured_event(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tool = RepoReviewTool(workspace=tmp_path)
+    tool = GitHubReviewTool(workspace=tmp_path)
 
     async def fake_token() -> None:
         return None

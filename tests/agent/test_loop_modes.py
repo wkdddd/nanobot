@@ -98,6 +98,15 @@ def test_config_accepts_subagent_concurrency_below_five() -> None:
     assert config.agents.defaults.max_concurrent_subagents == 2
 
 
+def test_agent_loop_state_machine_has_no_review_finalize_state() -> None:
+    assert "FINALIZE" not in TurnState.__members__
+    assert all(
+        state.name != "FINALIZE"
+        for transition in AgentLoop._TRANSITIONS.values()
+        for state in [transition]
+    )
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_leaves_context_plain_when_specialist_modes_disabled(
     tmp_path,
@@ -227,6 +236,33 @@ def test_sanitize_persisted_blocks_converts_non_dict_blocks() -> None:
         {"type": "text", "text": "[binary content omit\n... (truncated)"},
         {"type": "text", "text": "123"},
     ]
+
+
+def test_session_history_preserves_subagent_result_metadata() -> None:
+    session = Session(key="test:review")
+    session.add_message(
+        "assistant",
+        "wrapped result",
+        injected_event="subagent_result",
+        subagent_task_id="task",
+        subagent_label="security",
+        subagent_status="ok",
+        subagent_result="[]",
+    )
+
+    history = session.get_history()
+
+    assert history == [{
+        "role": "assistant",
+        "content": "wrapped result",
+        "_metadata": {
+            "injected_event": "subagent_result",
+            "subagent_task_id": "task",
+            "subagent_label": "security",
+            "subagent_status": "ok",
+            "subagent_result": "[]",
+        },
+    }]
 
 
 @pytest.mark.asyncio

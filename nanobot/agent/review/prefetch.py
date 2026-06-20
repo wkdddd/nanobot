@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
@@ -16,10 +16,51 @@ from nanobot.agent.review.types import (
 )
 
 _PREFETCH_ACTIONS = {
-    ReviewAction.FULL_REPO,
-    ReviewAction.PR_DIFF,
-    ReviewAction.LOCAL_CHANGED,
+    ReviewAction.REPO,
+    ReviewAction.DIFF,
 }
+
+ReviewProgressCallback = Callable[..., Awaitable[None]]
+
+
+async def _emit_prefetch_progress(
+    progress_callback: ReviewProgressCallback | None,
+    *,
+    phase: str,
+    trace_id: str | None,
+    action: ReviewAction,
+    target_type: str,
+    status: str,
+    reason: str = "",
+    elapsed_ms: float | None = None,
+    raw_chars: int | None = None,
+    summary_chars: int | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    event: dict[str, Any] = {
+        "version": 1,
+        "phase": phase,
+        "name": "review_prefetch",
+        "arguments": {
+            "action": action.value,
+            "target_type": target_type,
+        },
+        "result": status,
+        "error": reason or None,
+        "files": [],
+        "embeds": [],
+        "metadata": {
+            "trace_id": trace_id,
+            "elapsed_ms": round(elapsed_ms, 1) if elapsed_ms is not None else None,
+            "raw_chars": raw_chars,
+            "summary_chars": summary_chars,
+        },
+    }
+    try:
+        await progress_callback("", tool_events=[event])
+    except Exception:
+        logger.exception("review.prefetch.progress_emit_failed trace_id={}", trace_id)
 
 
 def _compact_evidence(raw: str, *, budget: int = 2400) -> str:
@@ -48,13 +89,35 @@ def _compact_evidence(raw: str, *, budget: int = 2400) -> str:
     return compact
 
 
-async def maybe_prefetch_review_context(plan: ReviewPlan, session_meta: dict[str, Any]) -> str | None:
+async def maybe_prefetch_review_context(
+    plan: ReviewPlan,
+    session_meta: dict[str, Any],
+    progress_callback: ReviewProgressCallback | None = None,
+) -> str | None:
     if plan.action not in _PREFETCH_ACTIONS:
         logger.info("review.prefetch.skip action={} reason=non_prefetch_action", plan.action.value)
+        await _emit_prefetch_progress(
+            progress_callback,
+            phase="skip",
+            trace_id=None,
+            action=plan.action,
+            target_type=plan.target_type,
+            status="skip",
+            reason="non_prefetch_action",
+        )
         return None
     evidence_service: ReviewEvidenceProvider | None = session_meta.get(ReviewMetaKey.EVIDENCE_PROVIDER)
     if evidence_service is None:
         logger.info("review.prefetch.skip action={} reason=evidence_service_unavailable", plan.action.value)
+        await _emit_prefetch_progress(
+            progress_callback,
+            phase="skip",
+            trace_id=None,
+            action=plan.action,
+            target_type=plan.target_type,
+            status="skip",
+            reason="evidence_service_unavailable",
+        )
         return None
 
     trace_id = uuid.uuid4().hex[:8]
@@ -71,69 +134,69 @@ async def maybe_prefetch_review_context(plan: ReviewPlan, session_meta: dict[str
         len(query),
         5,
     )
+    await _emit_prefetch_progress(
+        progress_callback,
+        phase="start",
+        trace_id=trace_id,
+        action=plan.action,
+        target_type=plan.target_type,
+        status="start",
+    )
     try:
         target_type = plan.target_type if plan.target_type != "auto" else "local"
-        if target_type == "github":
-            repo = (plan.target_repo or plan.target or "").strip()
-            if plan.action == ReviewAction.PR_DIFF:
-                result = await evidence_service.github_diff_context(
-                    repo=repo,
-                    pr_number=plan.pr_number or 0,
-                    target_paths=plan.target_paths,
-                    review_query=query,
-                    max_results=5,
-                    include_tests=True,
-                    trace_id=trace_id,
-                )
-            else:
-                result = await evidence_service.github_context(
-                    repo=repo,
-                    ref=None,
-                    tree_pattern=None,
-                    review_query=query,
-                    max_results=5,
-                    include_tests=True,
-                    trace_id=trace_id,
-                )
-        elif plan.action == ReviewAction.LOCAL_CHANGED:
-            result = await evidence_service.local_changed_context(
-                review_query=query,
-                target_paths=plan.target_paths,
-                max_results=5,
-                include_tests=True,
-            )
-        elif plan.target_paths:
-            result = await evidence_service.local_targeted_context(
-                review_query=query,
-                target_paths=plan.target_paths,
-                max_results=5,
-                include_tests=True,
-            )
-        else:
-            result = await evidence_service.local_context(
-                review_query=query,
-                max_results=5,
-                include_tests=True,
-            )
+        result = await evidence_service.dispatch(
+            target_type=target_type,
+            action=plan.action.value,
+            repo=(plan.target_repo or plan.target or "").strip(),
+            pr_number=plan.pr_number or 0,
+            target_paths=plan.target_paths or None,
+            review_query=query,
+            max_results=5,
+            include_tests=True,
+            trace_id=trace_id,
+        )
     except Exception as exc:
+        elapsed_ms = (time.perf_counter() - started) * 1000
         logger.warning(
             "review.prefetch.done trace_id={} status=error action={} target_type={} reason={} elapsed_ms={:.1f}",
             trace_id,
             plan.action.value,
             plan.target_type,
             exc,
-            (time.perf_counter() - started) * 1000,
+            elapsed_ms,
+        )
+        await _emit_prefetch_progress(
+            progress_callback,
+            phase="end",
+            trace_id=trace_id,
+            action=plan.action,
+            target_type=plan.target_type,
+            status="error",
+            reason=str(exc),
+            elapsed_ms=elapsed_ms,
         )
         return None
     raw = str(result)
     summary = _compact_evidence(raw)
+    elapsed_ms = (time.perf_counter() - started) * 1000
     logger.info(
         "review.prefetch.done trace_id={} status=ok action={} raw_chars={} summary_chars={} elapsed_ms={:.1f}",
         trace_id,
         plan.action.value,
         len(raw),
         len(summary),
-        (time.perf_counter() - started) * 1000,
+        elapsed_ms,
+    )
+    await _emit_prefetch_progress(
+        progress_callback,
+        phase="end",
+        trace_id=trace_id,
+        action=plan.action,
+        target_type=plan.target_type,
+        status="ok" if summary else "no_summary",
+        elapsed_ms=elapsed_ms,
+        raw_chars=len(raw),
+        summary_chars=len(summary),
     )
     if not summary:
         return None

@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from loguru import logger
 
@@ -30,8 +30,10 @@ class ReviewValidator:
 
     def __init__(self, ctx: ValidationContext) -> None:
         self._ctx = ctx
+        self._workspace = Path(ctx.workspace).resolve()
+        self._changed_files = {self._normalize_rel_path(path) for path in ctx.changed_files}
         self._seen_fingerprints: set[str] = set()
-        self.stats = {"accepted": 0, "rejected": 0, "needs_review": 0}
+        self.stats = {"accepted": 0, "rejected": 0, "needs_confirmation": 0}
 
     def validate_candidates(
         self, candidates: list[ReviewFindingCandidate], dimension: str
@@ -47,10 +49,10 @@ class ReviewValidator:
                 self.stats["rejected"] += 1
             else:
                 result.uncertain.append((candidate, verdict))
-                self.stats["needs_review"] += 1
+                self.stats["needs_confirmation"] += 1
         result.candidates = candidates
         logger.debug(
-            "validator dimension={} accepted={} rejected={} needs_review={}",
+            "validator dimension={} accepted={} rejected={} needs_confirmation={}",
             dimension,
             len(result.accepted),
             len(result.rejected),
@@ -76,8 +78,13 @@ class ReviewValidator:
             )
         self._seen_fingerprints.add(fp)
 
-        file_path = os.path.join(self._ctx.workspace, c.file)
-        if not os.path.isfile(file_path):
+        file_path = self._resolve_candidate_path(c.file)
+        if file_path is None:
+            return ReviewFindingVerdict(
+                verdict=FindingVerdict.REJECTED,
+                reason=f"path outside workspace: {c.file}",
+            )
+        if not file_path.is_file():
             return ReviewFindingVerdict(
                 verdict=FindingVerdict.REJECTED,
                 reason=f"file not found: {c.file}",
@@ -88,7 +95,8 @@ class ReviewValidator:
                     verdict=FindingVerdict.REJECTED,
                     reason=f"line {c.line} out of range for {c.file}",
                 )
-        if self._ctx.changed_files and c.file not in self._ctx.changed_files:
+        normalized_file = self._workspace_relative_path(file_path)
+        if self._changed_files and normalized_file not in self._changed_files:
             return ReviewFindingVerdict(
                 verdict=FindingVerdict.UNCERTAIN,
                 reason="file not in changed set",
@@ -100,18 +108,60 @@ class ReviewValidator:
                 reason="no evidence provided",
                 missing_evidence="candidate lacks supporting evidence snippet",
             )
+        if not self._evidence_matches(file_path, c.evidence):
+            return ReviewFindingVerdict(
+                verdict=FindingVerdict.UNCERTAIN,
+                reason="evidence not found in file",
+                missing_evidence="candidate evidence snippet does not match the target file",
+            )
         return ReviewFindingVerdict(verdict=FindingVerdict.ACCEPTED)
 
     def _fingerprint(self, c: ReviewFindingCandidate) -> str:
         key = f"{c.file}:{c.line or 0}:{c.title.lower().strip()}"
         return hashlib.sha256(key.encode()).hexdigest()[:16]
 
-    def _line_in_range(self, path: str, line: int) -> bool:
+    def _line_in_range(self, path: Path, line: int) -> bool:
         if line < 1:
             return False
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
+            with path.open("r", encoding="utf-8", errors="replace") as f:
                 count = sum(1 for _ in f)
             return line <= count
         except OSError:
             return False
+
+    def _resolve_candidate_path(self, raw: str) -> Path | None:
+        value = raw.strip()
+        if not value:
+            return None
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return None
+        try:
+            resolved = (self._workspace / candidate).resolve()
+            resolved.relative_to(self._workspace)
+        except (OSError, ValueError):
+            return None
+        return resolved
+
+    @staticmethod
+    def _normalize_rel_path(raw: str) -> str:
+        return raw.replace("\\", "/").strip().lstrip("./")
+
+    def _workspace_relative_path(self, path: Path) -> str:
+        try:
+            return path.relative_to(self._workspace).as_posix()
+        except ValueError:
+            return self._normalize_rel_path(str(path))
+
+    @staticmethod
+    def _evidence_matches(path: Path, evidence: str) -> bool:
+        snippet = " ".join(evidence.split())
+        if not snippet:
+            return False
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        normalized_text = " ".join(text.split())
+        return snippet in normalized_text

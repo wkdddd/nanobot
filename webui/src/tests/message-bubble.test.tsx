@@ -36,7 +36,7 @@ describe("MessageBubble", () => {
       review: {
         mode: "deep",
         target_type: "github",
-        action: "pr_diff",
+        action: "diff",
         target: "https://github.com/test/repo",
       },
     };
@@ -45,7 +45,7 @@ describe("MessageBubble", () => {
 
     expect(screen.getByText("https://github.com/test/repo")).toBeInTheDocument();
     expect(screen.getByText("GITHUB")).toBeInTheDocument();
-    expect(screen.getByText("PR_DIFF")).toBeInTheDocument();
+    expect(screen.getByText("DIFF")).toBeInTheDocument();
     expect(screen.getByText("DEEP")).toBeInTheDocument();
     expect(screen.getByText("please review")).toBeInTheDocument();
   });

@@ -104,6 +104,7 @@ class AgentRunResult:
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
     had_injections: bool = False
+    content_replaced: bool = False
 
 class AgentRunner:
     """Run a tool-capable LLM loop without product-layer concerns."""
@@ -579,6 +580,7 @@ class AgentRunner:
             error=error,
             tool_events=tool_events,
             had_injections=had_injections,
+            content_replaced=context.content_replaced,
         )
 
     def _build_request_kwargs(

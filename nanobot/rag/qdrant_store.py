@@ -46,15 +46,28 @@ class QdrantVectorStore:
 
     @classmethod
     def from_config(cls, config: Any, *, dimensions: int = 1024) -> "QdrantVectorStore | None":
-        if not getattr(config, "enable", False):
+        def cfg_get(*names: str, default: Any = None) -> Any:
+            if isinstance(config, dict):
+                for name in names:
+                    if name in config:
+                        return config[name]
+            for name in names:
+                value = getattr(config, name, None)
+                if value is not None:
+                    return value
+            return default
+
+        if not cfg_get("enable", default=False):
             return None
         return cls(
-            url=str(getattr(config, "url", "Url","http://localhost:6333")),
-            collection=str(getattr(config, "collection", "nanobot_rag_chunks")),
-            api_key=str(getattr(config, "api_key", "apiKey") or ""),
-            timeout=float(getattr(config, "timeout", 30.0) or 30.0),
+            url=str(cfg_get("url", "Url", default="http://localhost:6333")),
+            collection=str(cfg_get("collection", default="nanobot_rag_chunks")),
+            api_key=str(cfg_get("api_key", "apiKey", default="") or ""),
+            timeout=float(cfg_get("timeout", default=30.0) or 30.0),
             dimensions=dimensions,
-            check_compatibility=bool(getattr(config, "check_compatibility", False)),
+            check_compatibility=bool(
+                cfg_get("check_compatibility", "checkCompatibility", default=False)
+            ),
         )
 
     def _get_client(self) -> Any:

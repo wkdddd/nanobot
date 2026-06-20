@@ -11,15 +11,13 @@ from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoReader
 from nanobot.agent.review.utils import clean_scope_paths, parse_repo, path_matches_scope
-from nanobot.rag.review import (
+from nanobot.rag.review_service import (
     DEFAULT_TEXT_EXTS,
     REMOTE_SOURCE_TYPE,
     SOURCE_TYPE,
     RepositoryRAGRequest,
     RepositoryRAGService,
 )
-
-_DEFAULT_TEXT_EXTS = DEFAULT_TEXT_EXTS
 
 
 class ReviewEvidenceService:
@@ -35,6 +33,72 @@ class ReviewEvidenceService:
         self.repository_rag = rag_service
         self.workspace = (workspace or rag_service.workspace).expanduser().resolve()
         self.github = github or GitHubRepoReader(workspace=self.workspace)
+
+    async def dispatch(
+        self,
+        *,
+        target_type: str,
+        action: str,
+        repo: str = "",
+        ref: str | None = None,
+        pr_number: int = 0,
+        target_paths: list[str] | None = None,
+        tree_pattern: str | None = None,
+        review_query: str | None = None,
+        max_results: int = 5,
+        include_tests: bool | None = None,
+        trace_id: str = "",
+    ) -> str:
+        """Unified entry point that routes to the appropriate evidence method."""
+        if target_type == "github":
+            if action == "diff":
+                return await self.github_diff_context(
+                    repo=repo,
+                    pr_number=pr_number,
+                    target_paths=target_paths or [],
+                    review_query=review_query,
+                    max_results=max_results,
+                    include_tests=include_tests,
+                    trace_id=trace_id,
+                )
+            if target_paths:
+                return await self.github_targeted_context(
+                    repo=repo,
+                    ref=ref,
+                    target_paths=target_paths,
+                    review_query=review_query,
+                    max_results=max_results,
+                    include_tests=include_tests,
+                    trace_id=trace_id,
+                )
+            return await self.github_context(
+                repo=repo,
+                ref=ref,
+                tree_pattern=tree_pattern,
+                review_query=review_query,
+                max_results=max_results,
+                include_tests=include_tests,
+                trace_id=trace_id,
+            )
+        if action == "diff":
+            return await self.local_changed_context(
+                review_query=review_query,
+                target_paths=target_paths or [],
+                max_results=max_results,
+                include_tests=include_tests,
+            )
+        if target_paths:
+            return await self.local_targeted_context(
+                review_query=review_query,
+                target_paths=target_paths,
+                max_results=max_results,
+                include_tests=include_tests,
+            )
+        return await self.local_context(
+            review_query=review_query,
+            max_results=max_results,
+            include_tests=include_tests,
+        )
 
     async def local_context(
         self,
@@ -141,7 +205,7 @@ class ReviewEvidenceService:
             paths = set(repo.git.diff("--name-only").splitlines())
             paths.update(repo.git.diff("--name-only", "--cached").splitlines())
             paths.update(str(p) for p in repo.untracked_files)
-            return sorted(path for path in paths if path and Path(path).suffix.lower() in _DEFAULT_TEXT_EXTS)
+            return sorted(path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS)
         except Exception as exc:
             logger.warning("repo_review local git diff unavailable reason={}", exc)
             return []
@@ -162,7 +226,7 @@ class ReviewEvidenceService:
                 "local_targeted",
                 (time.perf_counter() - started) * 1000,
             )
-            return "Error: target_paths is required for limited full_repo review."
+            return "Error: target_paths is required for limited repo review."
         query = review_query or "code review targeted files security tests architecture"
         query = f"{query} {' '.join(cleaned[:40])}"
         block = await self.local_context(
@@ -311,7 +375,7 @@ class ReviewEvidenceService:
                 repo,
                 (time.perf_counter() - started) * 1000,
             )
-            return "Error: target_paths is required for limited full_repo review."
+            return "Error: target_paths is required for limited repo review."
         files: dict[str, str] = {}
         snapshot_name = repo
         owner, repo_name = parse_repo(repo)
@@ -391,7 +455,7 @@ class ReviewEvidenceService:
                 repo,
                 (time.perf_counter() - started) * 1000,
             )
-            return "Error: pr_number is required for action='pr_diff'."
+            return "Error: pr_number is required for action='diff'."
         if not review_query or not review_query.strip():
             review_query = "code review changed lines regressions security tests"
         try:

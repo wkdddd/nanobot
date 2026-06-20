@@ -307,7 +307,7 @@ export interface OutboundImageGeneration {
 
 export type ReviewDepth = "quick" | "full" | "deep";
 export type ReviewTargetType = "auto" | "github" | "local";
-export type ReviewAction = "full_repo" | "pr_diff" | "local_changed";
+export type ReviewAction = "repo" | "diff";
 export type ReviewFocus =
   | "security"
   | "tests"

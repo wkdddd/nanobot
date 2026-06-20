@@ -174,6 +174,20 @@ class Session:
             for key in ("tool_calls", "tool_call_id", "name", "reasoning_content", "thinking_blocks"):
                 if key in message:
                     entry[key] = message[key]
+            if message.get("injected_event") == "subagent_result":
+                meta = {
+                    key: message[key]
+                    for key in (
+                        "injected_event",
+                        "subagent_task_id",
+                        "subagent_label",
+                        "subagent_status",
+                        "subagent_result",
+                    )
+                    if key in message
+                }
+                if meta:
+                    entry["_metadata"] = meta
             out.append(entry)
 
         if max_tokens > 0 and out:

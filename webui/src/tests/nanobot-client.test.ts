@@ -380,7 +380,7 @@ describe("NanobotClient", () => {
       review: {
         mode: "full",
         target_type: "auto",
-        action: "full_repo",
+        action: "repo",
         focus: ["security", "tests"],
         target_paths: ["src/auth.ts", "tests/auth.test.ts"],
       },
@@ -393,7 +393,7 @@ describe("NanobotClient", () => {
         content: "review auth",
         review_mode_variant: "full",
         review_target_type: "auto",
-        review_action: "full_repo",
+        review_action: "repo",
         review_focus: ["security", "tests"],
         review_target_paths: ["src/auth.ts", "tests/auth.test.ts"],
         webui: true,

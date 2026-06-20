@@ -1065,9 +1065,8 @@ def review(
     ),
     mode: str = typer.Option("full", "--mode", help="Review mode: quick, deep, or full"),
     target_type: str = typer.Option("auto", "--target-type", help="Review target type: auto, github, or local"),
-    action: str = typer.Option("full_repo", "--action", help="Review action: full_repo, pr_diff, or local_changed"),
+    action: str = typer.Option("repo", "--action", help="Review action: repo or diff"),
     paths: str | None = typer.Option(None, "--paths", help="Comma-separated files or paths that limit the review scope"),
-    format: str = typer.Option("markdown", "--format", help="Output format: markdown or json"),
     max_subagents: int | None = typer.Option(None, "--max-subagents", help="Maximum concurrent subagents"),
     fail_on: str | None = typer.Option(None, "--fail-on", help="Exit non-zero if findings at or above: critical|high|medium|low"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
@@ -1081,9 +1080,6 @@ def review(
 
     if mode not in ("quick", "deep", "full"):
         console.print(f"[red]Invalid mode '{mode}'. Must be: quick, deep, or full[/red]")
-        raise typer.Exit(1)
-    if format not in ("markdown", "json"):
-        console.print(f"[red]Invalid format '{format}'. Must be: markdown or json[/red]")
         raise typer.Exit(1)
     if target_type not in ("auto", "github", "local"):
         console.print(f"[red]Invalid --target-type '{target_type}'. Must be: auto, github, or local[/red]")
@@ -1159,10 +1155,10 @@ def review(
             full_output = "".join(collected)
 
             if output:
-                _save_review_report(output, full_output, format)
+                _save_review_report(output, full_output)
 
             if fail_on:
-                exit_code = _check_fail_on(full_output, fail_on, format)
+                exit_code = _check_fail_on(full_output, fail_on)
                 if exit_code != 0:
                     raise typer.Exit(exit_code)
 
@@ -1422,12 +1418,12 @@ def agent(
         asyncio.run(run_interactive())
 
 
-def _save_review_report(output_path: str, content: str, format: str = "markdown") -> None:
+def _save_review_report(output_path: str, content: str) -> None:
     """Save review report to file."""
     path = Path(output_path).expanduser()
 
     if not path.suffix:
-        path = path.with_suffix(".json" if format == "json" else ".md")
+        path = path.with_suffix(".md")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
@@ -1435,9 +1431,8 @@ def _save_review_report(output_path: str, content: str, format: str = "markdown"
     console.print(f"[green]Report saved to {path}[/green]")
 
 
-def _check_fail_on(report_content: str, threshold: str, format: str) -> int:
+def _check_fail_on(report_content: str, threshold: str) -> int:
     """Return non-zero exit code if findings meet or exceed the severity threshold."""
-    import json
     import re
 
     from nanobot.agent.review import SEVERITY_ORDER
@@ -1445,20 +1440,10 @@ def _check_fail_on(report_content: str, threshold: str, format: str) -> int:
     threshold_idx = SEVERITY_ORDER.index(threshold)
     target_severities = set(SEVERITY_ORDER[: threshold_idx + 1])
 
-    if format == "json":
-        try:
-            data = json.loads(report_content)
-            findings = data.get("findings", [])
-            for f in findings:
-                if f.get("severity") in target_severities:
-                    return 1
-        except (json.JSONDecodeError, TypeError):
-            return 0
-    else:
-        content_lower = report_content.lower()
-        for sev in target_severities:
-            if re.search(rf"(#{2,4}\s.*{sev}|severity:\s*{sev})", content_lower):
-                return 1
+    content_lower = report_content.lower()
+    for sev in target_severities:
+        if re.search(rf"(#{2,4}\s.*{sev}|severity:\s*{sev})", content_lower):
+            return 1
     return 0
 # ============================================================================
 # Channel Commands
