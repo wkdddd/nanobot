@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
+from nanobot.agent.review.policy import apply_policy_to_roles, policy_for_depth
 from nanobot.agent.review.types import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
@@ -203,12 +204,17 @@ def build_review_plan(
         max_subagents_int = 4
     max_subagents_int = min(max(max_subagents_int, 1), 10)
 
+    depth_value = normalize_mode(depth)
+    policy = policy_for_depth(depth_value, requested_max_subagents=max_subagents_int)
+    roles = apply_policy_to_roles(roles=roles, forced_focus=forced, policy=policy)
+    max_subagents_int = policy.max_subagents
+
     plan = ReviewPlan(
         target=target,
         target_name=target_name or target,
         target_type=target_type_value,
         action=resolved_action,
-        depth=normalize_mode(depth),
+        depth=depth_value,
         roles=roles,
         forced_focus=forced,
         max_subagents=max_subagents_int,

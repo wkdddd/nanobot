@@ -842,6 +842,7 @@ export function ThreadComposer({
                       type="button"
                       disabled={disabled}
                       aria-pressed={reviewDepth === mode}
+                      title={t(`thread.composer.review.depthHints.${mode}`)}
                       onClick={() => setReviewDepth(mode)}
                       className={cn(
                         "min-w-14 whitespace-nowrap rounded-full px-2.5 text-[11.5px] font-medium transition-colors",

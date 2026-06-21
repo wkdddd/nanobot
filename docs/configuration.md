@@ -985,6 +985,49 @@ at once. If your provider can handle more parallel work, raise the limit:
 | `agents.defaults.maxConcurrentSubagents` | `1` | Maximum number of spawned subagents that may run at the same time. Attempts to spawn beyond this limit return an error. |
 
 
+## Code Review
+
+Code review mode uses programmatic policies for depth:
+
+| Mode | Behavior |
+|------|----------|
+| `quick` | High-risk review only. It keeps security, bug-risk, and tests where relevant, caps subagents at 2, keeps only critical/high candidates, and skips AI judge. |
+| `full` | Complete review. It covers the standard dimensions and runs hard validation plus AI judge on subagent findings. |
+| `deep` | Strengthened review. It adds optional dimensions, allows more subagents, retrieves more evidence, and runs stricter AI judge cross-checks. |
+
+AI judge can use the active chat model or an independent `modelPresets` entry:
+
+```json
+{
+  "review": {
+    "judge": {
+      "enabled": true,
+      "modelPreset": "review-judge",
+      "maxCandidates": 40,
+      "timeoutSeconds": 60,
+      "maxTokens": 2048
+    }
+  },
+  "modelPresets": {
+    "review-judge": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "temperature": 0,
+      "maxTokens": 2048
+    }
+  }
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `review.judge.enabled` | `true` | Enables AI judging for `full` and `deep`; `quick` still skips judge by policy. |
+| `review.judge.modelPreset` | `null` | Optional independent judge model preset. When omitted, the active chat provider/model is used. |
+| `review.judge.maxCandidates` | `40` | Maximum candidates sent to AI judge per report. |
+| `review.judge.timeoutSeconds` | `60` | AI judge timeout. Failures are logged and fall back to hard validation. |
+| `review.judge.maxTokens` | `2048` | Maximum judge response tokens. |
+
+
 ## Auto Compact
 
 When a user is idle for longer than a configured threshold, nanobot **proactively** compresses the older part of the session context into a summary while keeping a recent legal suffix of live messages. This reduces token cost and first-token latency when the user returns — instead of re-processing a long stale context with an expired KV cache, the model receives a compact summary, the most recent live context, and fresh input.
@@ -1008,13 +1051,13 @@ When a user is idle for longer than a configured threshold, nanobot **proactivel
 How it works:
 1. **Idle detection**: On each idle tick (~1 s), checks all sessions for expiration.
 2. **Background compaction**: Idle sessions summarize the older live prefix via LLM and keep the most recent legal suffix (currently 8 messages).
-3. **Summary injection**: When the user returns, the summary is injected as runtime context (one-shot, not persisted) alongside the retained recent suffix.
-4. **Restart-safe resume**: The summary is also mirrored into session metadata so it can still be recovered after a process restart.
+3. **Summary injection**: When the user returns, the summary is injected as runtime context alongside the retained recent suffix.
+4. **Restart-safe resume**: The summary is written into the session metadata line so it can still be recovered after a process restart.
 
 > [!NOTE]
 > Mental model: "summarize older context, keep the freshest live turns, **and overwrite the session file with the compact form.**" It is not a full `session.clear()`, but it is a write — not a soft cursor move.
 >
-> Concretely, auto compact rewrites `sessions/<key>.jsonl` in place: older messages (including their structured `tool_calls` / `tool_call_id` / `reasoning_content`) are replaced by just the retained recent suffix (currently 8 messages), while the archived prefix is preserved only as a plain-text summary appended to `memory/history.jsonl` (or a `[RAW] ...` flattened dump if LLM summarization fails). The original structured JSON of those turns is no longer recoverable from the session file.
+> Concretely, auto compact rewrites `sessions/<key>.jsonl` in place: older messages (including their structured `tool_calls` / `tool_call_id` / `reasoning_content`) are replaced by just the retained recent suffix (currently 8 messages), while the archived prefix is preserved only as a plain-text summary in that same session file's metadata line. The original structured JSON of those turns is no longer recoverable from the session file.
 >
 > This differs from the **token-driven soft consolidation** that fires when a prompt exceeds the context budget: that path only advances an internal `last_consolidated` cursor and leaves the session file untouched, so the raw tool-call trail stays on disk and can still be replayed or audited. If you rely on that trail for debugging or auditing, leave `idleCompactAfterMinutes` at the default `0` and let only the token-driven path run.
 

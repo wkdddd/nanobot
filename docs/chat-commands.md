@@ -10,11 +10,6 @@ These commands work inside chat channels and interactive agent sessions:
 | `/status` | Show bot status |
 | `/model` | Show the current model and available model presets |
 | `/model <preset>` | Switch the runtime model preset for future turns |
-| `/dream` | Run Dream memory consolidation now |
-| `/dream-log` | Show the latest Dream memory change |
-| `/dream-log <sha>` | Show a specific Dream memory change |
-| `/dream-restore` | List recent Dream memory versions |
-| `/dream-restore <sha>` | Restore memory to the state before a specific change |
 | `/pairing` | List pending pairing requests |
 | `/pairing approve <code>` | Approve a pairing code |
 | `/pairing deny <code>` | Deny a pending pairing request |

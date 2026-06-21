@@ -1,6 +1,7 @@
 """Review finalizer: parse subagent results, validate, and render reports."""
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -9,11 +10,17 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
+from nanobot.agent.review.judge import ReviewJudge
+from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.report import render_review_report
 from nanobot.agent.review.types import (
+    FindingVerdict,
+    ReviewDepth,
     ReviewDimensionResult,
     ReviewFindingCandidate,
     ReviewFindingVerdict,
+    ReviewJudgedFinding,
+    ReviewModePolicy,
 )
 from nanobot.agent.review.validator import ReviewValidator, ValidationContext
 
@@ -33,7 +40,13 @@ class ReviewFinalizerResult:
 class ReviewFinalizer:
     """Parses subagent outputs, validates findings, produces final report."""
 
-    def __init__(self, workspace: str, changed_files: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str,
+        changed_files: list[str] | None = None,
+        *,
+        policy: ReviewModePolicy | None = None,
+    ) -> None:
         self._ctx = ValidationContext(
             workspace=workspace,
             changed_files=changed_files or [],
@@ -41,6 +54,7 @@ class ReviewFinalizer:
         self._validator = ReviewValidator(self._ctx)
         self._dimensions: list[ReviewDimensionResult] = []
         self._errors: list[str] = []
+        self._policy = policy or policy_for_depth("full")
 
     @property
     def dimensions(self) -> list[ReviewDimensionResult]:
@@ -66,6 +80,17 @@ class ReviewFinalizer:
     def ingest_subagent_output(self, dimension: str, raw_output: str) -> ReviewDimensionResult:
         """Parse one subagent's raw text output and validate its candidates."""
         candidates = self._parse_candidates(dimension, raw_output)
+        if self._policy.severities:
+            before = len(candidates)
+            candidates = [c for c in candidates if c.severity in self._policy.severities]
+            if before != len(candidates):
+                logger.info(
+                    "review.finalizer.filtered_by_policy dimension={} before={} after={} severities={}",
+                    dimension,
+                    before,
+                    len(candidates),
+                    self._policy.severities,
+                )
         if not candidates:
             result = ReviewDimensionResult(dimension=dimension, status="no_findings")
             self._dimensions.append(result)
@@ -81,11 +106,67 @@ class ReviewFinalizer:
             items.extend(d.uncertain)
         return items
 
+    async def apply_judge(self, judge: ReviewJudge | None) -> None:
+        if judge is None or not self._policy.judge_enabled:
+            logger.info(
+                "review.finalizer.judge.skip enabled={} has_judge={}",
+                self._policy.judge_enabled,
+                judge is not None,
+            )
+            self._apply_judged_defaults()
+            return
+        verdicts = await judge.judge_dimensions(self._dimensions)
+        if not verdicts:
+            self._apply_judged_defaults()
+            return
+        for dimension in self._dimensions:
+            judged: list[ReviewJudgedFinding] = []
+            for candidate in dimension.accepted:
+                hard = ReviewFindingVerdict(
+                    verdict=FindingVerdict.ACCEPTED,
+                    reason="hard validation accepted",
+                )
+                judged.append(ReviewJudgedFinding(
+                    candidate=candidate,
+                    hard_verdict=hard,
+                    judge_verdict=verdicts.get(ReviewJudge.candidate_id(candidate)),
+                ))
+            for candidate, hard in dimension.uncertain:
+                judged.append(ReviewJudgedFinding(
+                    candidate=candidate,
+                    hard_verdict=hard,
+                    judge_verdict=verdicts.get(ReviewJudge.candidate_id(candidate)),
+                ))
+            dimension.judged = judged
+        logger.info("review.finalizer.judge.applied dimensions={}", len(self._dimensions))
+
+    def _apply_judged_defaults(self) -> None:
+        for dimension in self._dimensions:
+            if dimension.judged:
+                continue
+            judged: list[ReviewJudgedFinding] = []
+            judged.extend(
+                ReviewJudgedFinding(
+                    candidate=candidate,
+                    hard_verdict=ReviewFindingVerdict(
+                        verdict=FindingVerdict.ACCEPTED,
+                        reason="hard validation accepted",
+                    ),
+                )
+                for candidate in dimension.accepted
+            )
+            judged.extend(
+                ReviewJudgedFinding(candidate=candidate, hard_verdict=verdict)
+                for candidate, verdict in dimension.uncertain
+            )
+            dimension.judged = judged
+
     def finalize(self, target_name: str) -> ReviewFinalizerResult:
         """Produce final report markdown from all ingested dimensions."""
+        self._apply_judged_defaults()
         needs_confirmation = self.get_needs_confirmation()
         try:
-            report = render_review_report(target_name, self._dimensions)
+            report = render_review_report(target_name, self._dimensions, policy=self._policy)
         except Exception as exc:
             logger.error("report rendering failed: {}", exc)
             report = f"## Code Review Report: {target_name}\n\n### Error\n\nReport rendering failed: {exc}\n"
@@ -266,17 +347,58 @@ class ReviewFinalizerHook(AgentHook):
         workspace: str,
         target_name: str,
         changed_files: list[str] | None = None,
+        depth: ReviewDepth = "full",
+        judge: ReviewJudge | None = None,
     ) -> None:
         super().__init__()
         self._target_name = target_name
-        self._finalizer = ReviewFinalizer(workspace, changed_files)
+        self._policy = policy_for_depth(depth)
+        self._finalizer = ReviewFinalizer(workspace, changed_files, policy=self._policy)
         self._rendered = False
+        self._seen_subagent_results: set[str] = set()
+        self._judged = False
+        self._judge = judge
+
+    async def after_iteration(self, context: AgentHookContext) -> None:
+        if self._rendered:
+            return
+        ingested = self._ensure_ingested(context)
+        if ingested <= 0:
+            return
+        self._judged = False
+        await self._finalizer.apply_judge(self._judge)
+        self._judged = True
+
+    def _ensure_ingested(self, context: AgentHookContext) -> int:
+        messages: list[dict[str, Any]] = []
+        for message in context.messages:
+            meta = ReviewFinalizer._subagent_metadata(message)
+            if not meta:
+                continue
+            raw = ReviewFinalizer._subagent_raw_output(message, meta)
+            key = self._subagent_result_key(meta, raw)
+            if key in self._seen_subagent_results:
+                continue
+            self._seen_subagent_results.add(key)
+            messages.append(message)
+        if not messages:
+            return 0
+        return self._finalizer.ingest_messages(messages)
+
+    @staticmethod
+    def _subagent_result_key(meta: dict[str, Any], raw: str) -> str:
+        task_id = meta.get("subagent_task_id")
+        if isinstance(task_id, str) and task_id:
+            return task_id
+        label = str(meta.get("subagent_label") or meta.get("label") or "unknown")
+        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
+        return f"{label}:{digest}"
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         if self._rendered:
             return content
-        ingested = self._finalizer.ingest_messages(context.messages)
-        if ingested == 0:
+        ingested = self._ensure_ingested(context)
+        if ingested == 0 and not self._finalizer.dimensions:
             logger.warning("review.finalizer.no_subagent_results target={}", self._target_name)
             return content
         result = self._finalizer.finalize(self._target_name)

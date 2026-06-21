@@ -226,6 +226,11 @@
       "review": {
         "requirementsPlaceholder": "额外要求…",
         "depth": "审查深度",
+        "depthHints": {
+          "quick": "只看高风险发现；仅程序校验，不做 AI 评判。",
+          "full": "完整审查；程序校验后做 AI 评判。",
+          "deep": "扩展维度；更严格的 AI 交叉评判。"
+        },
         "targetType": "目标类型",
         "target": "审查目标",
         "targetAria": "审查目标地址",

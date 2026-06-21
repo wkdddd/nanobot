@@ -58,11 +58,6 @@ class RunningSubagents:
         return 1
 
 
-class FailingMCPStack:
-    async def aclose(self) -> None:
-        raise RuntimeError("disconnect failed")
-
-
 def _config(data: dict[str, Any]) -> Config:
     _resolve_tool_config_refs()
     return Config.model_validate(data)
@@ -108,14 +103,15 @@ def test_agent_loop_state_machine_has_no_review_finalize_state() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_leaves_context_plain_when_specialist_modes_disabled(
+async def test_agent_loop_always_injects_review_context(
     tmp_path,
     monkeypatch,
 ) -> None:
-    async def fail_review(*args: Any, **kwargs: Any) -> str:
-        raise AssertionError("code review context should not resolve")
+    """Review context is always resolved regardless of session metadata."""
+    async def mock_review(*args: Any, **kwargs: Any) -> str:
+        return "review system prompt"
 
-    monkeypatch.setattr("nanobot.agent.loop.resolve_code_review_context", fail_review)
+    monkeypatch.setattr("nanobot.agent.loop.resolve_code_review_context", mock_review)
 
     loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
     runner = CapturingRunner()
@@ -128,11 +124,13 @@ async def test_agent_loop_leaves_context_plain_when_specialist_modes_disabled(
         session_key=session.key,
     )
 
-    assert runner.initial_messages == [{"role": "user", "content": "hello"}]
+    assert runner.initial_messages[0] == {"role": "system", "content": "review system prompt"}
+    assert runner.initial_messages[1] == {"role": "user", "content": "hello"}
 
 
 @pytest.mark.asyncio
 async def test_agent_loop_ignores_legacy_math_qa_mode_metadata(tmp_path) -> None:
+    """Legacy math_qa_mode metadata does not alter behavior — review context is still injected."""
     loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
     runner = CapturingRunner()
     loop.runner = runner
@@ -145,7 +143,9 @@ async def test_agent_loop_ignores_legacy_math_qa_mode_metadata(tmp_path) -> None
         session_key=session.key,
     )
 
-    assert runner.initial_messages == [{"role": "user", "content": "求极限"}]
+    # Review context is always injected as the first system message
+    assert runner.initial_messages[0]["role"] == "system"
+    assert runner.initial_messages[1] == {"role": "user", "content": "求极限"}
 
 
 @pytest.mark.asyncio
@@ -168,36 +168,6 @@ async def test_agent_loop_pending_drain_does_not_wait_for_running_subagents(tmp_
     )
 
     assert runner.injected == []
-
-
-@pytest.mark.asyncio
-async def test_close_mcp_logs_cleanup_failures_and_clears_stacks(tmp_path, monkeypatch) -> None:
-    log_messages: list[str] = []
-
-    def capture_exception(message: str, name: str) -> None:
-        log_messages.append(message.format(name))
-
-    monkeypatch.setattr("nanobot.agent.loop.logger.exception", capture_exception)
-
-    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
-    loop._mcp_stacks = {"broken": FailingMCPStack()}
-
-    await loop.close_mcp()
-
-    assert log_messages == ["MCP server 'broken' cleanup failed during shutdown"]
-    assert loop._mcp_stacks == {}
-
-
-@pytest.mark.asyncio
-async def test_close_mcp_handles_background_task_done_callback_removal(tmp_path) -> None:
-    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
-    task = asyncio.create_task(asyncio.sleep(0))
-    loop._background_tasks = [task]
-    task.add_done_callback(loop._remove_background_task)
-
-    await loop.close_mcp()
-
-    assert loop._background_tasks == []
 
 
 def test_invalid_max_concurrent_requests_falls_back_to_default(monkeypatch) -> None:

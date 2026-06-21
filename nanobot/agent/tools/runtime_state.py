@@ -37,9 +37,6 @@ class RuntimeState(Protocol):
     def context_window_tokens(self) -> int: ...
 
     @property
-    def web_config(self) -> Any: ...
-
-    @property
     def exec_config(self) -> Any: ...
 
     @property

@@ -175,6 +175,12 @@ class FindingVerdict(StrEnum):
     UNCERTAIN = "uncertain"
 
 
+class ReviewJudgeDecision(StrEnum):
+    ACCEPT = "accept"
+    REJECT = "reject"
+    NEEDS_CONFIRMATION = "needs_confirmation"
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewFindingVerdict:
     """Verdict on a candidate finding after hard validation."""
@@ -183,6 +189,49 @@ class ReviewFindingVerdict:
     reason: str = ""
     missing_evidence: str = ""
     suggested_verification: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewJudgeVerdict:
+    """AI judge verdict for a candidate after hard validation."""
+
+    decision: ReviewJudgeDecision
+    reason: str = ""
+    confidence: str = "medium"
+    severity: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewJudgedFinding:
+    """Candidate with both hard validation and optional AI judge result."""
+
+    candidate: ReviewFindingCandidate
+    hard_verdict: ReviewFindingVerdict
+    judge_verdict: ReviewJudgeVerdict | None = None
+
+    @property
+    def final_verdict(self) -> FindingVerdict:
+        if self.judge_verdict is None:
+            return self.hard_verdict.verdict
+        if self.judge_verdict.decision == ReviewJudgeDecision.ACCEPT:
+            return FindingVerdict.ACCEPTED
+        if self.judge_verdict.decision == ReviewJudgeDecision.REJECT:
+            return FindingVerdict.REJECTED
+        return FindingVerdict.UNCERTAIN
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewModePolicy:
+    """Programmatic behavior policy for a review depth."""
+
+    depth: ReviewDepth
+    roles: list[ReviewRole]
+    max_subagents: int
+    severities: tuple[str, ...]
+    judge_enabled: bool
+    evidence_max_results: int
+    include_optional_roles: bool = False
+    report_style: str = "full"
 
 
 @dataclass
@@ -199,6 +248,7 @@ class ReviewDimensionResult:
     uncertain: list[tuple[ReviewFindingCandidate, ReviewFindingVerdict]] = field(
         default_factory=list
     )
+    judged: list[ReviewJudgedFinding] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
 

@@ -8,15 +8,11 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 from pydantic_settings import BaseSettings
 
-from nanobot.cron.types import CronSchedule
-from nanobot.rag.config import EmbeddingConfig, QdrantConfig, RAGConfig, RAGRetrievalConfig, RerankConfig
+from nanobot.rag.config import RAGConfig
 
 if TYPE_CHECKING:
     from nanobot.agent.review.github import GitHubRepoConfig
-    from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
-    from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
-    from nanobot.agent.tools.web import WebToolsConfig
 
 
 class Base(BaseModel):
@@ -39,39 +35,6 @@ class ChannelsConfig(Base):
     send_tool_hints: bool = False  # stream tool-call hints (e.g. read_file("…"))
     show_reasoning: bool = True  # surface model reasoning when channel implements it
     send_max_retries: int = Field(default=3, ge=0, le=10)  # Max delivery attempts (initial send included)
-
-
-class DreamConfig(Base):
-    """Dream memory consolidation configuration."""
-
-    _HOUR_MS = 3_600_000
-
-    interval_h: int = Field(default=2, ge=1)  # Every 2 hours by default
-    cron: str | None = Field(default=None, exclude=True)  # Legacy compatibility override
-    model_override: str | None = Field(
-        default=None,
-        validation_alias=AliasChoices("modelOverride", "model", "model_override"),
-    )  # Optional Dream-specific model override
-    max_batch_size: int = Field(default=20, ge=1)  # Max history entries per run
-    # Bumped from 10 to 15 in #3212 (exp002: +30% dedup, no accuracy loss; >15 plateaus).
-    max_iterations: int = Field(default=15, ge=1)  # Max tool calls per Phase 2
-    # Per-line git-blame age annotation in Phase 1 prompt (see #3212). Default
-    # on — set to False to feed MEMORY.md raw if a specific LLM reacts poorly
-    # to the `← Nd` suffix or you want deterministic, git-independent prompts.
-    annotate_line_ages: bool = True
-
-    def build_schedule(self, timezone: str) -> CronSchedule:
-        """Build the runtime schedule, preferring the legacy cron override if present."""
-        if self.cron:
-            return CronSchedule(kind="cron", expr=self.cron, tz=timezone)
-        return CronSchedule(kind="every", every_ms=self.interval_h * self._HOUR_MS)
-
-    def describe_schedule(self) -> str:
-        """Return a human-readable summary for logs and startup output."""
-        if self.cron:
-            return f"cron {self.cron} (legacy)"
-        hours = self.interval_h
-        return f"every {hours}h"
 
 
 class InlineFallbackConfig(Base):
@@ -155,7 +118,6 @@ class AgentDefaults(Base):
         validation_alias=AliasChoices("consolidationRatio"),
         serialization_alias="consolidationRatio",
     )  # Consolidation target ratio (0.5 = 50% of budget retained after compression)
-    dream: DreamConfig = Field(default_factory=DreamConfig)
 
 
 class AgentsConfig(Base):
@@ -209,13 +171,6 @@ class ProvidersConfig(Base):
     nvidia: ProviderConfig = Field(default_factory=ProviderConfig)  # NVIDIA NIM (nvapi- keys)
     unsplash: ProviderConfig = Field(default_factory=ProviderConfig)
 
-class HeartbeatConfig(Base):
-    """Heartbeat service configuration."""
-
-    enabled: bool = True
-    interval_s: int = 30 * 60  # 30 minutes
-    keep_recent_messages: int = 8
-
 
 class ApiConfig(Base):
     """OpenAI-compatible API server configuration."""
@@ -230,20 +185,6 @@ class GatewayConfig(Base):
 
     host: str = "127.0.0.1"  # Safer default: local-only bind.
     port: int = 18790
-    heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
-
-
-class MCPServerConfig(Base):
-    """MCP server connection configuration (stdio or HTTP)."""
-
-    type: Literal["stdio", "sse", "streamableHttp"] | None = None  # auto-detected if omitted
-    command: str = ""  # Stdio: command to run (e.g. "npx")
-    args: list[str] = Field(default_factory=list)  # Stdio: command arguments
-    env: dict[str, str] = Field(default_factory=dict)  # Stdio: extra env vars
-    url: str = ""  # HTTP/SSE: endpoint URL
-    headers: dict[str, str] = Field(default_factory=dict)  # HTTP/SSE: custom headers
-    tool_timeout: int = 30  # seconds before a tool call is cancelled
-    enabled_tools: list[str] = Field(default_factory=lambda: ["*"])  # Only register these tools; accepts raw MCP names or wrapped mcp_<server>_<tool> names; ["*"] = all tools; [] = no tools
 
 
 def _lazy_default(module_path: str, class_name: str) -> Any:
@@ -278,16 +219,10 @@ class ToolsConfig(Base):
     Base from schema.py).
     """
 
-    web: WebToolsConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.web", "WebToolsConfig"))
     exec: ExecToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.shell", "ExecToolConfig"))
-    my: MyToolConfig = Field(default_factory=lambda: _lazy_default("nanobot.agent.tools.self", "MyToolConfig"))
     approval_enabled: bool = False  # require user approval before executing tools
     restrict_to_workspace: bool = False  # restrict all tool access to workspace directory
-    mcp_servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
-    unsplash_search:UnsplashSearchToolConfig=Field(
-        default_factory=lambda:_lazy_default("nanobot.agent.tools.unsplash","UnsplashSearchToolConfig")
-    )
     github_repo: GitHubRepoConfig = Field(
         default_factory=lambda: _lazy_default("nanobot.agent.review.github", "GitHubRepoConfig")
     )
@@ -296,6 +231,32 @@ class ToolsConfig(Base):
         ensure_config_models_rebuilt()
         super().__init__(**data)
 
+
+
+class ReviewJudgeSettings(Base):
+    """AI judge configuration for code review findings."""
+
+    enabled: bool = True
+    model_preset: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("modelPreset", "model_preset"),
+        serialization_alias="modelPreset",
+    )
+    max_candidates: int = Field(default=40, ge=1, le=200)
+    timeout_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=600,
+        validation_alias=AliasChoices("timeoutSeconds", "timeout_seconds"),
+        serialization_alias="timeoutSeconds",
+    )
+    max_tokens: int = Field(
+        default=2048,
+        ge=256,
+        le=16000,
+        validation_alias=AliasChoices("maxTokens", "max_tokens"),
+        serialization_alias="maxTokens",
+    )
 
 
 class ReviewConfig(Base):
@@ -313,6 +274,7 @@ class ReviewConfig(Base):
     rag_use_chonkie: bool = True
     rag_use_rrf: bool = True
     github_diff_enable: bool = True
+    judge: ReviewJudgeSettings = Field(default_factory=ReviewJudgeSettings)
 
 
 class Config(BaseSettings):
@@ -505,19 +467,11 @@ def _resolve_tool_config_refs() -> None:
     import sys
 
     from nanobot.agent.review.github import GitHubRepoConfig
-    from nanobot.agent.tools.self import MyToolConfig
     from nanobot.agent.tools.shell import ExecToolConfig
-    from nanobot.agent.tools.unsplash import UnsplashSearchToolConfig
-    from nanobot.agent.tools.web import WebFetchConfig, WebSearchConfig, WebToolsConfig
 
     # Re-export into this module's namespace
     mod = sys.modules[__name__]
     mod.ExecToolConfig = ExecToolConfig  # type: ignore[attr-defined]
-    mod.WebToolsConfig = WebToolsConfig  # type: ignore[attr-defined]
-    mod.WebSearchConfig = WebSearchConfig  # type: ignore[attr-defined]
-    mod.WebFetchConfig = WebFetchConfig  # type: ignore[attr-defined]
-    mod.MyToolConfig = MyToolConfig  # type: ignore[attr-defined]
-    mod.UnsplashSearchToolConfig = UnsplashSearchToolConfig
     mod.GitHubRepoConfig = GitHubRepoConfig  # type: ignore[attr-defined]
     ToolsConfig.model_rebuild()
     Config.model_rebuild()

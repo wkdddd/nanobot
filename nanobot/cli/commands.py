@@ -73,7 +73,7 @@ class SafeFileHistory(FileHistory):
     def store_string(self, string: str) -> None:
         super().store_string(_sanitize_surrogates(string))
 from nanobot.cli.stream import StreamRenderer, ThinkingSpinner
-from nanobot.config.paths import get_workspace_path, is_default_workspace
+from nanobot.config.paths import get_workspace_path
 from nanobot.config.schema import Config
 from nanobot.utils.helpers import sync_workspace_templates
 from nanobot.utils.restart import (
@@ -528,19 +528,6 @@ def _warn_deprecated_config_keys(config_path: Path | None) -> None:
         )
 
 
-def _migrate_cron_store(config: "Config") -> None:
-    """One-time migration: move legacy global cron store into the workspace."""
-    from nanobot.config.paths import get_cron_dir
-
-    legacy_path = get_cron_dir() / "jobs.json"
-    new_path = config.workspace_path / "cron" / "jobs.json"
-    if legacy_path.is_file() and not new_path.exists():
-        new_path.parent.mkdir(parents=True, exist_ok=True)
-        import shutil
-
-        shutil.move(str(legacy_path), str(new_path))
-
-
 # ============================================================================
 # OpenAI-Compatible API Server
 # ============================================================================
@@ -655,14 +642,10 @@ def _run_gateway(
     open_browser_url: str | None = None,
 ) -> None:
     """Shared gateway runtime; ``open_browser_url`` opens a tab once channels are up."""
-    from nanobot.agent.tools.cron import CronTool
     from nanobot.agent.tools.message import MessageTool
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
     from nanobot.channels.websocket import publish_runtime_model_update
-    from nanobot.cron.service import CronService
-    from nanobot.cron.types import CronJob
-    from nanobot.heartbeat.service import HeartbeatService
     from nanobot.providers.factory import build_provider_snapshot, load_provider_snapshot
     from nanobot.session.manager import SessionManager
 
@@ -678,21 +661,11 @@ def _run_gateway(
         raise typer.Exit(1) from exc
     session_manager = SessionManager(config.workspace_path)
 
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
-
-    # Create agent with cron service
     agent = AgentLoop.from_config(
         config, bus,
         provider=provider_snapshot.provider,
         model=provider_snapshot.model,
         context_window_tokens=provider_snapshot.context_window_tokens,
-        cron_service=cron,
         session_manager=session_manager,
         provider_snapshot_loader=load_provider_snapshot,
         runtime_model_publisher=lambda model, preset: publish_runtime_model_update(
@@ -749,78 +722,6 @@ def _run_gateway(
     if isinstance(message_tool, MessageTool):
         message_tool.set_send_callback(_deliver_to_channel)
 
-    # Set cron callback (needs agent)
-    async def on_cron_job(job: CronJob) -> str | None:
-        """Execute a cron job through the agent."""
-        # Dream is an internal job — run directly, not through the agent loop.
-        if job.name == "dream":
-            try:
-                await agent.dream.run()
-                logger.info("Dream cron job completed")
-            except Exception:
-                logger.exception("Dream cron job failed")
-            return None
-
-        from nanobot.utils.evaluator import evaluate_response
-
-        reminder_note = (
-            "The scheduled time has arrived. Deliver this reminder to the user now, "
-            "as a brief and natural message in their language. Speak directly to them — "
-            "do not narrate progress, summarize, include user IDs, or add status reports "
-            "like 'Done' or 'Reminded'.\n\n"
-            f"Reminder: {job.payload.message}"
-        )
-
-        cron_tool = agent.tools.get("cron")
-        cron_token = None
-        if isinstance(cron_tool, CronTool):
-            cron_token = cron_tool.set_cron_context(True)
-
-        async def _silent(*_args, **_kwargs):
-            pass
-
-        message_record_token = None
-        if isinstance(message_tool, MessageTool):
-            message_record_token = message_tool.set_record_channel_delivery(True)
-
-        try:
-            resp = await agent.process_direct(
-                reminder_note,
-                session_key=f"cron:{job.id}",
-                channel=job.payload.channel or "cli",
-                chat_id=job.payload.to or "direct",
-                on_progress=_silent,
-            )
-        finally:
-            if isinstance(cron_tool, CronTool) and cron_token is not None:
-                cron_tool.reset_cron_context(cron_token)
-            if isinstance(message_tool, MessageTool) and message_record_token is not None:
-                message_tool.reset_record_channel_delivery(message_record_token)
-
-        response = resp.content if resp else ""
-
-        if job.payload.deliver and isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
-            return response
-
-        if job.payload.deliver and job.payload.to and response:
-            should_notify = await evaluate_response(
-                response, reminder_note, agent.provider, agent.model,
-            )
-            if should_notify:
-                await _deliver_to_channel(
-                    OutboundMessage(
-                        channel=job.payload.channel or "cli",
-                        chat_id=job.payload.to,
-                        content=response,
-                        metadata=dict(job.payload.channel_meta),
-                    ),
-                    record=True,
-                    session_key=job.payload.session_key,
-                )
-        return response
-
-    cron.on_job = on_cron_job
-
     def _webui_runtime_model_name() -> str | None:
         model = getattr(agent, "model", None)
         if isinstance(model, str):
@@ -845,94 +746,10 @@ def _run_gateway(
         webui_runtime_usage=_webui_runtime_usage,
     )
 
-    def _pick_heartbeat_target() -> tuple[str, str]:
-        """Pick a routable channel/chat target for heartbeat-triggered messages."""
-        enabled = set(channels.enabled_channels)
-        # Prefer the most recently updated non-internal session on an enabled channel.
-        for item in session_manager.list_sessions():
-            key = item.get("key") or ""
-            if ":" not in key:
-                continue
-            channel, chat_id = key.split(":", 1)
-            if channel in {"cli", "system"}:
-                continue
-            if channel in enabled and chat_id:
-                return channel, chat_id
-        # Fallback keeps prior behavior but remains explicit.
-        return "cli", "direct"
-
-    # Create heartbeat service
-    heartbeat_preamble = (
-        "[Your response will be delivered directly to the user's messaging app. "
-        "Output ONLY the final user-facing message. Never reference internal "
-        "files (HEARTBEAT.md, AWARENESS.md, etc.), your instructions, or your "
-        "decision process. If nothing needs reporting, respond with just "
-        "'All clear.' and nothing else.]\n\n"
-    )
-
-    async def on_heartbeat_execute(tasks: str) -> str:
-        """Phase 2: execute heartbeat tasks through the full agent loop."""
-        channel, chat_id = _pick_heartbeat_target()
-
-        async def _silent(*_args, **_kwargs):
-            pass
-
-        resp = await agent.process_direct(
-            heartbeat_preamble + tasks,
-            session_key="heartbeat",
-            channel=channel,
-            chat_id=chat_id,
-            on_progress=_silent,
-        )
-
-        # Keep a small tail of heartbeat history so the loop stays bounded
-        # without losing all short-term context between runs.
-        session = agent.sessions.get_or_create("heartbeat")
-        session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
-        agent.sessions.save(session)
-
-        return resp.content if resp else ""
-
-    async def on_heartbeat_notify(response: str) -> None:
-        """Deliver a heartbeat response to the user's channel.
-
-        In addition to publishing the outbound message, this injects the
-        delivered text as an assistant turn into the *target channel's*
-        session.  Without this, a user reply on the channel (e.g. "Sure")
-        lands in a session that has no context about the heartbeat message
-        and the agent cannot follow through.
-        """
-        channel, chat_id = _pick_heartbeat_target()
-        if channel == "cli":
-            return  # No external channel available to deliver to
-
-        await _deliver_to_channel(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response),
-            record=True,
-        )
-
-    hb_cfg = config.gateway.heartbeat
-    heartbeat = HeartbeatService(
-        workspace=config.workspace_path,
-        provider=agent.provider,
-        model=agent.model,
-        on_execute=on_heartbeat_execute,
-        on_notify=on_heartbeat_notify,
-        interval_s=hb_cfg.interval_s,
-        enabled=hb_cfg.enabled,
-        timezone=config.agents.defaults.timezone,
-    )
-
     if channels.enabled_channels:
         console.print(f"[green]✓[/green] Channels enabled: {', '.join(channels.enabled_channels)}")
     else:
         console.print("[yellow]Warning: No channels enabled[/yellow]")
-
-    cron_status = cron.status()
-    if cron_status["jobs"] > 0:
-        console.print(f"[green]✓[/green] Cron: {cron_status['jobs']} scheduled jobs")
-
-    console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
     async def _health_server(host: str, health_port: int):
         """Lightweight HTTP health endpoint on the gateway port."""
@@ -976,21 +793,6 @@ def _run_gateway(
         console.print(f"[green]✓[/green] Health endpoint: http://{host}:{health_port}/health")
         async with server:
             await server.serve_forever()
-    # Register Dream system job (always-on, idempotent on restart)
-    dream_cfg = config.agents.defaults.dream
-    if dream_cfg.model_override:
-        agent.dream.model = dream_cfg.model_override
-    agent.dream.max_batch_size = dream_cfg.max_batch_size
-    agent.dream.max_iterations = dream_cfg.max_iterations
-    agent.dream.annotate_line_ages = dream_cfg.annotate_line_ages
-    from nanobot.cron.types import CronJob, CronPayload
-    cron.register_system_job(CronJob(
-        id="dream",
-        name="dream",
-        schedule=dream_cfg.build_schedule(config.agents.defaults.timezone),
-        payload=CronPayload(kind="system_event"),
-    ))
-    console.print(f"[green]✓[/green] Dream: {dream_cfg.describe_schedule()}")
 
     async def _open_browser_when_ready() -> None:
         """Wait for the gateway to bind, then point the user's browser at the webui."""
@@ -1017,8 +819,6 @@ def _run_gateway(
 
     async def run():
         try:
-            await cron.start()
-            await heartbeat.start()
             tasks = [
                 agent.run(),
                 channels.start_all(),
@@ -1036,8 +836,6 @@ def _run_gateway(
             console.print(traceback.format_exc())
         finally:
             await agent.close_mcp()
-            heartbeat.stop()
-            cron.stop()
             agent.stop()
             await channels.stop_all()
             # Flush all cached sessions to durable storage before exit.
@@ -1179,20 +977,11 @@ def agent(
     from loguru import logger
 
     from nanobot.bus.queue import MessageBus
-    from nanobot.cron.service import CronService
 
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
-
-    # Preserve existing single-workspace installs, but keep custom workspaces clean.
-    if is_default_workspace(config.workspace_path):
-        _migrate_cron_store(config)
-
-    # Create cron service with workspace-scoped store
-    cron_store_path = config.workspace_path / "cron" / "jobs.json"
-    cron = CronService(cron_store_path)
 
     if logs:
         logger.enable("nanobot")
@@ -1202,7 +991,6 @@ def agent(
     try:
         agent_loop = AgentLoop.from_config(
             config, bus,
-            cron_service=cron,
         )
     except ValueError as exc:
         console.print(f"[red]Error: {exc}[/red]")

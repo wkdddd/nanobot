@@ -22,7 +22,3 @@ This file documents non-obvious constraints and usage patterns.
 - Use `head_limit` and `offset` to page across results
 - Prefer this over `exec` for code and history searches
 - Binary or oversized files may be skipped to keep results readable
-
-## cron — Scheduled Reminders
-
-- Please refer to cron skill for usage.

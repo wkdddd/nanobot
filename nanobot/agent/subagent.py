@@ -115,7 +115,6 @@ class SubagentManager:
         """Build a ToolsConfig scoped for subagent use."""
         return ToolsConfig(
             exec=self.tools_config.exec,
-            web=self.tools_config.web,
             restrict_to_workspace=self.restrict_to_workspace,
         )
 

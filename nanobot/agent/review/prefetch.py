@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
+from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.types import (
     ReviewAction,
     ReviewEvidenceProvider,
@@ -122,6 +123,7 @@ async def maybe_prefetch_review_context(
 
     trace_id = uuid.uuid4().hex[:8]
     started = time.perf_counter()
+    policy = policy_for_depth(plan.depth, requested_max_subagents=plan.max_subagents)
     query = plan.user_requirements or "code review security architecture tests performance entry points config"
     logger.info(
         "review.prefetch.start trace_id={} action={} target_type={} target={} target_repo={} paths_count={} query_chars={} max_results={}",
@@ -132,7 +134,7 @@ async def maybe_prefetch_review_context(
         plan.target_repo,
         len(plan.target_paths),
         len(query),
-        5,
+        policy.evidence_max_results,
     )
     await _emit_prefetch_progress(
         progress_callback,
@@ -151,7 +153,7 @@ async def maybe_prefetch_review_context(
             pr_number=plan.pr_number or 0,
             target_paths=plan.target_paths or None,
             review_query=query,
-            max_results=5,
+            max_results=policy.evidence_max_results,
             include_tests=True,
             trace_id=trace_id,
         )

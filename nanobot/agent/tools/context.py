@@ -33,9 +33,7 @@ class ToolContext:
     qdrant_config: Any | None = None
     bus: Any | None = None
     subagent_manager: Any | None = None
-    cron_service: Any | None = None
     sessions: Any | None = None
     file_state_store: Any = field(default=None)
     provider_snapshot_loader: Callable[[], Any] | None = None
     timezone: str = "UTC"
-    unsplash_provider_config:dict[str, Any] | None = None

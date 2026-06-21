@@ -16,6 +16,7 @@ from nanobot.agent.review.planner import (
     normalize_review_target_type,
     resolve_code_review_context,
 )
+from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.types import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
@@ -27,6 +28,10 @@ from nanobot.agent.review.types import (
     ReviewDimensionResult,
     ReviewFindingCandidate,
     ReviewFindingVerdict,
+    ReviewJudgeDecision,
+    ReviewJudgedFinding,
+    ReviewJudgeVerdict,
+    ReviewModePolicy,
     ReviewPlan,
     ReviewReport,
     ReviewRole,
@@ -48,6 +53,10 @@ __all__ = [
     "ReviewEvidenceService",
     "ReviewFindingCandidate",
     "ReviewFindingVerdict",
+    "ReviewJudgeDecision",
+    "ReviewJudgedFinding",
+    "ReviewJudgeVerdict",
+    "ReviewModePolicy",
     "ReviewPlan",
     "ReviewReport",
     "ReviewRole",
@@ -60,6 +69,7 @@ __all__ = [
     "normalize_focus",
     "normalize_review_action",
     "normalize_review_target_type",
+    "policy_for_depth",
     "resolve_code_review_context",
     "review_action_values",
 ]

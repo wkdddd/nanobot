@@ -238,6 +238,11 @@
       "review": {
         "requirementsPlaceholder": "Additional requirements…",
         "depth": "Review depth",
+        "depthHints": {
+          "quick": "High-risk findings only; hard validation, no AI judge.",
+          "full": "Complete review; hard validation plus AI judge.",
+          "deep": "Expanded dimensions; stricter AI judge cross-check."
+        },
         "targetType": "Target type",
         "target": "Review target",
         "targetAria": "Review target address",

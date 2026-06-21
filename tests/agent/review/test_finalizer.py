@@ -2,14 +2,23 @@
 from __future__ import annotations
 
 import json
-import os
 
 import pytest
 
 from nanobot.agent.lifecycle_hook import AgentHookContext
-from nanobot.agent.review.finalizer import ReviewFinalizer
-from nanobot.agent.review.finalizer import ReviewFinalizerHook
-from nanobot.agent.review.types import ReviewFindingCandidate
+from nanobot.agent.review.finalizer import ReviewFinalizer, ReviewFinalizerHook
+from nanobot.agent.review.policy import policy_for_depth
+from nanobot.agent.review.types import ReviewJudgeDecision, ReviewJudgeVerdict
+
+
+class FakeJudge:
+    def __init__(self, verdicts):
+        self.verdicts = verdicts
+        self.calls = 0
+
+    async def judge_dimensions(self, dimensions):
+        self.calls += 1
+        return self.verdicts
 
 
 @pytest.fixture
@@ -91,6 +100,43 @@ class TestSemanticVerdicts:
         result = f.finalize("test")
         assert "Maybe" in result.report_markdown
         assert "### Needs Confirmation" in result.report_markdown
+
+    @pytest.mark.asyncio
+    async def test_ai_judge_can_reject_hard_accepted_candidate(self, workspace):
+        raw = json.dumps([{
+            "severity": "high", "file": "src/app.py", "line": 1,
+            "title": "False positive", "evidence": "line1", "impact": "bad", "recommendation": "fix",
+        }])
+        f = ReviewFinalizer(workspace, policy=policy_for_depth("full"))
+        f.ingest_subagent_output("security", raw)
+        judge = FakeJudge({
+            "security:src/app.py:1:false positive": ReviewJudgeVerdict(
+                decision=ReviewJudgeDecision.REJECT,
+                reason="not actionable",
+            )
+        })
+
+        await f.apply_judge(judge)
+        result = f.finalize("test")
+
+        assert "No actionable issues found" in result.report_markdown
+        assert "AI judge rejected: not actionable" in result.report_markdown
+
+    def test_quick_policy_filters_medium_and_low_candidates(self, workspace):
+        raw = json.dumps([
+            {
+                "severity": "medium", "file": "src/app.py", "line": 1,
+                "title": "Medium issue", "evidence": "line1", "impact": "bad", "recommendation": "fix",
+            },
+            {
+                "severity": "high", "file": "src/app.py", "line": 2,
+                "title": "High issue", "evidence": "line2", "impact": "bad", "recommendation": "fix",
+            },
+        ])
+        f = ReviewFinalizer(workspace, policy=policy_for_depth("quick"))
+        result = f.ingest_subagent_output("security", raw)
+
+        assert [candidate.title for candidate in result.accepted] == ["High issue"]
 
 
 class TestFinalize:
@@ -215,3 +261,55 @@ class TestFinalize:
 
         assert "## Code Review Report: myproject" in content
         assert "Hook finding" in content
+
+    @pytest.mark.asyncio
+    async def test_hook_ingests_incremental_subagent_results(self, workspace):
+        first = json.dumps([{
+            "severity": "high",
+            "file": "src/app.py",
+            "line": 1,
+            "title": "First finding",
+            "evidence": "line1",
+            "impact": "bad",
+            "recommendation": "fix",
+        }])
+        second = json.dumps([{
+            "severity": "high",
+            "file": "src/app.py",
+            "line": 2,
+            "title": "Second finding",
+            "evidence": "line2",
+            "impact": "bad",
+            "recommendation": "fix",
+        }])
+        context = AgentHookContext(
+            iteration=1,
+            messages=[{
+                "role": "user",
+                "content": "wrapper",
+                "_metadata": {
+                    "injected_event": "subagent_result",
+                    "subagent_task_id": "first",
+                    "subagent_label": "security",
+                    "subagent_result": first,
+                },
+            }],
+        )
+        hook = ReviewFinalizerHook(workspace=workspace, target_name="myproject", depth="quick")
+
+        await hook.after_iteration(context)
+        context.messages.append({
+            "role": "user",
+            "content": "wrapper",
+            "_metadata": {
+                "injected_event": "subagent_result",
+                "subagent_task_id": "second",
+                "subagent_label": "tests",
+                "subagent_result": second,
+            },
+        })
+        await hook.after_iteration(context)
+        content = hook.finalize_content(context, "raw assistant prose")
+
+        assert "First finding" in content
+        assert "Second finding" in content

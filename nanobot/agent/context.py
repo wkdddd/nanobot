@@ -3,8 +3,6 @@
 import base64
 import mimetypes
 import platform
-from contextlib import suppress
-from importlib.resources import files as pkg_files
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -14,7 +12,6 @@ from nanobot.session.goal_state import goal_state_runtime_lines, long_task_mode_
 from nanobot.utils.helpers import (
     current_time_str,
     detect_image_mime,
-    truncate_text,
 )
 from nanobot.utils.prompt_templates import render_template
 
@@ -22,10 +19,8 @@ from nanobot.utils.prompt_templates import render_template
 class ContextBuilder:
     """Builds the context (system prompt + messages) for the agent."""
 
-    BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md"]
+    BOOTSTRAP_FILES = ["SOUL.md", "USER.md", "TOOLS.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
-    _MAX_RECENT_HISTORY = 50
-    _MAX_HISTORY_CHARS = 32_000  # hard cap on recent history section size
     _RUNTIME_CONTEXT_END = "[/Runtime Context]"
 
     def __init__(self, workspace: Path, timezone: str | None = None, disabled_skills: list[str] | None = None):
@@ -39,16 +34,12 @@ class ContextBuilder:
         channel: str | None = None,
         session_summary: str | None = None,
     ) -> str:
-        """Build the system prompt from identity, bootstrap files, memory, and skills."""
+        """Build the system prompt from identity, personalization files, and skills."""
         parts = [self._get_identity(channel=channel)]
 
         bootstrap = self._load_bootstrap_files()
         if bootstrap:
             parts.append(bootstrap)
-
-        memory = self.memory.get_memory_context()
-        if memory and not self._is_template_content(self.memory.read_memory(), "memory/MEMORY.md"):
-            parts.append(f"# Memory\n\n{memory}")
 
         always_skills = self.skills.get_always_skills()
         if always_skills:
@@ -59,15 +50,6 @@ class ContextBuilder:
         skills_summary = self.skills.build_skills_summary(exclude=set(always_skills))
         if skills_summary:
             parts.append(render_template("agent/skills_section.md", skills_summary=skills_summary))
-
-        entries = self.memory.read_unprocessed_history(since_cursor=self.memory.get_last_dream_cursor())
-        if entries:
-            capped = entries[-self._MAX_RECENT_HISTORY:]
-            history_text = "\n".join(
-                f"- [{e['timestamp']}] {e['content']}" for e in capped
-            )
-            history_text = truncate_text(history_text, self._MAX_HISTORY_CHARS)
-            parts.append("# Recent History\n\n" + history_text)
 
         if session_summary:
             parts.append(f"[Archived Context Summary]\n\n{session_summary}")
@@ -131,15 +113,6 @@ class ContextBuilder:
                 parts.append(f"## {filename}\n\n{content}")
 
         return "\n\n".join(parts) if parts else ""
-
-    @staticmethod
-    def _is_template_content(content: str, template_path: str) -> bool:
-        """Check if *content* is identical to the bundled template (user hasn't customized it)."""
-        with suppress(Exception):
-            tpl = pkg_files("nanobot") / "templates" / template_path
-            if tpl.is_file():
-                return content.strip() == tpl.read_text(encoding="utf-8").strip()
-        return False
 
     def build_messages(
         self,

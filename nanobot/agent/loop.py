@@ -6,7 +6,7 @@ import asyncio
 import dataclasses
 import os
 import time
-from contextlib import AsyncExitStack, nullcontext, suppress
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -18,20 +18,20 @@ from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
 from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
-from nanobot.agent.memory import Consolidator, Dream
+from nanobot.agent.memory import Consolidator
 from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.review import (
     apply_review_metadata_from_message,
     resolve_code_review_context,
 )
 from nanobot.agent.review.finalizer import ReviewFinalizerHook
+from nanobot.agent.review.judge import ReviewJudge, ReviewJudgeConfig
 from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.tools.self import MyTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
@@ -55,10 +55,8 @@ from nanobot.utils.webui_turn_helpers import publish_turn_run_status
 if TYPE_CHECKING:
     from nanobot.config.schema import (
         ChannelsConfig,
-        ProviderConfig,
         ToolsConfig,
     )
-    from nanobot.cron.service import CronService
 
 
 UNIFIED_SESSION_KEY = "unified:default"
@@ -171,10 +169,8 @@ class AgentLoop:
         provider_retry_mode: str = "standard",
         tool_hint_max_length: int | None = None,
         max_concurrent_subagents: int | None = None,
-        cron_service: CronService | None = None,
         restrict_to_workspace: bool = False,
         session_manager: SessionManager | None = None,
-        mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         session_ttl_minutes: int = 0,
@@ -188,14 +184,13 @@ class AgentLoop:
         rerank_config: Any | None = None,
         qdrant_config: Any | None = None,
         rag_config: Any | None = None,
+        review_config: Any | None = None,
         provider_snapshot_loader: Callable[..., ProviderSnapshot] | None = None,
         provider_signature: tuple[object, ...] | None = None,
         model_presets: dict[str, ModelPresetConfig] | None = None,
         model_preset: str | None = None,
         preset_snapshot_loader: preset_helpers.PresetSnapshotLoader | None = None,
         runtime_model_publisher: Callable[[str, str | None], None] | None = None,
-        unsplash_provider_config: ProviderConfig | None = None,
-        unsplash_provider_configs: dict[str, ProviderConfig] | None = None,
     ):
         from nanobot.config.schema import (
             ToolsConfig,
@@ -245,14 +240,10 @@ class AgentLoop:
         self.rerank_config = _rerank_config
         self.qdrant_config = qdrant_config if qdrant_config is not None else _rag_config.qdrant
         self.rag_config = _rag_config
-        self.web_config = _tc.web
+        self.review_config = review_config
         self.exec_config = _tc.exec
-        self._unsplash_provider_config = unsplash_provider_config
-        if self._unsplash_provider_config is None and unsplash_provider_configs:
-            self._unsplash_provider_config = unsplash_provider_configs.get("unsplash")
-        
-        
-        self.cron_service = cron_service
+
+
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
@@ -290,10 +281,6 @@ class AgentLoop:
         self._unified_session = unified_session
         self._max_messages = max_messages if max_messages > 0 else 120
         self._running = False
-        self._mcp_servers = mcp_servers or {}
-        self._mcp_stacks: dict[str, AsyncExitStack] = {}
-        self._mcp_connected = False
-        self._mcp_connecting = False
         self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
         self._background_tasks: list[asyncio.Task] = []
         self._session_locks: dict[str, asyncio.Lock] = {}
@@ -322,11 +309,6 @@ class AgentLoop:
             sessions=self.sessions,
             consolidator=self.consolidator,
             session_ttl_minutes=session_ttl_minutes,
-        )
-        self.dream = Dream(
-            store=self.context.memory,
-            provider=provider,
-            model=self.model,
         )
         self.model_presets: dict[str, ModelPresetConfig] = model_presets or {}
         self._active_preset: str | None = None
@@ -378,7 +360,6 @@ class AgentLoop:
             tool_hint_max_length=defaults.tool_hint_max_length,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
             restrict_to_workspace=config.tools.restrict_to_workspace,
-            mcp_servers=config.tools.mcp_servers,
             channels_config=config.channels,
             timezone=defaults.timezone,
             unified_session=defaults.unified_session,
@@ -388,6 +369,7 @@ class AgentLoop:
             max_messages=defaults.max_messages,
             tools_config=config.tools,
             rag_config=config.rag,
+            review_config=config.review,
             embedding_config=config.rag.embedding,
             rerank_config=config.rag.rerank,
             qdrant_config=config.rag.qdrant,
@@ -395,7 +377,6 @@ class AgentLoop:
             model_preset=defaults.model_preset,
             provider_snapshot_loader=provider_snapshot_loader,
             preset_snapshot_loader=preset_snapshot_loader,
-            unsplash_provider_config=extra.pop("unsplash_provider_config", config.providers.unsplash),
             **extra,
         )
 
@@ -421,7 +402,6 @@ class AgentLoop:
         self.runner.provider = provider
         self.subagents.set_provider(provider, model)
         self.consolidator.set_provider(provider, model, context_window_tokens)
-        self.dream.set_provider(provider, model)
         self._provider_signature = snapshot.signature
         if publish_update and self._runtime_model_publisher is not None:
             self._runtime_model_publisher(
@@ -493,45 +473,41 @@ class AgentLoop:
             qdrant_config=self.qdrant_config,
             bus=self.bus,
             subagent_manager=self.subagents,
-            cron_service=self.cron_service,
             sessions=self.sessions,
             provider_snapshot_loader=self._provider_snapshot_loader,
-            unsplash_provider_config=self._unsplash_provider_config,
             timezone=self.context.timezone or "UTC",
         )
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)
 
-        # MyTool needs runtime state reference — manual registration
-        if self.tools_config.my.enable:
-            self.tools.register(
-                MyTool(runtime_state=self, modify_allowed=self.tools_config.my.allow_set)
-            )
-            registered.append("my")
-
         logger.info("Registered {} tools: {}", len(registered), registered)
 
-    async def _connect_mcp(self) -> None:
-        """Connect to configured MCP servers (one-time, lazy)."""
-        if self._mcp_connected or self._mcp_connecting or not self._mcp_servers:
-            return
-        self._mcp_connecting = True
-        from nanobot.agent.tools.mcp import connect_mcp_servers
+    def _build_review_judge(self) -> ReviewJudge | None:
+        judge_settings = getattr(self.review_config, "judge", None)
+        if judge_settings is not None and not getattr(judge_settings, "enabled", True):
+            return None
+        provider = self.provider
+        model = self.model
+        preset_name = getattr(judge_settings, "model_preset", None) if judge_settings is not None else None
+        if preset_name:
+            try:
+                snapshot = self._build_model_preset_snapshot(preset_name)
+                provider = snapshot.provider
+                model = snapshot.model
+                logger.info("review.judge.preset.loaded preset={} model={}", preset_name, model)
+            except Exception as exc:
+                logger.warning("review.judge.preset_unavailable preset={} reason={}", preset_name, exc)
+        config = ReviewJudgeConfig(
+            enabled=bool(getattr(judge_settings, "enabled", True)),
+            max_candidates=int(getattr(judge_settings, "max_candidates", 40)),
+            timeout_seconds=int(getattr(judge_settings, "timeout_seconds", 60)),
+            max_tokens=int(getattr(judge_settings, "max_tokens", 2048)),
+        )
+        return ReviewJudge(provider=provider, model=model, config=config)
 
-        try:
-            self._mcp_stacks = await connect_mcp_servers(self._mcp_servers, self.tools)
-            if self._mcp_stacks:
-                self._mcp_connected = True
-            else:
-                logger.warning("No MCP servers connected successfully (will retry next message)")
-        except asyncio.CancelledError:
-            logger.warning("MCP connection cancelled (will retry next message)")
-            self._mcp_stacks.clear()
-        except BaseException as e:
-            logger.warning("Failed to connect MCP servers (will retry next message): {}", e)
-            self._mcp_stacks.clear()
-        finally:
-            self._mcp_connecting = False
+    async def _connect_mcp(self) -> None:
+        """MCP removed — no-op for compatibility."""
+        return
 
     def _set_tool_context(
         self, channel: str, chat_id: str,
@@ -747,14 +723,17 @@ class AgentLoop:
             on_iteration=lambda iteration: setattr(self, "_current_iteration", iteration),
         )
         review_hook: AgentHook | None = None
-        if session is not None and session.metadata.get(ReviewMetaKey.MODE, False):
+        if session is not None and session.metadata.get(ReviewMetaKey.TARGET):
+            review_depth = str(session.metadata.get(ReviewMetaKey.MODE_VARIANT) or "full").lower()
+            if review_depth not in ("quick", "full", "deep"):
+                review_depth = "full"
             review_hook = ReviewFinalizerHook(
                 workspace=str(self.workspace),
                 target_name=str(session.metadata.get(ReviewMetaKey.TARGET) or "target"),
                 changed_files=session.metadata.get(ReviewMetaKey.TARGET_PATHS) or [],
+                depth=review_depth,  # type: ignore[arg-type]
+                judge=self._build_review_judge(),
             )
-            # Suppress streaming during review — the finalizer replaces all content,
-            # so streamed deltas are discarded noise. Progress events still flow.
             on_stream = None
             on_stream_end = None
         hooks: list[AgentHook] = [loop_hook]
@@ -812,18 +791,16 @@ class AgentLoop:
                 _session_meta,
             )
 
-            specialist_prompt: str | None = None
-            if _session_meta.get(ReviewMetaKey.MODE, False):
-                review_meta = dict(_session_meta)
-                review_tool = self.tools.get("local_review") or self.tools.get("github_review")
-                if review_tool is not None:
-                    if evidence_provider := getattr(review_tool, "evidence_provider", None):
-                        review_meta[ReviewMetaKey.EVIDENCE_PROVIDER] = evidence_provider
-                specialist_prompt = await resolve_code_review_context(
-                    initial_messages,
-                    review_meta,
-                    progress_callback=on_progress,
-                )
+            review_meta = dict(_session_meta)
+            review_tool = self.tools.get("local_review") or self.tools.get("github_review")
+            if review_tool is not None:
+                if evidence_provider := getattr(review_tool, "evidence_provider", None):
+                    review_meta[ReviewMetaKey.EVIDENCE_PROVIDER] = evidence_provider
+            specialist_prompt = await resolve_code_review_context(
+                initial_messages,
+                review_meta,
+                progress_callback=on_progress,
+            )
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
@@ -1185,18 +1162,12 @@ class AgentLoop:
             self._session_locks.pop(session_key, None)
 
     async def close_mcp(self) -> None:
-        """Drain pending background archives, then close MCP connections."""
+        """Drain pending background tasks."""
         if self._background_tasks:
             tasks = list(self._background_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
             for task in tasks:
                 self._remove_background_task(task)
-        for name, stack in self._mcp_stacks.items():
-            try:
-                await stack.aclose()
-            except (RuntimeError, BaseExceptionGroup):
-                logger.exception("MCP server '{}' cleanup failed during shutdown", name)
-        self._mcp_stacks.clear()
 
     def _schedule_background(self, coro) -> None:
         """Schedule a coroutine as a tracked background task (drained on shutdown)."""
@@ -1281,7 +1252,7 @@ class AgentLoop:
         self._save_turn(session, all_msgs, 1 + len(history), turn_latency_ms=latency_ms)
         if channel == "websocket":
             self._pending_turn_latency_ms[key] = latency_ms
-        session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
+        session.enforce_file_cap()
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
         self._schedule_background(
@@ -1562,11 +1533,10 @@ class AgentLoop:
 
         # Filter stale subagent results from prior reviews — the LLM would
         # otherwise try to continue old review work instead of starting fresh.
-        if ctx.session.metadata.get(ReviewMetaKey.MODE, False):
-            ctx.history = [
-                m for m in ctx.history
-                if m.get("_metadata", {}).get("injected_event") != "subagent_result"
-            ]
+        ctx.history = [
+            m for m in ctx.history
+            if m.get("_metadata", {}).get("injected_event") != "subagent_result"
+        ]
 
         ctx.initial_messages = self._build_initial_messages(
             ctx.msg, ctx.session, ctx.history, ctx.pending_summary
@@ -1627,7 +1597,7 @@ class AgentLoop:
         )
         if ctx.msg.channel == "websocket":
             self._pending_turn_latency_ms[ctx.session_key] = ctx.turn_latency_ms
-        ctx.session.enforce_file_cap(on_archive=self.context.memory.raw_archive)
+        ctx.session.enforce_file_cap()
         self._clear_pending_user_turn(ctx.session)
         self._clear_runtime_checkpoint(ctx.session)
         self.sessions.save(ctx.session)

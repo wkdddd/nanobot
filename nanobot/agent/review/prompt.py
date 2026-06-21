@@ -6,6 +6,7 @@ import uuid
 
 from loguru import logger
 
+from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.types import ReviewAction, ReviewPlan
 
 _SUBAGENT_CANDIDATE_SCHEMA = """\
@@ -47,7 +48,8 @@ def _mode_instruction(plan: ReviewPlan) -> str:
     if plan.depth == "quick":
         return (
             "This is a QUICK review. Focus only on critical and high severity issues. "
-            "Skip detailed analysis of low-risk areas. Prioritize speed over completeness."
+            "Review only high-risk dimensions selected by the mode policy. Skip low-risk "
+            "areas and low/medium severity candidates even if they are interesting."
         )
     if plan.depth == "deep":
         return (
@@ -89,7 +91,8 @@ def _action_instruction(plan: ReviewPlan) -> str:
 
 
 def _scope_instruction(plan: ReviewPlan) -> str:
-    max_subagents = min(plan.max_subagents, 2) if plan.depth == "quick" else plan.max_subagents
+    policy = policy_for_depth(plan.depth, requested_max_subagents=plan.max_subagents)
+    max_subagents = policy.max_subagents
     if plan.forced_focus:
         focus_names = ", ".join(role.label for role in plan.roles)
         return (
@@ -161,6 +164,7 @@ def render_review_prompt(plan: ReviewPlan) -> str:
     role_lines = "\n".join(
         f"- **{role.label}** ({role.name}): {role.description}" for role in plan.roles
     )
+    policy = policy_for_depth(plan.depth, requested_max_subagents=plan.max_subagents)
     output_section = _SUBAGENT_CANDIDATE_SCHEMA
     requirements = plan.user_requirements.strip() or "(none)"
     tool_name = _review_tool_name(plan)
@@ -185,6 +189,7 @@ You are CodeReviewAgent, the main code review coordinator.
 - Keep tool calls aligned with the ReviewPlan. If Action is not auto, do not switch actions unless the target metadata is contradictory.
 ## Review Mode
 {_mode_instruction(plan)}
+- Programmatic mode policy: max_subagents={policy.max_subagents}, severities={", ".join(policy.severities)}, ai_judge={"enabled" if policy.judge_enabled else "disabled"}.
 
 ## Evidence Strategy
 {_action_instruction(plan)}
