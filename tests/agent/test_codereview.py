@@ -189,6 +189,30 @@ def test_dimension_contract_uses_forced_focus_dimensions() -> None:
     assert "Performance Reviewer" not in prompt
 
 
+def test_quick_forced_dependency_focus_keeps_dependency_dimension() -> None:
+    plan = build_review_plan(
+        target="https://github.com/test/repo",
+        target_type="github",
+        focus="dependency",
+        depth="quick",
+    )
+
+    assert plan is not None
+    assert [role.name for role in plan.roles] == ["dependency"]
+
+    prompt = build_code_review_context(
+        target="https://github.com/test/repo",
+        target_type="github",
+        focus="dependency",
+        mode="quick",
+    )
+
+    assert "Dependency Reviewer" in prompt
+    assert "Security Reviewer" not in prompt
+    assert "Bug Risk Reviewer" not in prompt
+    assert "Test Reviewer" not in prompt
+
+
 def test_review_plan_resolves_pr_url_to_diff() -> None:
     plan = build_review_plan(target="https://github.com/test/repo/pull/42", target_type="github")
 

@@ -11,12 +11,7 @@
 docs/superpowers/
 docs/plans/
 
-# review webui (monorepo frontend)
-review-webui/node_modules/
-review-webui/dist/
-review-webui/coverage/
-review-webui/.vite/
-*.tsbuildinfo
+
 
 # Python bytecode & caches
 *.pyc
@@ -106,3 +101,5 @@ trae大赛html/
 
 
 .trae
+
+review-webui/node_modules/

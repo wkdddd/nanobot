@@ -140,7 +140,7 @@ export function ReviewConfig({
           value={targetPaths}
           onChange={(e) => onTargetPathsChange(e.target.value)}
           placeholder={
-            "Specify files or directories to focus on, one per line:\nsrc/components/\nsrc/utils/api.ts"
+            "Specify files or directories to focus on, one per line or comma-separated:\nsrc/components/\nsrc/utils/api.ts"
           }
           rows={3}
           className={cn(

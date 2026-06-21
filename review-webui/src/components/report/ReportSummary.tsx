@@ -1,7 +1,5 @@
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { FileText, AlertTriangle, Info } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import type { Finding } from "@/hooks/useReviewSession";
 
 interface ReportSummaryProps {
@@ -10,50 +8,57 @@ interface ReportSummaryProps {
 }
 
 export function ReportSummary({ summary, findings }: ReportSummaryProps) {
-  const criticalCount = findings.filter((f) => f.severity === "critical").length;
-  const highCount = findings.filter((f) => f.severity === "high").length;
-  const totalCount = findings.length;
+  const critical = findings.filter((f) => f.severity === "critical").length;
+  const high = findings.filter((f) => f.severity === "high").length;
+  const medium = findings.filter((f) => f.severity === "medium").length;
+  const low = findings.filter((f) => f.severity === "low").length;
 
   return (
-    <Card className="paper-texture">
-      <CardContent className="p-5 space-y-3">
-        <h3 className="text-base font-semibold text-foreground">
-          Executive Summary
-        </h3>
+    <Card className="border-2 border-primary/20">
+      <CardContent className="p-4 space-y-2">
+        {/* Title */}
+        <div className="flex items-center gap-1.5">
+          <FileText className="h-3.5 w-3.5 text-primary" />
+          <h3 className="text-xs font-semibold text-foreground">
+            Review Report Summary
+          </h3>
+        </div>
 
-        {/* Key stats inline */}
-        {totalCount > 0 && (
-          <div className="flex flex-wrap gap-3 text-xs">
-            <span className="bg-muted px-2 py-1 rounded-md">
-              <span className="font-semibold">{totalCount}</span> total findings
-            </span>
-            {criticalCount > 0 && (
-              <span className="bg-red-100 text-red-700 px-2 py-1 rounded-md">
-                <span className="font-semibold">{criticalCount}</span> critical
-              </span>
-            )}
-            {highCount > 0 && (
-              <span className="bg-orange-100 text-orange-700 px-2 py-1 rounded-md">
-                <span className="font-semibold">{highCount}</span> high
-              </span>
-            )}
-          </div>
-        )}
-
-        <Separator />
-
-        {/* Markdown summary */}
-        {summary ? (
-          <div className="prose prose-sm markdown-content max-w-none text-muted-foreground">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {summary}
-            </ReactMarkdown>
-          </div>
-        ) : (
-          <p className="text-sm text-muted-foreground italic">
-            No summary available yet.
+        {/* Summary text */}
+        {summary && (
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            {summary}
           </p>
         )}
+
+        {/* Stats */}
+        <div className="flex flex-wrap gap-2 pt-1">
+          <div className="flex items-center gap-1">
+            <AlertTriangle className="h-3 w-3 text-red-500" />
+            <span className="text-xs font-medium text-foreground">{critical}</span>
+            <span className="text-[10px] text-muted-foreground">Critical</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <AlertTriangle className="h-3 w-3 text-orange-500" />
+            <span className="text-xs font-medium text-foreground">{high}</span>
+            <span className="text-[10px] text-muted-foreground">High</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <AlertTriangle className="h-3 w-3 text-yellow-500" />
+            <span className="text-xs font-medium text-foreground">{medium}</span>
+            <span className="text-[10px] text-muted-foreground">Medium</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <Info className="h-3 w-3 text-blue-500" />
+            <span className="text-xs font-medium text-foreground">{low}</span>
+            <span className="text-[10px] text-muted-foreground">Low</span>
+          </div>
+          <div className="flex items-center gap-1">
+            <FileText className="h-3 w-3 text-muted-foreground" />
+            <span className="text-xs font-medium text-foreground">{findings.length}</span>
+            <span className="text-[10px] text-muted-foreground">Total</span>
+          </div>
+        </div>
       </CardContent>
     </Card>
   );

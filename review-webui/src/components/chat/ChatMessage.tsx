@@ -20,9 +20,29 @@ interface ChatMessageProps {
   onSelectFinding?: (finding: Finding) => void;
 }
 
+const LOCATION_RE = /^(.+\.(?:[A-Za-z0-9]+)):(\d+)$/;
+
+function findingFromLocation(value: string): Finding | null {
+  const match = value.trim().match(LOCATION_RE);
+  if (!match) return null;
+  return {
+    severity: "medium",
+    dimension: "report",
+    file: match[1],
+    line: Number.parseInt(match[2], 10),
+    title: `Code context for ${value.trim()}`,
+    impact: "",
+    recommendation: "",
+  };
+}
+
 export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
   const isUser = message.role === "user";
-  const [showThinking, setShowThinking] = useState(Boolean(message.streaming));
+  const isThinkingOnly = !isUser
+    && message.type === "text"
+    && message.content.trim().length === 0
+    && !!message.thinking?.trim();
+  const [showThinking, setShowThinking] = useState(Boolean(message.streaming || isThinkingOnly));
   const hasThinking = message.thinking && message.thinking.length > 0;
   const hasVisibleContent = message.type !== "text" || message.content.trim().length > 0;
 
@@ -30,24 +50,28 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
     <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
       {/* Thinking block (agent only, collapsible) */}
       {hasThinking && !isUser && (
-        <div className="mb-2 w-full max-w-[85%]">
+        <div className="mb-1.5 w-full max-w-[80%]">
           <button
             onClick={() => setShowThinking(!showThinking)}
-            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors px-1"
+            className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-1"
             aria-label="Toggle thinking"
             aria-expanded={showThinking}
           >
             {showThinking ? (
-              <ChevronDown className="w-3 h-3" />
+              <ChevronDown className="w-2.5 h-2.5" />
             ) : (
-              <ChevronRight className="w-3 h-3" />
+              <ChevronRight className="w-2.5 h-2.5" />
             )}
             <span className="italic">
-              {message.streaming && message.type !== "report" ? "Thinking..." : "Thinking"}
+              {message.streaming && message.type !== "report"
+                ? "Thinking..."
+                : isThinkingOnly
+                  ? "已停止前的思考"
+                  : "Thinking"}
             </span>
           </button>
           {showThinking && (
-            <div className="mt-1 px-3 py-2 text-xs text-muted-foreground/80 leading-relaxed bg-muted/50 rounded-lg border border-border/50 max-h-40 overflow-y-auto scrollbar-thin">
+            <div className="mt-0.5 px-2 py-1.5 text-[11px] text-muted-foreground/80 leading-relaxed bg-muted/50 rounded-md border border-border/50 max-h-32 overflow-y-auto scrollbar-thin">
               {message.thinking}
             </div>
           )}
@@ -57,10 +81,10 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
       {hasVisibleContent && (
         <div
           className={cn(
-            "text-sm leading-relaxed",
+            "text-xs leading-relaxed",
             isUser
-              ? "px-4 py-2.5 bg-primary/10 rounded-2xl rounded-tr-sm text-foreground max-w-[70%]"
-              : "max-w-[85%]"
+              ? "px-3 py-2 bg-primary/10 rounded-xl rounded-tr-sm text-foreground max-w-[65%]"
+              : "max-w-[80%]"
           )}
         >
           {message.type === "finding" && message.finding ? (
@@ -72,7 +96,31 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
             </div>
           ) : message.type === "report" ? (
             <div className="prose prose-sm markdown-content max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  code({ children, className, ...props }) {
+                    const text = String(children).trim();
+                    const locationFinding = findingFromLocation(text);
+                    if (!className && locationFinding) {
+                      return (
+                        <button
+                          type="button"
+                          className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-primary hover:bg-primary/10"
+                          onClick={() => onSelectFinding?.(locationFinding)}
+                        >
+                          {text}
+                        </button>
+                      );
+                    }
+                    return (
+                      <code className={className} {...props}>
+                        {children}
+                      </code>
+                    );
+                  },
+                }}
+              >
                 {message.content}
               </ReactMarkdown>
             </div>
@@ -83,14 +131,14 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
           {/* Streaming cursor */}
           {message.streaming && (
             <span
-              className="inline-block w-1.5 h-4 bg-foreground/60 animate-pulse ml-0.5 align-text-bottom rounded-sm"
+              className="inline-block w-1 h-3 bg-foreground/60 animate-pulse ml-0.5 align-text-bottom rounded-sm"
             />
           )}
         </div>
       )}
       {!hasVisibleContent && message.streaming && !isUser && (
         <div
-          className="ml-1 inline-block h-3 w-3 rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground animate-spin"
+          className="ml-1 inline-block h-2.5 w-2.5 rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground animate-spin"
           aria-label="Thinking"
         />
       )}

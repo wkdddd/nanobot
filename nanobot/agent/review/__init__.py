@@ -35,6 +35,7 @@ from nanobot.agent.review.types import (
     ReviewPlan,
     ReviewReport,
     ReviewRole,
+    normalize_review_dimension,
     review_action_values,
 )
 
@@ -67,6 +68,7 @@ __all__ = [
     "infer_review_target_type",
     "latest_user_text",
     "normalize_focus",
+    "normalize_review_dimension",
     "normalize_review_action",
     "normalize_review_target_type",
     "policy_for_depth",

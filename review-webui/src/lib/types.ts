@@ -89,6 +89,7 @@ export interface ToolProgressEvent {
   error?: unknown;
   files?: unknown[];
   embeds?: unknown[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface ChatSummary {
@@ -101,6 +102,59 @@ export interface ChatSummary {
   updatedAt: string | null;
   title?: string;
   preview: string;
+  metadata?: Record<string, unknown>;
+  autoTaskId?: string;
+  autoTaskRunId?: string;
+  githubRepo?: string;
+  githubPrNumber?: number;
+  reviewTarget?: string;
+  reviewTargetType?: ReviewTargetType;
+  reviewAction?: ReviewAction;
+  reviewMode?: ReviewDepth;
+}
+
+export interface AutoTask {
+  id: string;
+  name: string;
+  repo: string;
+  enabled: boolean;
+  mode?: ReviewDepth | null;
+  focus?: ReviewFocus[] | null;
+  target_paths: string[];
+  max_subagents?: number | null;
+  created_at: string;
+  updated_at: string;
+  last_run_at?: string | null;
+  last_status?: string | null;
+}
+
+export type AutoTaskRunStatus = "queued" | "running" | "completed" | "failed" | "skipped";
+
+export interface AutoTaskRun {
+  run_id: string;
+  task_id: string;
+  repo: string;
+  pr_number: number;
+  pr_title: string;
+  pr_url: string;
+  status: AutoTaskRunStatus;
+  session_key?: string | null;
+  chat_id?: string | null;
+  reason?: string;
+  report_available: boolean;
+  report_filename?: string;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+export interface AutoTaskPayload {
+  name?: string;
+  repo: string;
+  enabled?: boolean;
+  mode?: ReviewDepth | null;
+  focus?: ReviewFocus[] | null;
+  target_paths?: string[];
+  max_subagents?: number | null;
 }
 
 export interface BootstrapResponse {
@@ -340,6 +394,16 @@ export interface SessionMessagesPayload {
   key?: string;
   metadata?: Record<string, unknown>;
   messages: Array<Record<string, unknown>>;
+}
+
+export interface CodeContextPayload {
+  file: string;
+  line: number;
+  startLine: number;
+  endLine: number;
+  code: string;
+  source: "local" | "github_snapshot";
+  truncated: boolean;
 }
 
 export interface PermissionRequest {

@@ -759,6 +759,7 @@ class AgentLoop:
                 changed_files=session.metadata.get(ReviewMetaKey.TARGET_PATHS) or [],
                 depth=review_depth,  # type: ignore[arg-type]
                 judge=self._build_review_judge(),
+                allowed_dimensions=session.metadata.get(ReviewMetaKey.ALLOWED_DIMENSIONS),
             )
             on_stream = None
             on_stream_end = None
@@ -827,6 +828,17 @@ class AgentLoop:
                 review_meta,
                 progress_callback=on_progress,
             )
+            if ReviewMetaKey.ALLOWED_DIMENSIONS in review_meta:
+                _session_meta[ReviewMetaKey.ALLOWED_DIMENSIONS] = review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS]
+                if review_hook is not None and hasattr(review_hook, "set_allowed_dimensions"):
+                    review_hook.set_allowed_dimensions(review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS])
+                self._set_tool_context(
+                    channel,
+                    chat_id,
+                    message_id,
+                    {**(metadata or {}), ReviewMetaKey.ALLOWED_DIMENSIONS: review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS]},
+                    session_key=session_key,
+                )
             if specialist_prompt:
                 initial_messages.insert(0, {"role": "system", "content": specialist_prompt})
 
@@ -1036,20 +1048,51 @@ class AgentLoop:
         gate = self._concurrency_gate or nullcontext()
         pending = asyncio.Queue(maxsize=20)
         self._pending_queues[session_key] = pending
+        turn_end_sent = False
+        stream_base_id = f"{msg.session_key}:{time.time_ns()}"
+        stream_segment = 0
+        review_stream = _is_review_turn(msg.metadata)
+        wants_stream = bool(msg.metadata.get("_wants_stream"))
+
+        def _current_stream_id() -> str:
+            return f"{stream_base_id}:{stream_segment}"
+
+        async def publish_forced_turn_end() -> None:
+            nonlocal turn_end_sent, stream_segment
+            if msg.channel != "websocket" or turn_end_sent:
+                return
+            if wants_stream and review_stream and stream_segment == 0:
+                meta = dict(msg.metadata or {})
+                meta["_stream_end"] = True
+                meta["_resuming"] = False
+                meta["_stream_id"] = _current_stream_id()
+                meta["_stream_kind"] = "review_thinking"
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=msg.channel,
+                    chat_id=msg.chat_id,
+                    content="",
+                    metadata=meta,
+                ))
+                stream_segment += 1
+            sess_turn = self.sessions.get_or_create(session_key)
+            await self.bus.publish_outbound(OutboundMessage(
+                channel=msg.channel,
+                chat_id=msg.chat_id,
+                content="",
+                metadata={
+                    **dict(msg.metadata or {}),
+                    "_turn_end": True,
+                    "goal_state": goal_state_ws_blob(sess_turn.metadata),
+                },
+            ))
+            turn_end_sent = True
 
         try:
             async with lock, gate:
                 try:
     
                     on_stream = on_stream_end = None
-                    if msg.metadata.get("_wants_stream"):
-                        stream_base_id = f"{msg.session_key}:{time.time_ns()}"
-                        stream_segment = 0
-                        review_stream = _is_review_turn(msg.metadata)
-
-                        def _current_stream_id() -> str:
-                            return f"{stream_base_id}:{stream_segment}"
-
+                    if wants_stream:
                         async def on_stream(delta: str) -> None:
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True  # 标记这是流增量
@@ -1110,6 +1153,7 @@ class AgentLoop:
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=turn_metadata,
                         ))
+                        turn_end_sent = True
                         if msg.metadata.get("webui") is True:
                             async def _generate_title_and_notify() -> None:
                                 generated = await maybe_generate_webui_title_after_turn(
@@ -1150,6 +1194,8 @@ class AgentLoop:
                             session_key,
                             exc_info=True,
                         )
+                    if msg.channel == "websocket":
+                        await publish_forced_turn_end()
                     raise  
                 except Exception:
               
@@ -1158,6 +1204,8 @@ class AgentLoop:
                         channel=msg.channel, chat_id=msg.chat_id,
                         content="Sorry, I encountered an error.",
                     ))
+                    if msg.channel == "websocket":
+                        await publish_forced_turn_end()
     
         finally:
    

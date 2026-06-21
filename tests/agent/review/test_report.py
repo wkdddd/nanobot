@@ -41,6 +41,20 @@ class TestReportStructure:
         assert "## Code Review Report: myproject" in report
         assert "No actionable issues found" in report
 
+    def test_incomplete_checks_do_not_report_clean_result(self):
+        dims = [
+            ReviewDimensionResult(
+                dimension="tests",
+                status="incomplete",
+                errors=["GitHub API rate limited"],
+            )
+        ]
+        report = render_review_report("repo", dims)
+
+        assert "Review incomplete" in report
+        assert "No actionable issues found" not in report
+        assert "GitHub API rate limited" in report
+
     def test_findings_sorted_by_severity(self):
         dims = [_dim("security", accepted=[
             _candidate(severity="medium", title="Med issue"),

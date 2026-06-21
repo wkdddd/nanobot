@@ -21,6 +21,7 @@ from nanobot.agent.review.types import (
     ReviewFindingVerdict,
     ReviewJudgedFinding,
     ReviewModePolicy,
+    normalize_review_dimension,
 )
 from nanobot.agent.review.validator import ReviewValidator, ValidationContext
 
@@ -40,12 +41,25 @@ class ReviewFinalizerResult:
 class ReviewFinalizer:
     """Parses subagent outputs, validates findings, produces final report."""
 
+    _INCOMPLETE_ERROR_PATTERNS = (
+        "github api rate limited",
+        "failed to fetch github repository context",
+        "unable to fetch",
+        "could not fetch",
+        "context unavailable",
+        "no repository context",
+        "无法审查",
+        "无法直接拉取",
+        "未找到",
+    )
+
     def __init__(
         self,
         workspace: str,
         changed_files: list[str] | None = None,
         *,
         policy: ReviewModePolicy | None = None,
+        allowed_dimensions: list[str] | set[str] | None = None,
     ) -> None:
         self._ctx = ValidationContext(
             workspace=workspace,
@@ -55,6 +69,10 @@ class ReviewFinalizer:
         self._dimensions: list[ReviewDimensionResult] = []
         self._errors: list[str] = []
         self._policy = policy or policy_for_depth("full")
+        self._allowed_dimensions = self._normalize_allowed_dimensions(allowed_dimensions)
+
+    def set_allowed_dimensions(self, allowed_dimensions: list[str] | set[str] | None) -> None:
+        self._allowed_dimensions = self._normalize_allowed_dimensions(allowed_dimensions)
 
     @property
     def dimensions(self) -> list[ReviewDimensionResult]:
@@ -79,6 +97,20 @@ class ReviewFinalizer:
 
     def ingest_subagent_output(self, dimension: str, raw_output: str) -> ReviewDimensionResult:
         """Parse one subagent's raw text output and validate its candidates."""
+        normalized_dimension = normalize_review_dimension(dimension) or dimension.strip().lower()
+        if self._allowed_dimensions is not None and normalized_dimension not in self._allowed_dimensions:
+            logger.warning(
+                "review.finalizer.skip_disallowed dimension={} allowed={}",
+                dimension,
+                sorted(self._allowed_dimensions),
+            )
+            self._errors.append(f"Skipped disallowed review dimension: {dimension}")
+            return ReviewDimensionResult(
+                dimension=normalized_dimension or "unknown",
+                status="skipped_disallowed",
+            )
+        dimension = normalized_dimension
+        incomplete_reason = self._incomplete_reason(raw_output)
         candidates = self._parse_candidates(dimension, raw_output)
         if self._policy.severities:
             before = len(candidates)
@@ -92,7 +124,11 @@ class ReviewFinalizer:
                     self._policy.severities,
                 )
         if not candidates:
-            result = ReviewDimensionResult(dimension=dimension, status="no_findings")
+            result = ReviewDimensionResult(
+                dimension=dimension,
+                status="incomplete" if incomplete_reason else "no_findings",
+                errors=[incomplete_reason] if incomplete_reason else [],
+            )
             self._dimensions.append(result)
             return result
         result = self._validator.validate_candidates(candidates, dimension)
@@ -191,6 +227,35 @@ class ReviewFinalizer:
             return candidates
         candidates = self._try_parse_markdown_table(dimension, raw)
         return candidates
+
+    @classmethod
+    def _incomplete_reason(cls, raw: str) -> str:
+        text = raw.strip()
+        if not text:
+            return ""
+        lower = text.lower()
+        if not any(pattern in lower for pattern in cls._INCOMPLETE_ERROR_PATTERNS):
+            return ""
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if any(pattern in stripped.lower() for pattern in cls._INCOMPLETE_ERROR_PATTERNS):
+                return stripped[:300]
+        return text[:300]
+
+    @staticmethod
+    def _normalize_allowed_dimensions(
+        allowed_dimensions: list[str] | set[str] | None,
+    ) -> set[str] | None:
+        if not allowed_dimensions:
+            return None
+        normalized = {
+            dimension
+            for item in allowed_dimensions
+            if (dimension := normalize_review_dimension(str(item)))
+        }
+        return normalized or None
 
     def _try_parse_json_array(
         self, dimension: str, raw: str
@@ -349,15 +414,24 @@ class ReviewFinalizerHook(AgentHook):
         changed_files: list[str] | None = None,
         depth: ReviewDepth = "full",
         judge: ReviewJudge | None = None,
+        allowed_dimensions: list[str] | set[str] | None = None,
     ) -> None:
         super().__init__()
         self._target_name = target_name
         self._policy = policy_for_depth(depth)
-        self._finalizer = ReviewFinalizer(workspace, changed_files, policy=self._policy)
+        self._finalizer = ReviewFinalizer(
+            workspace,
+            changed_files,
+            policy=self._policy,
+            allowed_dimensions=allowed_dimensions,
+        )
         self._rendered = False
         self._seen_subagent_results: set[str] = set()
         self._judged = False
         self._judge = judge
+
+    def set_allowed_dimensions(self, allowed_dimensions: list[str] | set[str] | None) -> None:
+        self._finalizer.set_allowed_dimensions(allowed_dimensions)
 
     async def after_iteration(self, context: AgentHookContext) -> None:
         if self._rendered:

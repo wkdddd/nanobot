@@ -225,12 +225,14 @@ def build_review_plan(
         prefetch_summary=prefetch_summary,
     )
     logger.info(
-        "review.plan.done trace_id={} action={} target_type={} forced_focus={} roles={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
+        "review.plan.done trace_id={} action={} target_type={} forced_focus={} requested_focus={} roles={} allowed_dimensions={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
         trace_id,
         plan.action.value,
         plan.target_type,
         plan.forced_focus,
-        plan.roles,
+        focus,
+        [role.name for role in plan.roles],
+        [role.name for role in plan.roles],
         plan.user_requirements,
         len(plan.target_paths),
         (time.perf_counter() - started) * 1000,
@@ -291,6 +293,7 @@ async def resolve_code_review_context(
     )
     if prefetch_summary:
         plan = replace(plan, prefetch_summary=prefetch_summary)
+    session_meta[ReviewMetaKey.ALLOWED_DIMENSIONS] = [role.name for role in plan.roles]
     return render_review_prompt(plan)
 
 

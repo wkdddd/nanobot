@@ -52,27 +52,27 @@ export function ReviewHeader({
     <TooltipProvider delayDuration={300}>
       <header
         className={cn(
-          "flex h-[52px] shrink-0 items-center justify-between border-b bg-card px-4",
+          "flex h-[44px] shrink-0 items-center justify-between border-b bg-card px-3",
           "shadow-[0_1px_2px_0_hsl(var(--foreground)/0.04)]",
         )}
       >
         {/* Left: Logo + brand */}
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
           <div
             className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-lg",
+              "flex h-7 w-7 items-center justify-center rounded-md",
               "bg-primary/10 text-primary",
             )}
           >
-            <Shield className="h-[18px] w-[18px]" strokeWidth={2.2} />
+            <Shield className="h-4 w-4" strokeWidth={2.2} />
           </div>
-          <span className="text-[15px] font-semibold tracking-tight text-foreground">
+          <span className="text-sm font-semibold tracking-tight text-foreground">
             Review Agent
           </span>
         </div>
 
         {/* Right: Connection status + model + actions */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           <Tooltip>
             <TooltipTrigger asChild>
               <div className="flex items-center gap-2 cursor-default px-2">
@@ -104,14 +104,14 @@ export function ReviewHeader({
 
           {modelName && (
             <>
-              <div className="h-3.5 w-px bg-border" />
-              <span className="text-xs font-medium text-muted-foreground/80">
+              <div className="h-3 w-px bg-border" />
+              <span className="text-[11px] font-medium text-muted-foreground/80">
                 {modelName}
               </span>
             </>
           )}
 
-          <div className="h-3.5 w-px bg-border mx-1" />
+          <div className="h-3 w-px bg-border mx-0.5" />
 
           {/* Settings button */}
           {onOpenSettings && (
@@ -120,11 +120,11 @@ export function ReviewHeader({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className="h-6 w-6"
                   onClick={onOpenSettings}
                   aria-label="Settings"
                 >
-                  <Settings className="h-3.5 w-3.5" />
+                  <Settings className="h-3 w-3" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>
@@ -140,11 +140,11 @@ export function ReviewHeader({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-7 w-7"
+                  className="h-6 w-6"
                   onClick={onLogout}
                   aria-label="Logout"
                 >
-                  <LogOut className="h-3.5 w-3.5" />
+                  <LogOut className="h-3 w-3" />
                 </Button>
               </TooltipTrigger>
               <TooltipContent>

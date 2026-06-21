@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import parse_qs, unquote, urlparse
 
+from aiohttp import web
 from loguru import logger
 from pydantic import Field, field_validator, model_validator
 from websockets.asyncio.server import ServerConnection, serve
@@ -31,10 +32,15 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from nanobot.agent.review import normalize_review_action, normalize_review_target_type
+from nanobot.agent.review.planner import parse_repo_target
+from nanobot.auto_tasks.github import parse_pull_request_event, verify_github_signature
+from nanobot.auto_tasks.service import AutoTaskService
+from nanobot.auto_tasks.store import AutoTaskStore
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import builtin_command_palette
+from nanobot.config.schema import Config
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 from nanobot.session.goal_state import goal_state_ws_blob
@@ -50,6 +56,21 @@ from nanobot.utils.webui_turn_helpers import websocket_turn_wall_started_at
 
 if TYPE_CHECKING:
     from nanobot.session.manager import SessionManager
+
+
+_CODE_CONTEXT_DEFAULT_BEFORE = 8
+_CODE_CONTEXT_DEFAULT_AFTER = 12
+_CODE_CONTEXT_MAX_WINDOW = 80
+_CODE_CONTEXT_MAX_BYTES = 1_000_000
+
+
+class CodeContextError(Exception):
+    """HTTP-shaped error for WebUI code context lookups."""
+
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
 
 
 def _strip_trailing_slash(path: str) -> str:
@@ -434,6 +455,17 @@ def _is_websocket_upgrade(request: WsRequest) -> bool:
     return True
 
 
+def _is_aiohttp_websocket_upgrade(request: web.Request) -> bool:
+    """Detect a real aiohttp WebSocket upgrade before applying WS auth gates."""
+    upgrade = request.headers.get("Upgrade", "")
+    connection = request.headers.get("Connection", "")
+    if "websocket" not in upgrade.lower():
+        return False
+    if "upgrade" not in connection.lower():
+        return False
+    return True
+
+
 def _b64url_encode(data: bytes) -> str:
     """URL-safe base64 without padding — compact + friendly in URL paths."""
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
@@ -474,6 +506,18 @@ def _issue_route_secret_matches(headers: Any, configured_secret: str) -> bool:
     return hmac.compare_digest(header_token.strip(), configured_secret)
 
 
+class _AiohttpConnection:
+    """Small adapter so aiohttp websockets can reuse channel send helpers."""
+
+    def __init__(self, request: web.Request, ws: web.WebSocketResponse) -> None:
+        self.request = request
+        self.ws = ws
+        self.remote_address = (request.remote or "", 0)
+
+    async def send(self, raw: str) -> None:
+        await self.ws.send_str(raw)
+
+
 class WebSocketChannel(BaseChannel):
     """Run a local WebSocket server; forward text/JSON messages to the message bus."""
 
@@ -485,6 +529,7 @@ class WebSocketChannel(BaseChannel):
         config: Any,
         bus: MessageBus,
         *,
+        root_config: Config | None = None,
         session_manager: "SessionManager | None" = None,
         static_dist_path: Path | None = None,
         runtime_model_name: Callable[[], str | None] | None = None,
@@ -506,12 +551,23 @@ class WebSocketChannel(BaseChannel):
         self._api_tokens: dict[str, float] = {}
         self._stop_event: asyncio.Event | None = None
         self._server_task: asyncio.Task[None] | None = None
+        self._aiohttp_runner: web.AppRunner | None = None
         self._session_manager = session_manager
         self._static_dist_path: Path | None = (
             static_dist_path.resolve() if static_dist_path is not None else None
         )
         self._runtime_model_name = runtime_model_name
         self._runtime_usage = runtime_usage
+        self._root_config = root_config
+        self._auto_tasks = (
+            AutoTaskService(
+                root_config,
+                AutoTaskStore(),
+                review_starter=self.start_review_task,
+            )
+            if root_config is not None
+            else None
+        )
         # Process-local secret used to HMAC-sign media URLs. The signed URL is
         # the capability — anyone who holds a valid URL can fetch that one
         # file, nothing else. The secret regenerates on restart so links
@@ -759,6 +815,10 @@ class WebSocketChannel(BaseChannel):
         if m:
             return self._handle_webui_thread_get(request, m.group(1))
 
+        m = re.match(r"^/api/sessions/([^/]+)/code-context$", got)
+        if m:
+            return self._handle_code_context_get(request, m.group(1))
+
         # NOTE: websockets' HTTP parser only accepts GET, so we cannot expose a
         # true ``DELETE`` verb. The action is folded into the path instead.
         m = re.match(r"^/api/sessions/([^/]+)/delete$", got)
@@ -810,6 +870,42 @@ class WebSocketChannel(BaseChannel):
             return False
         return True
 
+    def _check_api_token_value(self, token: str | None) -> bool:
+        self._purge_expired_api_tokens()
+        if not token:
+            return False
+        expiry = self._api_tokens.get(token)
+        if expiry is None or time.monotonic() > expiry:
+            self._api_tokens.pop(token, None)
+            return False
+        return True
+
+    @staticmethod
+    def _aiohttp_bearer(request: web.Request) -> str | None:
+        return _bearer_token(request.headers) or request.query.get("token")
+
+    def _check_aiohttp_api_token(self, request: web.Request) -> bool:
+        return self._check_api_token_value(self._aiohttp_bearer(request))
+
+    def _issue_bootstrap_token_payload(self) -> dict[str, Any] | None:
+        self._purge_expired_issued_tokens()
+        self._purge_expired_api_tokens()
+        if (
+            len(self._issued_tokens) >= self._MAX_ISSUED_TOKENS
+            or len(self._api_tokens) >= self._MAX_ISSUED_TOKENS
+        ):
+            return None
+        token = f"nbwt_{secrets.token_urlsafe(32)}"
+        expiry = time.monotonic() + float(self.config.token_ttl_s)
+        self._issued_tokens[token] = expiry
+        self._api_tokens[token] = expiry
+        return {
+            "token": token,
+            "ws_path": self._expected_path(),
+            "expires_in": self.config.token_ttl_s,
+            "model_name": _resolve_bootstrap_model_name(self._runtime_model_name),
+        }
+
     def _purge_expired_api_tokens(self) -> None:
         now = time.monotonic()
         for token_key, expiry in list(self._api_tokens.items()):
@@ -827,32 +923,14 @@ class WebSocketChannel(BaseChannel):
         elif not _is_localhost(connection):
             # No secret configured: only allow localhost (local dev mode).
             return _http_error(403, "bootstrap is localhost-only")
-        # Cap outstanding tokens to avoid runaway growth from a misbehaving client.
-        self._purge_expired_issued_tokens()
-        self._purge_expired_api_tokens()
-        if (
-            len(self._issued_tokens) >= self._MAX_ISSUED_TOKENS
-            or len(self._api_tokens) >= self._MAX_ISSUED_TOKENS
-        ):
+        payload = self._issue_bootstrap_token_payload()
+        if payload is None:
             return _http_response(
                 json.dumps({"error": "too many outstanding tokens"}).encode("utf-8"),
                 status=429,
                 content_type="application/json; charset=utf-8",
             )
-        token = f"nbwt_{secrets.token_urlsafe(32)}"
-        expiry = time.monotonic() + float(self.config.token_ttl_s)
-        # Same string registered in both pools: the WS handshake consumes one copy
-        # while the REST surface keeps validating the other until TTL expiry.
-        self._issued_tokens[token] = expiry
-        self._api_tokens[token] = expiry
-        return _http_json_response(
-            {
-                "token": token,
-                "ws_path": self._expected_path(),
-                "expires_in": self.config.token_ttl_s,
-                "model_name": _resolve_bootstrap_model_name(self._runtime_model_name),
-            }
-        )
+        return _http_json_response(payload)
 
     def _handle_sessions_list(self, request: WsRequest) -> Response:
         if not self._check_api_token(request):
@@ -1089,6 +1167,388 @@ class WebSocketChannel(BaseChannel):
         if data is None:
             return _http_error(404, "webui thread not found")
         return _http_json_response(data)
+
+    def _handle_code_context_get(self, request: WsRequest, key: str) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        decoded_key = _decode_api_key(key)
+        if decoded_key is None:
+            return _http_error(400, "invalid session key")
+        query = _parse_query(request.path)
+        try:
+            payload = self._code_context_payload(
+                decoded_key,
+                file_path=_query_first(query, "file") or "",
+                line=self._int_query_value(_query_first(query, "line"), 1, min_value=1, max_value=10_000_000),
+                before=self._int_query_value(
+                    _query_first(query, "before"),
+                    _CODE_CONTEXT_DEFAULT_BEFORE,
+                    min_value=0,
+                    max_value=_CODE_CONTEXT_MAX_WINDOW,
+                ),
+                after=self._int_query_value(
+                    _query_first(query, "after"),
+                    _CODE_CONTEXT_DEFAULT_AFTER,
+                    min_value=0,
+                    max_value=_CODE_CONTEXT_MAX_WINDOW,
+                ),
+            )
+        except CodeContextError as exc:
+            return _http_error(exc.status, exc.message)
+        return _http_json_response(payload)
+
+    def _webui_sessions_payload(self) -> dict[str, Any]:
+        if self._session_manager is None:
+            raise RuntimeError("session manager unavailable")
+        sessions = self._session_manager.list_sessions()
+        cleaned = [
+            {k: v for k, v in s.items() if k != "path"}
+            for s in sessions
+            if isinstance(s.get("key"), str) and s["key"].startswith("websocket:")
+        ]
+        return {"sessions": cleaned}
+
+    def _session_messages_payload(self, key: str) -> dict[str, Any] | None:
+        if self._session_manager is None:
+            raise RuntimeError("session manager unavailable")
+        if not self._is_websocket_channel_session_key(key):
+            return None
+        data = self._session_manager.read_session_file(key)
+        if data is None:
+            return None
+        messages = data.get("messages")
+        if isinstance(messages, list):
+            scrub_subagent_messages_for_channel(messages)
+        self._augment_media_urls(data)
+        return data
+
+    def _webui_thread_payload(self, key: str) -> dict[str, Any] | None:
+        if not self._is_websocket_channel_session_key(key):
+            return None
+        return build_webui_thread_response(
+            key,
+            augment_user_media=self._augment_transcript_user_media,
+        )
+
+    def _workspace_root(self) -> Path:
+        if self._root_config is not None:
+            return self._root_config.workspace_path.resolve()
+        if self._session_manager is not None:
+            return self._session_manager.workspace.resolve()
+        return Path.cwd().resolve()
+
+    @staticmethod
+    def _normal_code_rel_path(path: str) -> str:
+        cleaned = path.strip().replace("\\", "/")
+        if not cleaned:
+            raise CodeContextError(400, "file is required")
+        pure = Path(cleaned)
+        if pure.is_absolute() or cleaned.startswith("/") or cleaned.startswith("../") or "/../" in cleaned:
+            raise CodeContextError(400, "file must be a relative path")
+        if cleaned in {".", ".."}:
+            raise CodeContextError(400, "file must be a relative file path")
+        return cleaned
+
+    @staticmethod
+    def _int_query_value(value: str | None, default: int, *, min_value: int, max_value: int) -> int:
+        if value is None or not value.strip():
+            return default
+        try:
+            parsed = int(value)
+        except ValueError as exc:
+            raise CodeContextError(400, "line, before, and after must be integers") from exc
+        return max(min_value, min(max_value, parsed))
+
+    @staticmethod
+    def _read_utf8_context(
+        target: Path,
+        *,
+        file_label: str,
+        line: int,
+        before: int,
+        after: int,
+    ) -> dict[str, Any]:
+        if not target.is_file():
+            raise CodeContextError(404, "file not found")
+        try:
+            size = target.stat().st_size
+        except OSError as exc:
+            raise CodeContextError(500, "failed to stat file") from exc
+        if size > _CODE_CONTEXT_MAX_BYTES:
+            raise CodeContextError(413, "file is too large for preview")
+        try:
+            raw = target.read_bytes()
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise CodeContextError(415, "file is not UTF-8 text") from exc
+        except OSError as exc:
+            raise CodeContextError(500, "failed to read file") from exc
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        total = len(lines)
+        safe_line = max(1, min(line, total or 1))
+        start_line = max(1, safe_line - before)
+        end_line = min(total, safe_line + after)
+        code = "\n".join(lines[start_line - 1:end_line])
+        return {
+            "file": file_label,
+            "line": safe_line,
+            "startLine": start_line,
+            "endLine": end_line,
+            "code": code,
+            "truncated": start_line > 1 or end_line < total,
+        }
+
+    def _resolve_local_code_file(self, metadata: dict[str, Any], rel_path: str) -> Path:
+        workspace = self._workspace_root()
+        target_value = str(metadata.get("review_target") or "").strip()
+        roots: list[Path] = []
+        if target_value:
+            raw_target = Path(target_value).expanduser()
+            target_root = raw_target if raw_target.is_absolute() else workspace / raw_target
+            try:
+                resolved_target = target_root.resolve()
+                resolved_target.relative_to(workspace)
+            except (OSError, ValueError) as exc:
+                raise CodeContextError(403, "review target is outside workspace") from exc
+            roots.append(resolved_target.parent if resolved_target.is_file() else resolved_target)
+        roots.append(workspace)
+
+        for root in roots:
+            try:
+                root_resolved = root.resolve()
+                root_resolved.relative_to(workspace)
+                candidate = (root_resolved / rel_path).resolve()
+                candidate.relative_to(root_resolved)
+                candidate.relative_to(workspace)
+            except (OSError, ValueError):
+                continue
+            if candidate.is_file():
+                return candidate
+        raise CodeContextError(404, "file not found")
+
+    def _resolve_github_snapshot_file(self, metadata: dict[str, Any], rel_path: str) -> Path:
+        workspace = self._workspace_root()
+        cache_root = workspace / ".nanobot" / "review_github"
+        if not cache_root.is_dir():
+            raise CodeContextError(404, "review snapshot not found")
+        raw_target = str(metadata.get("review_target") or metadata.get("github_repo") or "").strip()
+        target = parse_repo_target(raw_target) or raw_target
+        candidates: list[Path] = []
+        for manifest in cache_root.glob("*/.nanobot_snapshot.json"):
+            snapshot_dir = manifest.parent
+            try:
+                data = json.loads(manifest.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            files = data.get("files")
+            snapshot_name = str(data.get("snapshot") or "")
+            manifest_files = {str(item).replace("\\", "/") for item in files} if isinstance(files, list) else set()
+            if manifest_files and rel_path not in manifest_files:
+                continue
+            if target and target not in snapshot_name and snapshot_name not in target:
+                continue
+            candidates.insert(0, snapshot_dir)
+        for snapshot_dir in candidates:
+            try:
+                root = snapshot_dir.resolve()
+                root.relative_to(cache_root.resolve())
+                candidate = (root / rel_path).resolve()
+                candidate.relative_to(root)
+            except (OSError, ValueError):
+                continue
+            if candidate.is_file():
+                return candidate
+        raise CodeContextError(404, "file not found in review snapshot")
+
+    def _code_context_payload(
+        self,
+        key: str,
+        *,
+        file_path: str,
+        line: int,
+        before: int,
+        after: int,
+    ) -> dict[str, Any]:
+        if self._session_manager is None:
+            raise CodeContextError(503, "session manager unavailable")
+        if not self._is_websocket_channel_session_key(key):
+            raise CodeContextError(404, "session not found")
+        data = self._session_manager.read_session_file(key)
+        if data is None:
+            raise CodeContextError(404, "session not found")
+        metadata = data.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        rel_path = self._normal_code_rel_path(file_path)
+        target_type = normalize_review_target_type(
+            str(metadata.get("review_target_type") or ""),
+            str(metadata.get("review_target") or "") or None,
+        )
+        if target_type == "github":
+            target = self._resolve_github_snapshot_file(metadata, rel_path)
+            source = "github_snapshot"
+        else:
+            target = self._resolve_local_code_file(metadata, rel_path)
+            source = "local"
+        payload = self._read_utf8_context(
+            target,
+            file_label=rel_path,
+            line=line,
+            before=before,
+            after=after,
+        )
+        payload["source"] = source
+        return payload
+
+    def _delete_session_key(self, key: str) -> bool | None:
+        if self._session_manager is None:
+            raise RuntimeError("session manager unavailable")
+        if not self._is_websocket_channel_session_key(key):
+            return None
+        deleted = self._session_manager.delete_session(key)
+        delete_webui_thread(key)
+        return bool(deleted)
+
+    def _extract_review_report_markdown(self, chat_id: str) -> str:
+        data = self._webui_thread_payload(f"websocket:{chat_id}")
+        if not isinstance(data, dict):
+            return ""
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        for item in reversed(messages):
+            if not isinstance(item, dict):
+                continue
+            if item.get("role") != "assistant":
+                continue
+            content = item.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+        return ""
+
+    def _is_auto_task_chat(self, chat_id: str) -> bool:
+        if self._session_manager is None or not _is_valid_chat_id(chat_id):
+            return False
+        row = self._session_manager.read_session_file(f"websocket:{chat_id}")
+        meta = row.get("metadata", {}) if isinstance(row, dict) else {}
+        return isinstance(meta, dict) and isinstance(meta.get("auto_task_run_id"), str)
+
+    def _complete_auto_task_run_from_chat(self, chat_id: str) -> None:
+        if self._auto_tasks is None or self._session_manager is None:
+            return
+        session = self._session_manager.get_or_create(f"websocket:{chat_id}")
+        run_id = session.metadata.get("auto_task_run_id")
+        task_id = session.metadata.get("auto_task_id")
+        if not isinstance(run_id, str) or not isinstance(task_id, str):
+            return
+        run = self._auto_tasks.get_run(task_id, run_id)
+        if run is None or run.status in {"completed", "failed", "skipped"}:
+            return
+        report = self._extract_review_report_markdown(chat_id)
+        run.report_markdown = report
+        run.status = "completed" if report.strip() else "failed"
+        if not report.strip():
+            run.reason = "review report not found"
+        run.completed_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self._auto_tasks.store.save_run(run)
+        log_event(
+            logger,
+            "info" if run.status == "completed" else "warning",
+            "auto_task.run.completed",
+            status=run.status,
+            task_id=task_id,
+            run_id=run_id,
+            session=f"websocket:{chat_id}",
+            report_chars=len(report),
+        )
+
+    async def start_review_task(self, payload: dict[str, Any]) -> dict[str, str]:
+        """Start a WebUI-backed review turn without requiring a browser client."""
+        if self._session_manager is None:
+            raise RuntimeError("session manager unavailable")
+        chat_id = str(uuid.uuid4())
+        session_key = f"websocket:{chat_id}"
+        target = str(payload.get("target") or "").strip()
+        if not target:
+            raise ValueError("review target is required")
+        action = normalize_review_action(str(payload.get("action") or "diff")).value
+        target_type = normalize_review_target_type(str(payload.get("target_type") or "github"), target)
+        mode = str(payload.get("mode") or "full").strip().lower()
+        if mode not in {"quick", "full", "deep"}:
+            mode = "full"
+        focus_raw = payload.get("focus")
+        focus = [str(item).strip() for item in focus_raw if str(item).strip()] if isinstance(focus_raw, list) else []
+        paths_raw = payload.get("target_paths")
+        target_paths = [str(item).strip() for item in paths_raw if str(item).strip()] if isinstance(paths_raw, list) else []
+        extra_meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+
+        session = self._session_manager.get_or_create(session_key)
+        session.metadata.update(
+            {
+                "review_mode": True,
+                "review_target": target,
+                "review_target_type": target_type or "github",
+                "review_action": action,
+                "review_mode_variant": mode,
+                **extra_meta,
+            }
+        )
+        if focus:
+            session.metadata["review_focus"] = focus
+        if target_paths:
+            session.metadata["review_target_paths"] = target_paths
+        self._session_manager.save(session)
+        if isinstance(extra_meta.get("auto_task_run_id"), str):
+            log_event(
+                logger,
+                "info",
+                "auto_task.session.marked",
+                status="success",
+                task_id=extra_meta.get("auto_task_id"),
+                run_id=extra_meta.get("auto_task_run_id"),
+                session=session_key,
+                target=target,
+                target_type=target_type or "github",
+                action=action,
+                mode=mode,
+            )
+
+        metadata: dict[str, Any] = {
+            "webui": True,
+            "review_target": target,
+            "review_target_type": target_type or "github",
+            "review_action": action,
+            "review_mode_variant": mode,
+            **extra_meta,
+        }
+        if focus:
+            metadata["review_focus"] = focus
+        if target_paths:
+            metadata["review_target_paths"] = target_paths
+
+        content = str(payload.get("content") or "Review").strip() or "Review"
+        await self._handle_message(
+            sender_id="auto-task",
+            chat_id=chat_id,
+            content=content,
+            media=None,
+            metadata=metadata,
+            session_key=session_key,
+            is_dm=False,
+        )
+        log_event(
+            logger,
+            "info",
+            "auto_task.review.started",
+            status="success",
+            session=session_key,
+            task_id=extra_meta.get("auto_task_id"),
+            run_id=extra_meta.get("auto_task_run_id"),
+            target=target,
+            action=action,
+            mode=mode,
+        )
+        return {"chat_id": chat_id, "session_key": session_key}
 
     def _try_append_webui_transcript(self, chat_id: str, wire: dict[str, Any]) -> None:
         sk = f"websocket:{chat_id}"
@@ -1387,32 +1847,441 @@ class WebSocketChannel(BaseChannel):
             self._take_issued_token_if_valid(supplied)
         return None
 
+    async def _aiohttp_bootstrap(self, request: web.Request) -> web.Response:
+        secret = self.config.token_issue_secret.strip() or self.config.token.strip()
+        if secret:
+            if not _issue_route_secret_matches(request.headers, secret):
+                return web.json_response({"error": "Unauthorized"}, status=401)
+        elif request.remote not in _LOCALHOSTS:
+            return web.json_response({"error": "bootstrap is localhost-only"}, status=403)
+        payload = self._issue_bootstrap_token_payload()
+        if payload is None:
+            return web.json_response({"error": "too many outstanding tokens"}, status=429)
+        return web.json_response(payload)
+
+    async def _aiohttp_token_issue(self, request: web.Request) -> web.Response:
+        secret = self.config.token_issue_secret.strip()
+        if secret and not _issue_route_secret_matches(request.headers, secret):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        payload = self._issue_bootstrap_token_payload()
+        if payload is None:
+            return web.json_response({"error": "too many outstanding tokens"}, status=429)
+        return web.json_response({"token": payload["token"], "expires_in": payload["expires_in"]})
+
+    async def _aiohttp_sessions(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        try:
+            return web.json_response(self._webui_sessions_payload())
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+
+    async def _aiohttp_session_messages(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        key = _decode_api_key(request.match_info["key"])
+        if key is None:
+            return web.json_response({"error": "invalid session key"}, status=400)
+        try:
+            payload = self._session_messages_payload(key)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+        if payload is None:
+            return web.json_response({"error": "session not found"}, status=404)
+        return web.json_response(payload)
+
+    async def _aiohttp_webui_thread(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        key = _decode_api_key(request.match_info["key"])
+        if key is None:
+            return web.json_response({"error": "invalid session key"}, status=400)
+        payload = self._webui_thread_payload(key)
+        if payload is None:
+            return web.json_response({"error": "webui thread not found"}, status=404)
+        return web.json_response(payload)
+
+    async def _aiohttp_code_context(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        key = _decode_api_key(request.match_info["key"])
+        if key is None:
+            return web.json_response({"error": "invalid session key"}, status=400)
+        try:
+            payload = self._code_context_payload(
+                key,
+                file_path=request.query.get("file", ""),
+                line=self._int_query_value(request.query.get("line"), 1, min_value=1, max_value=10_000_000),
+                before=self._int_query_value(
+                    request.query.get("before"),
+                    _CODE_CONTEXT_DEFAULT_BEFORE,
+                    min_value=0,
+                    max_value=_CODE_CONTEXT_MAX_WINDOW,
+                ),
+                after=self._int_query_value(
+                    request.query.get("after"),
+                    _CODE_CONTEXT_DEFAULT_AFTER,
+                    min_value=0,
+                    max_value=_CODE_CONTEXT_MAX_WINDOW,
+                ),
+            )
+        except CodeContextError as exc:
+            return web.json_response({"error": exc.message}, status=exc.status)
+        return web.json_response(payload)
+
+    async def _aiohttp_session_delete(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        key = _decode_api_key(request.match_info["key"])
+        if key is None:
+            return web.json_response({"error": "invalid session key"}, status=400)
+        try:
+            deleted = self._delete_session_key(key)
+        except RuntimeError as exc:
+            return web.json_response({"error": str(exc)}, status=503)
+        if deleted is None:
+            return web.json_response({"error": "session not found"}, status=404)
+        return web.json_response({"deleted": bool(deleted)})
+
+    async def _aiohttp_media_fetch(self, request: web.Request) -> web.Response:
+        sig = request.match_info["sig"]
+        payload = request.match_info["payload"]
+        try:
+            provided_mac = _b64url_decode(sig)
+        except (ValueError, binascii.Error):
+            return web.Response(status=401, text="invalid signature")
+        expected_mac = hmac.new(
+            self._media_secret, payload.encode("ascii"), hashlib.sha256
+        ).digest()[:16]
+        if not hmac.compare_digest(expected_mac, provided_mac):
+            return web.Response(status=401, text="invalid signature")
+        try:
+            rel_bytes = _b64url_decode(payload)
+            rel_str = rel_bytes.decode("utf-8")
+        except (ValueError, binascii.Error, UnicodeDecodeError):
+            return web.Response(status=400, text="invalid payload")
+        try:
+            media_root = get_media_dir().resolve()
+            candidate = (media_root / rel_str).resolve()
+            candidate.relative_to(media_root)
+        except (OSError, ValueError):
+            return web.Response(status=404, text="not found")
+        if not candidate.is_file():
+            return web.Response(status=404, text="not found")
+        try:
+            body = candidate.read_bytes()
+        except OSError:
+            return web.Response(status=500, text="read error")
+        mime, _ = mimetypes.guess_type(candidate.name)
+        if mime not in _MEDIA_ALLOWED_MIMES:
+            mime = "application/octet-stream"
+        return web.Response(
+            body=body,
+            content_type=mime,
+            headers={
+                "Cache-Control": "private, max-age=31536000, immutable",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
+    async def _aiohttp_auto_tasks(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        return web.json_response({"tasks": [task.to_dict() for task in self._auto_tasks.list_tasks()]})
+
+    async def _json_body(self, request: web.Request) -> dict[str, Any]:
+        if request.can_read_body:
+            try:
+                data = await request.json()
+            except Exception as exc:
+                raise ValueError("invalid JSON body") from exc
+            if not isinstance(data, dict):
+                raise ValueError("JSON body must be an object")
+            return data
+        return {}
+
+    async def _aiohttp_auto_task_create(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        try:
+            task = self._auto_tasks.create_task(await self._json_body(request))
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        return web.json_response({"task": task.to_dict()}, status=201)
+
+    async def _aiohttp_auto_task_update(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        try:
+            task = self._auto_tasks.update_task(request.match_info["task_id"], await self._json_body(request))
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        if task is None:
+            return web.json_response({"error": "task not found"}, status=404)
+        return web.json_response({"task": task.to_dict()})
+
+    async def _aiohttp_auto_task_delete(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        deleted = self._auto_tasks.delete_task(request.match_info["task_id"])
+        return web.json_response({"deleted": bool(deleted)})
+
+    async def _aiohttp_auto_task_runs(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        task_id = request.match_info["task_id"]
+        return web.json_response({"runs": [run.to_dict() for run in self._auto_tasks.list_runs(task_id)]})
+
+    async def _aiohttp_auto_task_run_now(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        task_id = request.match_info["task_id"]
+        task = self._auto_tasks.store.get_task(task_id)
+        if task is None:
+            return web.json_response({"error": "task not found"}, status=404)
+        try:
+            body = await self._json_body(request)
+            pr_number = int(body.get("pr_number") or body.get("prNumber") or 0)
+        except (ValueError, TypeError):
+            return web.json_response({"error": "pr_number is required"}, status=400)
+        if pr_number <= 0:
+            return web.json_response({"error": "pr_number is required"}, status=400)
+        from nanobot.auto_tasks.github import GitHubPullRequestEvent
+
+        event = GitHubPullRequestEvent(
+            action="manual",
+            repo=task.repo,
+            pr_number=pr_number,
+            pr_title=str(body.get("pr_title") or body.get("prTitle") or ""),
+            pr_url=str(body.get("pr_url") or body.get("prUrl") or f"https://github.com/{task.repo}/pull/{pr_number}"),
+            draft=False,
+        )
+        run = await self._auto_tasks.run_task(task, event)
+        return web.json_response({"run": run.to_dict()})
+
+    async def _aiohttp_auto_task_report(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._auto_tasks is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        run = self._auto_tasks.get_run(request.match_info["task_id"], request.match_info["run_id"])
+        if run is None:
+            return web.json_response({"error": "run not found"}, status=404)
+        if not run.report_markdown.strip():
+            return web.json_response({"error": "report not available"}, status=404)
+        filename = run.report_filename or f"review-{run.repo.replace('/', '-')}-pr-{run.pr_number}.md"
+        return web.Response(
+            text=run.report_markdown,
+            content_type="text/markdown",
+            charset="utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    async def _aiohttp_github_webhook(self, request: web.Request) -> web.Response:
+        if self._auto_tasks is None or self._root_config is None:
+            return web.json_response({"error": "auto tasks unavailable"}, status=503)
+        secret = self._root_config.review.auto_tasks.github_webhook_secret.strip()
+        if not secret:
+            log_event(logger, "warning", "auto_task.webhook.rejected", status="failed", reason="secret_missing")
+            return web.json_response({"error": "github webhook secret is not configured"}, status=503)
+        body = await request.read()
+        signature = request.headers.get("X-Hub-Signature-256")
+        if not verify_github_signature(secret=secret, body=body, signature=signature):
+            log_event(logger, "warning", "auto_task.webhook.rejected", status="failed", reason="bad_signature")
+            return web.json_response({"error": "invalid signature"}, status=401)
+        event_name = request.headers.get("X-GitHub-Event", "")
+        if event_name != "pull_request":
+            log_event(logger, "info", "auto_task.webhook.skip", status="skipped", reason="event_not_supported", event=event_name)
+            return web.json_response({"accepted": True, "runs": [], "reason": "event_not_supported"})
+        try:
+            payload = json.loads(body.decode("utf-8"))
+            event = parse_pull_request_event(payload)
+        except Exception as exc:
+            log_event(logger, "warning", "auto_task.webhook.bad_payload", status="failed", reason=exc)
+            return web.json_response({"error": "invalid pull_request payload"}, status=400)
+        runs = await self._auto_tasks.trigger_for_event(event)
+        return web.json_response({"accepted": True, "runs": [run.to_dict() for run in runs]})
+
+    async def _aiohttp_ws_handler(self, request: web.Request) -> web.StreamResponse:
+        if not _is_aiohttp_websocket_upgrade(request):
+            if self._static_dist_path is not None:
+                return await self._aiohttp_static(request)
+            return web.Response(status=404, text="Not Found")
+
+        supplied = request.query.get("token")
+        static_token = self.config.token.strip()
+        authorized = False
+        if static_token:
+            authorized = bool(supplied and hmac.compare_digest(supplied, static_token))
+            if not authorized:
+                authorized = self._take_issued_token_if_valid(supplied)
+        elif self.config.websocket_requires_token:
+            authorized = self._take_issued_token_if_valid(supplied)
+        else:
+            authorized = True
+            if supplied:
+                self._take_issued_token_if_valid(supplied)
+        client_id = request.query.get("client_id", "")
+        if not self.is_allowed(client_id):
+            return web.Response(status=403, text="Forbidden")
+        if not authorized:
+            return web.Response(status=401, text="Unauthorized")
+
+        ws = web.WebSocketResponse(max_msg_size=self.config.max_message_bytes)
+        await ws.prepare(request)
+        conn = _AiohttpConnection(request, ws)
+        await self._connection_loop_aiohttp(conn)
+        return ws
+
+    async def _connection_loop_aiohttp(self, connection: _AiohttpConnection) -> None:
+        request = connection.request
+        client_id = (request.query.get("client_id") or "").strip()
+        if not client_id:
+            client_id = f"anon-{uuid.uuid4().hex[:12]}"
+        elif len(client_id) > 128:
+            self.logger.warning("client_id too long ({} chars), truncating", len(client_id))
+            client_id = client_id[:128]
+
+        default_chat_id = str(uuid.uuid4())
+        try:
+            await connection.send(
+                json.dumps(
+                    {"event": "ready", "chat_id": default_chat_id, "client_id": client_id},
+                    ensure_ascii=False,
+                )
+            )
+            self._conn_default[connection] = default_chat_id
+            self._attach(connection, default_chat_id)
+            await self._hydrate_after_subscribe(default_chat_id)
+
+            async for msg in connection.ws:
+                if msg.type == web.WSMsgType.TEXT:
+                    raw = msg.data
+                elif msg.type == web.WSMsgType.BINARY:
+                    try:
+                        raw = msg.data.decode("utf-8")
+                    except UnicodeDecodeError:
+                        self.logger.warning("ignoring non-utf8 binary frame")
+                        continue
+                elif msg.type in (web.WSMsgType.CLOSE, web.WSMsgType.CLOSED, web.WSMsgType.ERROR):
+                    break
+                else:
+                    continue
+                envelope = _parse_envelope(raw)
+                if envelope is not None:
+                    await self._dispatch_envelope(connection, client_id, envelope)
+                    continue
+                content = _parse_inbound_payload(raw)
+                if content is None:
+                    continue
+                await self._handle_message(
+                    sender_id=client_id,
+                    chat_id=default_chat_id,
+                    content=content,
+                    metadata={"remote": connection.remote_address},
+                    is_dm=False,
+                )
+        except Exception as exc:
+            self.logger.debug("connection ended: {}", exc)
+        finally:
+            await self._cleanup_connection(connection)
+
+    def _build_aiohttp_app(self) -> web.Application:
+        app = web.Application(client_max_size=max(self.config.max_message_bytes, 32 * 1024 * 1024))
+        if self.config.token_issue_path:
+            app.router.add_get(_normalize_config_path(self.config.token_issue_path), self._aiohttp_token_issue)
+        app.router.add_get("/webui/bootstrap", self._aiohttp_bootstrap)
+        app.router.add_get("/api/sessions", self._aiohttp_sessions)
+        app.router.add_get("/api/sessions/{key}/messages", self._aiohttp_session_messages)
+        app.router.add_get("/api/sessions/{key}/webui-thread", self._aiohttp_webui_thread)
+        app.router.add_get("/api/sessions/{key}/code-context", self._aiohttp_code_context)
+        app.router.add_post("/api/sessions/{key}/delete", self._aiohttp_session_delete)
+        app.router.add_get("/api/sessions/{key}/delete", self._aiohttp_session_delete)
+        app.router.add_get("/api/auto-tasks", self._aiohttp_auto_tasks)
+        app.router.add_post("/api/auto-tasks", self._aiohttp_auto_task_create)
+        app.router.add_post("/api/auto-tasks/create", self._aiohttp_auto_task_create)
+        app.router.add_patch("/api/auto-tasks/{task_id}", self._aiohttp_auto_task_update)
+        app.router.add_post("/api/auto-tasks/{task_id}/update", self._aiohttp_auto_task_update)
+        app.router.add_post("/api/auto-tasks/{task_id}/delete", self._aiohttp_auto_task_delete)
+        app.router.add_post("/api/auto-tasks/{task_id}/run", self._aiohttp_auto_task_run_now)
+        app.router.add_get("/api/auto-tasks/{task_id}/runs", self._aiohttp_auto_task_runs)
+        app.router.add_get("/api/auto-tasks/{task_id}/runs/{run_id}/report", self._aiohttp_auto_task_report)
+        app.router.add_post("/api/webhooks/github", self._aiohttp_github_webhook)
+        app.router.add_get("/api/media/{sig}/{payload}", self._aiohttp_media_fetch)
+        app.router.add_get(self._expected_path(), self._aiohttp_ws_handler)
+        if self._static_dist_path is not None:
+            app.router.add_get("/{tail:.*}", self._aiohttp_static)
+        return app
+
+    async def _aiohttp_static(self, request: web.Request) -> web.Response:
+        if self._static_dist_path is None:
+            return web.Response(status=404, text="Not Found")
+        rel = request.match_info.get("tail", "").lstrip("/") or "index.html"
+        if ".." in rel.split("/") or rel.startswith("/"):
+            return web.Response(status=403, text="Forbidden")
+        candidate = (self._static_dist_path / rel).resolve()
+        try:
+            candidate.relative_to(self._static_dist_path)
+        except ValueError:
+            return web.Response(status=403, text="Forbidden")
+        if not candidate.is_file():
+            index = self._static_dist_path / "index.html"
+            if not index.is_file():
+                return web.Response(status=404, text="Not Found")
+            candidate = index
+        try:
+            body = candidate.read_bytes()
+        except OSError:
+            return web.Response(status=500, text="Internal Server Error")
+        ctype, _ = mimetypes.guess_type(candidate.name)
+        if ctype is None:
+            ctype = "application/octet-stream"
+        charset = (
+            "utf-8"
+            if ctype.startswith("text/") or ctype in {"application/javascript", "application/json"}
+            else None
+        )
+        cache = "no-cache" if candidate.name == "index.html" else "public, max-age=31536000, immutable"
+        return web.Response(body=body, content_type=ctype, charset=charset, headers={"Cache-Control": cache})
+
     async def start(self) -> None:
-        from nanobot.utils.logging_bridge import redirect_lib_logging
-
-        redirect_lib_logging("websockets", level="WARNING")
-
         self._running = True
         self._stop_event = asyncio.Event()
 
         ssl_context = self._build_ssl_context()
-        scheme = "wss" if ssl_context else "ws"
-
-        async def process_request(
-            connection: ServerConnection,
-            request: WsRequest,
-        ) -> Any:
-            return await self._dispatch_http(connection, request)
-
-        async def handler(connection: ServerConnection) -> None:
-            await self._connection_loop(connection)
+        scheme = "https" if ssl_context else "http"
+        ws_scheme = "wss" if ssl_context else "ws"
 
         self.logger.info(
-            "WebSocket server listening on {}://{}:{}{}",
+            "WebUI gateway listening on {}://{}:{}",
             scheme,
             self.config.host,
             self.config.port,
+        )
+        self.logger.info(
+            "WebSocket route enabled at {}://{}:{}{}",
+            ws_scheme,
+            self.config.host,
+            self.config.port,
             self.config.path,
+        )
+        self.logger.info(
+            "GitHub auto-task webhook route enabled at {}://{}:{}/api/webhooks/github",
+            scheme,
+            self.config.host,
+            self.config.port,
         )
         if self.config.token_issue_path:
             self.logger.info(
@@ -1424,18 +2293,20 @@ class WebSocketChannel(BaseChannel):
             )
 
         async def runner() -> None:
-            async with serve(
-                handler,
+            app = self._build_aiohttp_app()
+            self._aiohttp_runner = web.AppRunner(app)
+            await self._aiohttp_runner.setup()
+            site = web.TCPSite(
+                self._aiohttp_runner,
                 self.config.host,
                 self.config.port,
-                process_request=process_request,
-                max_size=self.config.max_message_bytes,
-                ping_interval=self.config.ping_interval_s,
-                ping_timeout=self.config.ping_timeout_s,
-                ssl=ssl_context,
-            ):
-                assert self._stop_event is not None
-                await self._stop_event.wait()
+                ssl_context=ssl_context,
+            )
+            await site.start()
+            assert self._stop_event is not None
+            await self._stop_event.wait()
+            await self._aiohttp_runner.cleanup()
+            self._aiohttp_runner = None
 
         self._server_task = asyncio.create_task(runner())
         await self._server_task
@@ -1706,11 +2577,24 @@ class WebSocketChannel(BaseChannel):
                 metadata["review_focus"] = [str(item).strip() for item in raw_review_focus if str(item).strip()]
             if isinstance(raw_review_target_paths, list):
                 metadata["review_target_paths"] = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
+            if has_review_payload:
+                logger.info(
+                    "ws.review.request cid={} webui={} target_type={} mode={} action={} focus_count={} paths_count={} content_chars={} media_count={}",
+                    cid,
+                    envelope.get("webui") is True,
+                    raw_review_target_type if isinstance(raw_review_target_type, str) else "",
+                    raw_review_mode_variant if isinstance(raw_review_mode_variant, str) else "",
+                    normalized_review_action or "",
+                    len(metadata.get("review_focus", [])) if isinstance(metadata.get("review_focus"), list) else 0,
+                    len(metadata.get("review_target_paths", [])) if isinstance(metadata.get("review_target_paths"), list) else 0,
+                    len(content),
+                    len(media_paths),
+                )
             # Normalize empty text for review-only turns so the model receives
             # an explicit user intent rather than inheriting the previous turn.
             if has_review_payload and not content.strip():
                 content = "审查"
-                logger.debug(
+                logger.info(
                     "ws.review_default_prompt cid={} action={} focus_count={}",
                     cid,
                     raw_review_action,
@@ -1860,6 +2744,7 @@ class WebSocketChannel(BaseChannel):
             raise
 
     async def send(self, msg: OutboundMessage) -> None:
+        auto_task_backed = self._is_auto_task_chat(msg.chat_id)
         if msg.metadata.get("_runtime_model_updated"):
             await self.send_runtime_model_updated(
                 model_name=msg.metadata.get("model"),
@@ -1882,7 +2767,7 @@ class WebSocketChannel(BaseChannel):
 
         # Snapshot the subscriber set so ConnectionClosed cleanups mid-iteration are safe.
         conns = list(self._subs.get(msg.chat_id, ()))
-        if not conns:
+        if not conns and not auto_task_backed:
             if (
                 msg.metadata.get("_progress")
                 or msg.metadata.get("_turn_end")
@@ -1922,6 +2807,7 @@ class WebSocketChannel(BaseChannel):
                 goal_state=gs_blob,
                 turn_trace=trace_items,
             )
+            self._complete_auto_task_run_from_chat(msg.chat_id)
             return
         if msg.metadata.get("_session_updated"):
             await self.send_session_updated(msg.chat_id)
@@ -1975,7 +2861,8 @@ class WebSocketChannel(BaseChannel):
         until the matching ``reasoning_end`` arrives.
         """
         conns = list(self._subs.get(chat_id, ()))
-        if not conns or not delta:
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if (not conns and not auto_task_backed) or not delta:
             return
         meta = metadata or {}
         body: dict[str, Any] = {
@@ -1998,7 +2885,8 @@ class WebSocketChannel(BaseChannel):
     ) -> None:
         """Close the current reasoning stream segment for in-place renderers."""
         conns = list(self._subs.get(chat_id, ()))
-        if not conns:
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
             return
         meta = metadata or {}
         body: dict[str, Any] = {
@@ -2020,7 +2908,8 @@ class WebSocketChannel(BaseChannel):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         conns = list(self._subs.get(chat_id, ()))
-        if not conns:
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
             return
         meta = metadata or {}
         if meta.get("_stream_end"):
@@ -2050,7 +2939,8 @@ class WebSocketChannel(BaseChannel):
     ) -> None:
         """Signal that the agent has fully finished processing the current turn."""
         conns = list(self._subs.get(chat_id, ()))
-        if not conns:
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
             return
         body: dict[str, Any] = {"event": "turn_end", "chat_id": chat_id}
         if latency_ms is not None:

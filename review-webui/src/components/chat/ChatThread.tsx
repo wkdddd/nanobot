@@ -162,14 +162,14 @@ export function ChatThread({
           className="h-full"
           onScrollCapture={handleScroll}
         >
-          <div className="px-4 py-6 space-y-4">
+          <div className="px-3 py-4 space-y-3">
             {isEmpty ? (
-              <div className="flex flex-col items-center justify-center h-full py-20 text-muted-foreground">
-                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted mb-4">
-                  <MessageSquare className="h-5 w-5" />
+              <div className="flex flex-col items-center justify-center h-full py-16 text-muted-foreground">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted mb-3">
+                  <MessageSquare className="h-4 w-4" />
                 </div>
-                <p className="text-sm font-medium">{emptyTitle}</p>
-                <p className="text-xs mt-1 text-muted-foreground/70">{emptyDescription}</p>
+                <p className="text-xs font-medium">{emptyTitle}</p>
+                <p className="text-[11px] mt-0.5 text-muted-foreground/70">{emptyDescription}</p>
               </div>
             ) : (
               messageGroups.map((group, groupIdx) => {
@@ -180,18 +180,18 @@ export function ChatThread({
                   const hasStreaming = group.items.some((item) => item.streaming);
 
                   return (
-                    <div key={`batch-${groupIdx}`} className="space-y-3">
+                    <div key={`batch-${groupIdx}`} className="space-y-2">
                       {/* Batch header */}
                       <button
                         type="button"
                         onClick={() => toggleBatch(groupIdx)}
-                        className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors px-1"
+                        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-1"
                         aria-expanded={!isCollapsed}
                       >
                         {isCollapsed ? (
-                          <ChevronRight className="w-3.5 h-3.5" />
+                          <ChevronRight className="w-3 h-3" />
                         ) : (
-                          <ChevronDown className="w-3.5 h-3.5" />
+                          <ChevronDown className="w-3 h-3" />
                         )}
                         {hasStreaming ? (
                           <>
@@ -216,7 +216,7 @@ export function ChatThread({
 
                       {/* Severity-grouped cards */}
                       {!isCollapsed && (
-                        <div className="space-y-3">
+                        <div className="space-y-2">
                           {severityGroups.map(([severity, items]) => {
                             const styles = SEVERITY_GROUP_STYLES[severity] ?? SEVERITY_GROUP_STYLES.medium;
                             const Icon = styles.icon;
@@ -229,7 +229,7 @@ export function ChatThread({
                               <div
                                 key={groupKey}
                                 className={cn(
-                                  "rounded-xl border overflow-hidden transition-all",
+                                  "rounded-lg border overflow-hidden transition-all",
                                   styles.border,
                                   styles.bg,
                                   hasGroupStreaming && "border-dashed",
@@ -239,12 +239,12 @@ export function ChatThread({
                                 <button
                                   type="button"
                                   onClick={() => toggleSeverityGroup(groupKey)}
-                                  className="flex items-center gap-2.5 w-full px-3.5 py-2.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
+                                  className="flex items-center gap-2 w-full px-3 py-2 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.03] transition-colors"
                                   aria-expanded={!isGroupCollapsed}
                                 >
-                                  <Icon className={cn("w-4 h-4 shrink-0 opacity-70", styles.iconColor)} />
+                                  <Icon className={cn("w-3.5 h-3.5 shrink-0 opacity-70", styles.iconColor)} />
                                   <SeverityBadge severity={severity} />
-                                  <span className="text-xs font-medium text-muted-foreground">
+                                  <span className="text-[11px] font-medium text-muted-foreground">
                                     {items.length} {items.length === 1 ? "issue" : "issues"}
                                   </span>
                                   {hasGroupStreaming && (
@@ -252,9 +252,9 @@ export function ChatThread({
                                   )}
                                   <div className="ml-auto">
                                     {isGroupCollapsed ? (
-                                      <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <ChevronRight className="w-3 h-3 text-muted-foreground" />
                                     ) : (
-                                      <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <ChevronDown className="w-3 h-3 text-muted-foreground" />
                                     )}
                                   </div>
                                 </button>
@@ -284,24 +284,24 @@ export function ChatThread({
                                           type="button"
                                           onClick={() => onSelectFinding?.(finding)}
                                           className={cn(
-                                            "flex items-start gap-2.5 w-full text-left px-3.5 py-2.5 transition-colors",
+                                            "flex items-start gap-2 w-full text-left px-3 py-2 transition-colors",
                                             "hover:bg-black/[0.03] dark:hover:bg-white/[0.03]",
                                             idx < items.length - 1 && "border-b border-inherit/40",
                                           )}
                                         >
                                           {/* Severity dot */}
-                                          <div className="mt-1.5 w-1.5 h-1.5 rounded-full bg-current opacity-50 shrink-0" />
+                                          <div className="mt-1 w-1 h-1 rounded-full bg-current opacity-50 shrink-0" />
                                           <div className="flex-1 min-w-0">
                                             {/* Title */}
-                                            <p className="text-sm font-medium text-foreground leading-snug">
+                                            <p className="text-xs font-medium text-foreground leading-snug">
                                               {finding.title}
                                             </p>
                                             {/* Meta line */}
-                                            <div className="flex items-center gap-2 mt-1 flex-wrap">
-                                              <code className="text-[11px] font-mono text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded">
+                                            <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+                                              <code className="text-[10px] font-mono text-muted-foreground bg-muted/60 px-1 py-0 rounded">
                                                 {finding.file}{finding.line != null ? `:${finding.line}` : ""}
                                               </code>
-                                              <span className="text-[10px] text-muted-foreground capitalize">
+                                              <span className="text-[9px] text-muted-foreground capitalize">
                                                 {finding.dimension}
                                               </span>
                                             </div>

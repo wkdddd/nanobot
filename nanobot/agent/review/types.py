@@ -19,6 +19,7 @@ class ReviewMetaKey:
     FOCUS = "review_focus"
     TARGET_PATHS = "review_target_paths"
     MAX_SUBAGENTS = "review_max_subagents"
+    ALLOWED_DIMENSIONS = "allowed_review_dimensions"
     EVIDENCE_PROVIDER = "_review_evidence_service"
 
 ReviewTargetType = Literal["auto", "github", "local"]
@@ -134,6 +135,21 @@ OPTIONAL_REVIEW_ROLES: dict[str, ReviewRole] = {
 }
 
 ALL_REVIEW_ROLES: dict[str, ReviewRole] = {**DEFAULT_REVIEW_ROLES, **OPTIONAL_REVIEW_ROLES}
+
+
+def normalize_review_dimension(value: str | None) -> str | None:
+    """Normalize a role name or display label to a review dimension key."""
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    simplified = raw.replace("_", "-")
+    if simplified in ALL_REVIEW_ROLES:
+        return simplified
+    for key, role in ALL_REVIEW_ROLES.items():
+        label = role.label.strip().lower()
+        if raw == label or raw == label.removesuffix(" reviewer").strip():
+            return key
+    return None
 
 
 @dataclass(frozen=True, slots=True)

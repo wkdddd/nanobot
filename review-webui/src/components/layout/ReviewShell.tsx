@@ -15,13 +15,15 @@ export interface ReviewShellProps {
   onLogout?: () => void;
 
   /** Sidebar props */
-  tasks: ChatSummary[];
+  autoTaskSessions: ChatSummary[];
+  dailySessions: ChatSummary[];
   activeKey: string | null;
   sidebarLoading: boolean;
   sidebarError?: string | null;
   onTaskSelect: (key: string) => void;
   onNewTask: () => void;
   onTaskDelete: (key: string) => void;
+  onOpenAutoTasks: () => void;
 
   /** Content areas */
   mainContent: ReactNode;
@@ -40,13 +42,15 @@ export function ReviewShell({
   modelName,
   onOpenSettings,
   onLogout,
-  tasks,
+  autoTaskSessions,
+  dailySessions,
   activeKey,
   sidebarLoading,
   sidebarError,
   onTaskSelect,
   onNewTask,
   onTaskDelete,
+  onOpenAutoTasks,
   mainContent,
   rightPanelContent,
   sidebarOpen,
@@ -69,13 +73,15 @@ export function ReviewShell({
         {sidebarOpen ? (
           <div className="flex shrink-0 relative">
             <ReviewSidebar
-              tasks={tasks}
+              autoTaskSessions={autoTaskSessions}
+              dailySessions={dailySessions}
               activeKey={activeKey}
               loading={sidebarLoading}
               error={sidebarError}
               onSelect={onTaskSelect}
               onNewTask={onNewTask}
               onDelete={onTaskDelete}
+              onOpenAutoTasks={onOpenAutoTasks}
             />
           </div>
         ) : null}
@@ -83,17 +89,17 @@ export function ReviewShell({
         {/* Main content area + right panel (always rendered together) */}
         <main className="flex-1 overflow-hidden flex flex-col relative">
           {/* Toolbar: sidebar toggle + session info in one row */}
-          <div className="flex items-center px-3 py-1.5 border-b bg-card/50 shrink-0 gap-2">
+          <div className="flex items-center px-2.5 py-1 border-b bg-card/50 shrink-0 gap-1.5">
             <Button
               variant="ghost"
               size="icon"
-              className="h-6 w-6 rounded shrink-0"
+              className="h-5 w-5 rounded shrink-0"
               onClick={onToggleSidebar}
               title={sidebarOpen ? "Collapse sidebar (Ctrl+B)" : "Expand sidebar (Ctrl+B)"}
             >
-              <PanelLeft className="h-3.5 w-3.5" />
+              <PanelLeft className="h-3 w-3" />
             </Button>
-            
+
             {/* Session info inline */}
             <SessionInfoBar info={sessionInfo || null} />
           </div>
@@ -107,7 +113,7 @@ export function ReviewShell({
 
             {/* Right panel (always visible if content exists) */}
             {rightPanelContent ? (
-              <aside className="h-full w-[360px] shrink-0 overflow-y-auto border-l bg-card scrollbar-thin scrollbar-track-transparent">
+              <aside className="h-full w-[300px] shrink-0 overflow-y-auto border-l bg-card scrollbar-thin scrollbar-track-transparent">
                 {rightPanelContent}
               </aside>
             ) : null}

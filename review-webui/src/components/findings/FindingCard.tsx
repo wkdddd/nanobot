@@ -60,21 +60,21 @@ function CompactRow({ finding, onToggle, expanded }: FindingCardProps) {
     <button
       type="button"
       className={cn(
-        "flex items-center gap-2 w-full text-left px-3 py-2 rounded-lg transition-colors",
+        "flex items-center gap-1.5 w-full text-left px-2.5 py-1.5 rounded-md transition-colors",
         "hover:bg-secondary/60",
         expanded && "bg-secondary ring-1 ring-primary/20",
       )}
       onClick={onToggle}
     >
-      <div className={cn("w-[3px] h-8 rounded-full shrink-0", SEVERITY_STRIPE[finding.severity.toLowerCase()] ?? "bg-muted")} />
+      <div className={cn("w-[2px] h-6 rounded-full shrink-0", SEVERITY_STRIPE[finding.severity.toLowerCase()] ?? "bg-muted")} />
       <SeverityBadge severity={finding.severity} />
-      <code className="text-[11px] font-mono text-muted-foreground truncate">
+      <code className="text-[10px] font-mono text-muted-foreground truncate">
         {finding.file}{finding.line != null ? `:${finding.line}` : ""}
       </code>
-      <span className="text-xs text-foreground truncate flex-1 min-w-0">
+      <span className="text-[11px] text-foreground truncate flex-1 min-w-0">
         {finding.title}
       </span>
-      <Badge variant="secondary" className="text-[10px] capitalize shrink-0">
+      <Badge variant="secondary" className="text-[9px] capitalize shrink-0">
         {finding.dimension}
       </Badge>
     </button>
@@ -94,35 +94,35 @@ function FullCard({ finding, onToggle, expanded }: FindingCardProps) {
       )}
     >
       <div className="flex">
-        <div className={cn("w-[3px] flex-shrink-0", stripeColor)} />
-        <CardContent className="p-4 flex-1 min-w-0">
+        <div className={cn("w-[2px] flex-shrink-0", stripeColor)} />
+        <CardContent className="p-3 flex-1 min-w-0">
           <button
             type="button"
             className="text-left w-full bg-transparent border-0 p-0 cursor-pointer"
             onClick={onToggle}
           >
-            <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <SeverityBadge severity={finding.severity} />
-              <code className="text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+              <code className="text-[11px] font-mono text-muted-foreground bg-muted px-1 py-0 rounded">
                 {finding.file}
                 {finding.line != null && `:${finding.line}`}
               </code>
-              <Badge variant="secondary" className="text-[10px] capitalize">
+              <Badge variant="secondary" className="text-[9px] capitalize">
                 {finding.dimension}
               </Badge>
               {finding.confidence && (
-                <span className="text-[10px] text-muted-foreground ml-auto">
+                <span className="text-[9px] text-muted-foreground ml-auto">
                   Confidence: {finding.confidence}
                 </span>
               )}
             </div>
-            <h4 className="text-sm font-semibold mt-2 text-foreground">
+            <h4 className="text-xs font-semibold mt-1.5 text-foreground">
               {finding.title}
             </h4>
           </button>
 
           {expanded && (
-            <div className="mt-2">
+            <div className="mt-1.5">
               {finding.impact && (
                 <CollapsibleSection title="Impact" content={finding.impact} />
               )}

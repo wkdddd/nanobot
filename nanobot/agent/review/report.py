@@ -57,12 +57,13 @@ def render_review_report(
     all_rejected = _collect_rejected(dimensions)
 
     stats = _severity_stats(all_accepted)
-    summary = _build_summary(target_name, stats, dimensions)
+    incomplete = _has_incomplete_checks(dimensions)
+    summary = _build_summary(target_name, stats, dimensions, incomplete=incomplete)
 
     sections: list[str] = []
     sections.append(f"## Code Review Report: {_escape_markdown_inline(target_name)}\n")
     sections.append(f"### Executive Summary\n\n{summary}\n")
-    sections.append(_render_findings(all_accepted))
+    sections.append(_render_findings(all_accepted, incomplete=incomplete))
     sections.append(_render_checks_performed(dimensions))
     if policy is not None:
         sections.append(_render_mode_notes(policy, dimensions))
@@ -127,10 +128,16 @@ def _severity_stats(findings: list[ReviewFindingCandidate]) -> dict[str, int]:
 
 
 def _build_summary(
-    target: str, stats: dict[str, int], dims: list[ReviewDimensionResult]
+    target: str,
+    stats: dict[str, int],
+    dims: list[ReviewDimensionResult],
+    *,
+    incomplete: bool = False,
 ) -> str:
     total = sum(stats.values())
     if total == 0:
+        if incomplete:
+            return "Review incomplete. Some checks could not access enough evidence to produce a reliable result."
         return "No actionable issues found."
     parts: list[str] = []
     for sev in SEVERITY_ORDER:
@@ -140,8 +147,14 @@ def _build_summary(
     return f"Found {total} issues ({', '.join(parts)}). Dimensions reviewed: {dim_names}."
 
 
-def _render_findings(findings: list[ReviewFindingCandidate]) -> str:
+def _has_incomplete_checks(dims: list[ReviewDimensionResult]) -> bool:
+    return any(d.status in {"incomplete", "error"} or d.errors for d in dims)
+
+
+def _render_findings(findings: list[ReviewFindingCandidate], *, incomplete: bool = False) -> str:
     if not findings:
+        if incomplete:
+            return "### Findings\n\nReview incomplete; no reliable finding set was produced.\n"
         return "### Findings\n\nNo actionable issues found.\n"
     lines = ["### Findings\n"]
     current_sev = ""
@@ -174,8 +187,11 @@ def _render_checks_performed(dims: list[ReviewDimensionResult]) -> str:
         if d.status == "validated":
             lines.append(f"- [x] {_escape_markdown_inline(d.dimension)}")
         else:
+            reason = "; ".join(_clean_text(error) for error in d.errors if _clean_text(error))
+            suffix = f": {reason}" if reason else ""
             lines.append(
-                f"- [ ] {_escape_markdown_inline(d.dimension)} - {_escape_markdown_inline(d.status)}"
+                f"- [ ] {_escape_markdown_inline(d.dimension)} - "
+                f"{_escape_markdown_inline(d.status)}{_escape_markdown_inline(suffix)}"
             )
     lines.append("")
     return "\n".join(lines)

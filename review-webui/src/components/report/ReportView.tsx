@@ -41,7 +41,7 @@ export function ReportView({
   }, [findings, recommendations]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {/* Executive summary */}
       <ReportSummary summary={summary} findings={findings} />
 
@@ -49,7 +49,7 @@ export function ReportView({
 
       {/* Dimension cards */}
       <section>
-        <h3 className="text-sm font-semibold text-foreground mb-3">
+        <h3 className="text-xs font-semibold text-foreground mb-2">
           Review Dimensions
         </h3>
         <DimensionCards
@@ -63,7 +63,7 @@ export function ReportView({
 
       {/* Severity distribution */}
       <section>
-        <h3 className="text-sm font-semibold text-foreground mb-3">
+        <h3 className="text-xs font-semibold text-foreground mb-2">
           Severity Distribution
         </h3>
         <SeverityChart findings={findings} />
@@ -73,7 +73,7 @@ export function ReportView({
 
       {/* Findings list */}
       <section>
-        <h3 className="text-sm font-semibold text-foreground mb-3">
+        <h3 className="text-xs font-semibold text-foreground mb-2">
           Findings
         </h3>
         <FindingList findings={findings} activeDimension={activeDimension} onSelectFinding={onSelectFinding} />

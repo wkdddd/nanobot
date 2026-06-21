@@ -50,7 +50,7 @@ export function ChatInput({
   const isEmpty = text.trim().length === 0;
 
   return (
-    <div className="flex items-end gap-2 border-t bg-background px-4 py-3">
+    <div className="flex items-end gap-1.5 border-t bg-background px-3 py-2">
       <div className="relative flex-1">
         <textarea
           ref={textareaRef}
@@ -63,8 +63,8 @@ export function ChatInput({
           aria-label="Message input"
           rows={1}
           className={cn(
-            "flex w-full resize-none rounded-xl border border-input bg-background px-4 py-3 pr-10 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
-            "min-h-[44px] leading-6 overflow-hidden"
+            "flex w-full resize-none rounded-lg border border-input bg-background px-3 py-2 pr-9 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+            "min-h-[36px] leading-5 overflow-hidden"
           )}
           style={{ height: "auto" }}
         />
@@ -72,14 +72,14 @@ export function ChatInput({
       <Button
         size="icon"
         className={cn(
-          "h-10 w-10 shrink-0 rounded-xl transition-opacity",
+          "h-8 w-8 shrink-0 rounded-lg transition-opacity",
           isEmpty && "opacity-50"
         )}
         onClick={handleSend}
         disabled={disabled || isEmpty}
         aria-label="Send message"
       >
-        <ArrowUp className="h-4 w-4" />
+        <ArrowUp className="h-3.5 w-3.5" />
       </Button>
     </div>
   );

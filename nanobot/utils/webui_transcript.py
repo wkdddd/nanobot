@@ -142,6 +142,8 @@ def replay_transcript_to_ui_messages(
     messages: list[dict[str, Any]] = []
     buffer_message_id: str | None = None
     buffer_parts: list[str] = []
+    review_thinking_parts: list[str] = []
+    review_thinking_created_at: int | None = None
     suppress_until_turn_end = False
     _ts_base = int(time.time() * 1000)
 
@@ -228,7 +230,11 @@ def replay_transcript_to_ui_messages(
         nonlocal messages
         kept: list[dict[str, Any]] = []
         for i, m in enumerate(messages):
-            if is_reasoning_only_placeholder(m) and not is_tool_trace_at(i + 1):
+            if (
+                is_reasoning_only_placeholder(m)
+                and not m.get("preserveReasoning")
+                and not is_tool_trace_at(i + 1)
+            ):
                 continue
             kept.append(m)
         messages = kept
@@ -244,8 +250,18 @@ def replay_transcript_to_ui_messages(
                 return
 
     def absorb_complete(extra: dict[str, Any], idx: int, created_at: int) -> None:
+        nonlocal review_thinking_parts, review_thinking_created_at
+        is_streamed_review_report = extra.pop("_streamed_review_report", False)
+        if is_streamed_review_report and review_thinking_parts and "reasoning" not in extra:
+            extra = {
+                **extra,
+                "reasoning": "".join(review_thinking_parts),
+                "reasoningStreaming": False,
+            }
+            review_thinking_parts = []
+            review_thinking_created_at = None
         last = messages[-1] if messages else None
-        if last and is_reasoning_only_placeholder(last):
+        if last and is_reasoning_only_placeholder(last) and not last.get("preserveReasoning"):
             messages[-1] = {
                 **last,
                 **extra,
@@ -260,7 +276,7 @@ def replay_transcript_to_ui_messages(
                     "createdAt": created_at,
                     **extra,
                 },
-            )
+                )
 
     for idx, rec in enumerate(lines):
         ev = rec.get("event")
@@ -329,6 +345,11 @@ def replay_transcript_to_ui_messages(
                 continue
             kind = rec.get("kind")
             if kind == "review_thinking":
+                chunk = rec.get("text")
+                if isinstance(chunk, str) and chunk:
+                    if review_thinking_created_at is None:
+                        review_thinking_created_at = created_at
+                    review_thinking_parts.append(chunk)
                 continue
             chunk = rec.get("text")
             if not isinstance(chunk, str):
@@ -352,7 +373,11 @@ def replay_transcript_to_ui_messages(
             combined = "".join(buffer_parts)
             for i, m in enumerate(messages):
                 if m.get("id") == buffer_message_id:
-                    messages[i] = {**m, "content": combined, "isStreaming": True}
+                    updated = {**m, "content": combined, "isStreaming": True}
+                    if kind == "review_report" and review_thinking_parts:
+                        updated["reasoning"] = "".join(review_thinking_parts)
+                        updated["reasoningStreaming"] = False
+                    messages[i] = updated
                     break
             continue
 
@@ -361,6 +386,11 @@ def replay_transcript_to_ui_messages(
                 buffer_message_id = None
                 buffer_parts = []
                 continue
+            if rec.get("kind") == "review_thinking":
+                continue
+            if rec.get("kind") == "review_report":
+                review_thinking_parts = []
+                review_thinking_created_at = None
             buffer_message_id = None
             buffer_parts = []
             continue
@@ -427,6 +457,21 @@ def replay_transcript_to_ui_messages(
             buffer_parts = []
             text = rec.get("text")
             content_s = text if isinstance(text, str) else ""
+            if review_thinking_parts:
+                messages.append(
+                    {
+                        "id": _new_id("think", idx),
+                        "role": "assistant",
+                        "content": "",
+                        "isStreaming": False,
+                        "reasoning": "".join(review_thinking_parts),
+                        "reasoningStreaming": False,
+                        "preserveReasoning": True,
+                        "createdAt": review_thinking_created_at or created_at,
+                    },
+                )
+                review_thinking_parts = []
+                review_thinking_created_at = None
             media_urls = rec.get("media_urls")
             media: list[dict[str, Any]] = []
             if isinstance(media_urls, list):
@@ -452,6 +497,21 @@ def replay_transcript_to_ui_messages(
 
         if ev == "turn_end":
             suppress_until_turn_end = False
+            if review_thinking_parts:
+                messages.append(
+                    {
+                        "id": _new_id("think", idx),
+                        "role": "assistant",
+                        "content": "",
+                        "isStreaming": False,
+                        "reasoning": "".join(review_thinking_parts),
+                        "reasoningStreaming": False,
+                        "preserveReasoning": True,
+                        "createdAt": review_thinking_created_at or created_at,
+                    },
+                )
+                review_thinking_parts = []
+                review_thinking_created_at = None
             for i, m in enumerate(messages):
                 if m.get("isStreaming"):
                     messages[i] = {**m, "isStreaming": False}

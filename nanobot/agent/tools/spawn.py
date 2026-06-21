@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
+from nanobot.agent.review.types import ReviewMetaKey, normalize_review_dimension
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.context import ContextAware, RequestContext
 from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
@@ -32,6 +33,10 @@ class SpawnTool(Tool, ContextAware):
             "spawn_origin_message_id",
             default=None,
         )
+        self._metadata: ContextVar[dict[str, Any]] = ContextVar(
+            "spawn_metadata",
+            default={},
+        )
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -43,6 +48,7 @@ class SpawnTool(Tool, ContextAware):
         self._origin_chat_id.set(ctx.chat_id)
         self._session_key.set(ctx.session_key or f"{ctx.channel}:{ctx.chat_id}")
         self._origin_message_id.set(ctx.message_id)
+        self._metadata.set(dict(ctx.metadata or {}))
 
     @property
     def name(self) -> str:
@@ -60,6 +66,21 @@ class SpawnTool(Tool, ContextAware):
 
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
+        allowed = self._allowed_review_dimensions()
+        if allowed is not None:
+            dimension = normalize_review_dimension(label)
+            if dimension is None:
+                return (
+                    "Cannot spawn subagent: review mode requires label to be one of "
+                    f"{', '.join(sorted(allowed))}."
+                )
+            if dimension not in allowed:
+                return (
+                    "Cannot spawn subagent: dimension "
+                    f"'{label}' is not allowed for this review. Allowed dimensions: "
+                    f"{', '.join(sorted(allowed))}."
+                )
+            label = dimension
         running = self._manager.get_running_count()
         limit = self._manager.max_concurrent_subagents
         if running >= limit:
@@ -76,3 +97,14 @@ class SpawnTool(Tool, ContextAware):
             session_key=self._session_key.get(),
             origin_message_id=self._origin_message_id.get(),
         )
+
+    def _allowed_review_dimensions(self) -> set[str] | None:
+        raw = self._metadata.get().get(ReviewMetaKey.ALLOWED_DIMENSIONS)
+        if not isinstance(raw, list):
+            return None
+        allowed = {
+            dimension
+            for item in raw
+            if (dimension := normalize_review_dimension(str(item)))
+        }
+        return allowed or None

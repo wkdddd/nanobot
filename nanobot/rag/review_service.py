@@ -25,6 +25,7 @@ from nanobot.rag.utils import (
     IndexedChunk,
     IndexedHit,
     best_snippet,
+    hit_key,
     query_terms,
     rrf_merge,
 )
@@ -366,17 +367,18 @@ class RepositoryRAGService:
             max_hits=max(limit * 3, 20),
             semantic_weight=self.options.semantic_weight,
         )
+        candidate_limit = max(limit * 3, 20)
         if self.options.enable_rrf:
             lanes: list[tuple[str, list[IndexedHit]]] = [("broad", broad_hits)]
             for lane_name, lane_query in self.review_lane_queries(review_query):
                 lane_hits = self.index.lexical_search(
                     source_type,
                     lane_query,
-                    limit=max(limit * 3, 20),
+                    limit=candidate_limit,
                 )
                 if lane_hits:
                     lanes.append((lane_name, lane_hits))
-            raw_hits = rrf_merge(lanes, limit=limit)
+            raw_hits = rrf_merge(lanes, limit=candidate_limit)
             log_event(
                 logger,
                 "info",
@@ -387,8 +389,9 @@ class RepositoryRAGService:
                 hits=len(raw_hits),
             )
         else:
-            raw_hits = broad_hits[:limit]
-        hits = [self.to_hit(hit, terms) for hit in raw_hits]
+            raw_hits = broad_hits[:candidate_limit]
+        filtered_hits, quality_reasons = self.quality_filter_hits(raw_hits, terms, limit=limit)
+        hits = [self.to_hit(hit, terms) for hit in filtered_hits]
         log_event(
             logger,
             "info",
@@ -398,9 +401,76 @@ class RepositoryRAGService:
             source_type=source_type,
             terms=len(terms),
             hits=len(hits),
+            raw_hits=len(raw_hits),
+            kept_hits=len(filtered_hits),
+            dropped_hits=max(0, len(raw_hits) - len(filtered_hits)),
+            quality_reasons=json.dumps(quality_reasons, ensure_ascii=False, sort_keys=True),
             elapsed_ms=f"{(time.perf_counter() - start) * 1000:.1f}",
         )
         return hits
+
+    def quality_filter_hits(
+        self,
+        hits: list[IndexedHit],
+        terms: list[str],
+        *,
+        limit: int,
+    ) -> tuple[list[IndexedHit], dict[str, int]]:
+        kept: list[IndexedHit] = []
+        seen = set()
+        stats: dict[str, int] = {}
+
+        for hit in hits:
+            reason = self.low_value_hit_reason(hit, terms)
+            if reason:
+                stats[reason] = stats.get(reason, 0) + 1
+                continue
+            key = hit_key(hit)
+            if key in seen:
+                stats["duplicate"] = stats.get("duplicate", 0) + 1
+                continue
+            seen.add(key)
+
+            reasons = list(dict.fromkeys(hit.reason))
+            if not self.hit_has_query_signal(hit, terms) and "weak-query-match" not in reasons:
+                reasons.append("weak-query-match")
+                stats["weak-query-match"] = stats.get("weak-query-match", 0) + 1
+            kept.append(IndexedHit(chunk=hit.chunk, score=hit.score, reason=reasons))
+            if len(kept) >= limit:
+                break
+
+        return kept, stats
+
+    def low_value_hit_reason(self, hit: IndexedHit, terms: list[str]) -> str | None:
+        text = hit.chunk.text.strip()
+        if not text:
+            return "empty_text"
+        snippet = best_snippet(
+            hit.chunk.text,
+            terms,
+            start_line=hit.chunk.start_line,
+            snippet_lines=self.options.snippet_lines,
+        )
+        normalized = " ".join(snippet.split())
+        if not normalized:
+            return "empty_snippet"
+        if len(normalized) < 30:
+            return "short_snippet"
+        return None
+
+    @staticmethod
+    def hit_has_query_signal(hit: IndexedHit, terms: list[str]) -> bool:
+        if not terms:
+            return False
+        haystack = " ".join(
+            [
+                hit.chunk.path,
+                hit.chunk.kind,
+                " ".join(hit.chunk.symbols),
+                hit.chunk.text,
+            ]
+        ).lower()
+        return any(term.lower() in haystack for term in terms)
 
     @staticmethod
     def rank_touched_line_hits(

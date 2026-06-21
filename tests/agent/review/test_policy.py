@@ -1,4 +1,5 @@
-from nanobot.agent.review.policy import policy_for_depth
+from nanobot.agent.review.policy import apply_policy_to_roles, policy_for_depth
+from nanobot.agent.review.types import ALL_REVIEW_ROLES
 
 
 def test_quick_policy_is_high_risk_only() -> None:
@@ -29,3 +30,14 @@ def test_deep_policy_adds_optional_roles_and_more_capacity() -> None:
     assert policy.max_subagents == 6
     assert policy.include_optional_roles is True
     assert "dependency" in {role.name for role in policy.roles}
+
+
+def test_forced_focus_is_not_replaced_by_quick_policy() -> None:
+    policy = policy_for_depth("quick", requested_max_subagents=6)
+    roles = apply_policy_to_roles(
+        roles=[ALL_REVIEW_ROLES["dependency"]],
+        forced_focus=True,
+        policy=policy,
+    )
+
+    assert [role.name for role in roles] == ["dependency"]

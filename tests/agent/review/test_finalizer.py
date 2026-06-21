@@ -153,6 +153,51 @@ class TestFinalize:
         assert "RCE" in result.report_markdown
         assert result.errors == []
 
+    def test_tool_context_failure_renders_incomplete_not_clean(self, workspace):
+        raw = (
+            "Error: failed to fetch GitHub repository context: "
+            "Error: GitHub API rate limited. Set GITHUB_TOKEN for higher limits."
+        )
+        f = ReviewFinalizer(workspace)
+        result = f.ingest_subagent_output("tests", raw)
+        report = f.finalize("repo").report_markdown
+
+        assert result.status == "incomplete"
+        assert result.errors
+        assert "Review incomplete" in report
+        assert "No actionable issues found" not in report
+
+    def test_finalizer_skips_disallowed_dimensions(self, workspace):
+        dependency_raw = json.dumps([{
+            "severity": "high",
+            "file": "src/app.py",
+            "line": 1,
+            "title": "Unpinned dependency",
+            "evidence": "line1",
+            "impact": "Supply chain risk",
+            "recommendation": "Pin versions",
+        }])
+        security_raw = json.dumps([{
+            "severity": "high",
+            "file": "src/app.py",
+            "line": 2,
+            "title": "Security finding",
+            "evidence": "line2",
+            "impact": "Bad",
+            "recommendation": "Fix",
+        }])
+        f = ReviewFinalizer(workspace, allowed_dimensions={"dependency"})
+
+        skipped = f.ingest_subagent_output("security", security_raw)
+        accepted = f.ingest_subagent_output("Dependency Reviewer", dependency_raw)
+        result = f.finalize("myproject")
+
+        assert skipped.status == "skipped_disallowed"
+        assert len(accepted.accepted) == 1
+        assert "Unpinned dependency" in result.report_markdown
+        assert "Security finding" not in result.report_markdown
+        assert [dimension.dimension for dimension in result.dimensions] == ["dependency"]
+
     def test_ingest_runner_message_metadata_prefers_raw_result(self, workspace):
         raw_result = json.dumps([{
             "severity": "high",
@@ -261,6 +306,36 @@ class TestFinalize:
 
         assert "## Code Review Report: myproject" in content
         assert "Hook finding" in content
+
+    def test_hook_allowed_dimensions_can_be_set_after_construction(self, workspace):
+        raw_result = json.dumps([{
+            "severity": "critical",
+            "file": "src/app.py",
+            "line": 1,
+            "title": "Disallowed finding",
+            "evidence": "line1",
+            "impact": "bad",
+            "recommendation": "fix",
+        }])
+        context = AgentHookContext(
+            iteration=1,
+            messages=[{
+                "role": "user",
+                "content": "wrapper",
+                "_metadata": {
+                    "injected_event": "subagent_result",
+                    "subagent_label": "security",
+                    "subagent_result": raw_result,
+                },
+            }],
+        )
+        hook = ReviewFinalizerHook(workspace=workspace, target_name="myproject")
+        hook.set_allowed_dimensions(["dependency"])
+
+        content = hook.finalize_content(context, "raw assistant prose")
+
+        assert "Disallowed finding" not in (content or "")
+        assert "No actionable issues found" in (content or "")
 
     @pytest.mark.asyncio
     async def test_hook_ingests_incremental_subagent_results(self, workspace):

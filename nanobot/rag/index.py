@@ -383,7 +383,7 @@ class RAGIndex:
             )
         except Exception as exc:
             logger.warning(
-                "Qdrant semantic search fallback source_type=%s reason=%s",
+                "Qdrant semantic search fallback source_type={} reason={}",
                 source_type,
                 exc,
             )
@@ -499,7 +499,7 @@ class RAGIndex:
             )
             if len(vectors) != len(embeddable) or any(vector is None for vector in vectors):
                 logger.warning(
-                    "Qdrant dense sync incomplete source_type=%s chunks=%s vectors=%s",
+                    "Qdrant dense sync incomplete source_type={} chunks={} vectors={}",
                     source_type,
                     len(embeddable),
                     len(vectors),
@@ -512,7 +512,7 @@ class RAGIndex:
             )
             if upserted:
                 logger.debug(
-                    "Qdrant dense sync source_type=%s chunks=%s upserted=%s",
+                    "Qdrant dense sync source_type={} chunks={} upserted={}",
                     source_type,
                     len(embeddable),
                     upserted,
@@ -520,14 +520,14 @@ class RAGIndex:
             return upserted == len(embeddable)
         except RuntimeError as exc:
             logger.warning(
-                "Qdrant dense sync skipped source_type=%s reason=%s",
+                "Qdrant dense sync skipped source_type={} reason={}",
                 source_type,
                 exc,
             )
             return False
         except Exception as exc:
             logger.warning(
-                "Qdrant dense sync fallback source_type=%s reason=%s",
+                "Qdrant dense sync fallback source_type={} reason={}",
                 source_type,
                 exc,
             )
@@ -881,7 +881,7 @@ class RAGIndex:
                 )
             except Exception as exc:
                 logger.debug(
-                    "Qdrant prune fallback source_type=%s reason=%s",
+                    "Qdrant prune fallback source_type={} reason={}",
                     source_type,
                     exc,
                 )

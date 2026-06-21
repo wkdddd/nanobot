@@ -61,7 +61,7 @@ export function DimensionCards({
   }
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2">
       {dimensions.map((dim) => {
         const totalFindings =
           dim.acceptedCount + dim.rejectedCount + dim.uncertainCount;
@@ -86,15 +86,15 @@ export function DimensionCards({
               }
             }}
           >
-            <CardContent className="p-4">
+            <CardContent className="p-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-center gap-2 min-w-0">
                   {getStatusIcon(dim.status)}
                   <div className="min-w-0">
-                    <h4 className="text-sm font-semibold truncate">
+                    <h4 className="text-xs font-semibold truncate">
                       {dim.dimension}
                     </h4>
-                    <span className="text-xs text-muted-foreground">
+                    <span className="text-[11px] text-muted-foreground">
                       {getStatusLabel(dim.status)}
                     </span>
                   </div>
@@ -102,7 +102,7 @@ export function DimensionCards({
                 {totalFindings > 0 && (
                   <Badge
                     variant="secondary"
-                    className="flex-shrink-0 text-xs"
+                    className="flex-shrink-0 text-[11px]"
                   >
                     {totalFindings}
                   </Badge>
@@ -110,22 +110,22 @@ export function DimensionCards({
               </div>
 
               {/* Sub-counts */}
-              <div className="flex gap-3 mt-3 text-xs text-muted-foreground">
+              <div className="flex gap-2 mt-2 text-[11px] text-muted-foreground">
                 {dim.acceptedCount > 0 && (
                   <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                    <span className="w-1 h-1 rounded-full bg-green-500" />
                     {dim.acceptedCount} accepted
                   </span>
                 )}
                 {dim.rejectedCount > 0 && (
                   <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                    <span className="w-1 h-1 rounded-full bg-red-500" />
                     {dim.rejectedCount} rejected
                   </span>
                 )}
                 {dim.uncertainCount > 0 && (
                   <span className="flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+                    <span className="w-1 h-1 rounded-full bg-yellow-500" />
                     {dim.uncertainCount} uncertain
                   </span>
                 )}

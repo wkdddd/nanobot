@@ -90,6 +90,7 @@ class ChannelManager:
                 # Only the WebSocket channel currently hosts the embedded webui
                 # surface; other channels stay oblivious to these knobs.
                 if cls.name == "websocket":
+                    kwargs["root_config"] = self.config
                     if self._session_manager is not None:
                         kwargs["session_manager"] = self._session_manager
                         static_path = _default_webui_dist()

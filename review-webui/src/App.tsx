@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Download, Shield } from "lucide-react";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { CodePanel } from "@/components/code/CodePanel";
+import { AutoTasksView } from "@/components/auto-tasks/AutoTasksView";
 import { ReviewShell } from "@/components/layout/ReviewShell";
 import type { SessionInfo } from "@/components/layout/SessionInfoBar";
 import { NewReviewForm, type NewReviewSubmit } from "@/components/review/NewReviewForm";
@@ -12,6 +13,7 @@ import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import {
   sessionMessageToUIMessage,
   useReviewSession,
+  type ChatMessage,
   type Finding,
   type ReviewTask,
 } from "@/hooks/useReviewSession";
@@ -25,6 +27,7 @@ import {
 } from "@/lib/bootstrap";
 import { fetchSessionMessages, fetchWebuiThread } from "@/lib/api";
 import { NanobotClient } from "@/lib/nanobot-client";
+import { parseTargetPathsText } from "@/lib/target-paths";
 import type {
   ChatSummary,
   ConnectionStatus,
@@ -65,43 +68,20 @@ function exportMarkdown(reportMarkdown: string, target: string) {
   URL.revokeObjectURL(url);
 }
 
-function detectTargetType(target: string): ReviewTargetType {
-  const trimmed = target.trim();
-  if (
-    trimmed.startsWith("https://github.com") ||
-    trimmed.startsWith("http://github.com") ||
-    trimmed.startsWith("github.com") ||
-    trimmed.startsWith("https://www.github.com")
-  ) {
-    return "github";
-  }
-  if (
-    trimmed.startsWith("/") ||
-    trimmed.startsWith("./") ||
-    trimmed.startsWith("../") ||
-    trimmed.startsWith("~") ||
-    /^[A-Za-z]:\\/.test(trimmed)
-  ) {
-    return "local";
-  }
-  return "auto";
-}
+const GITHUB_TARGET_RE = /^(?:https?:\/\/)?(?:www\.)?github\.com\/[^/\s]+\/[^/\s]+(?:[/?#].*)?$/i;
 
-function targetPathsFromText(value: string): string[] {
-  return value
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+function inferTargetType(target: string): Exclude<ReviewTargetType, "auto"> {
+  return GITHUB_TARGET_RE.test(target.trim()) ? "github" : "local";
 }
 
 function reviewTaskFromSubmit(submit: NewReviewSubmit): ReviewTask {
   return {
     target: submit.target,
-    targetType: detectTargetType(submit.target),
-    action: "repo",
+    targetType: inferTargetType(submit.target),
+    action: submit.action,
     depth: submit.depth,
     focus: submit.focus,
-    targetPaths: targetPathsFromText(submit.targetPaths),
+    targetPaths: parseTargetPathsText(submit.targetPaths),
   };
 }
 
@@ -318,19 +298,31 @@ function ReviewAppShell({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<ReviewSettings>(DEFAULT_SETTINGS);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarView, setSidebarView] = useState<"reviews" | "auto">("reviews");
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
+  const historyCacheRef = useRef<Map<string, { messages: UIMessage[]; task: ReviewTask | null; chatMessages?: ChatMessage[] }>>(new Map());
+  const historyRequestRef = useRef(0);
 
   const activeSession = useMemo(
     () => tasks.find((task) => task.key === activeKey) ?? null,
     [activeKey, tasks],
+  );
+  const autoTaskSessions = useMemo(
+    () => tasks.filter((task) => !!task.autoTaskRunId),
+    [tasks],
+  );
+  const dailySessions = useMemo(
+    () => tasks.filter((task) => !task.autoTaskRunId),
+    [tasks],
   );
   const activeChatId = activeSession?.chatId ?? (activeKey?.startsWith("websocket:") ? activeKey.slice(10) : null);
   const { state, reset, loadHistory, startReview, sendFollowUp } = useReviewSession(
     client,
     activeChatId,
   );
+  const apiAuth = useMemo(() => ({ token, refreshAuth }), [refreshAuth, token]);
 
   useEffect(() => client.onStatus(setConnectionStatus), [client]);
   useEffect(
@@ -339,6 +331,8 @@ function ReviewAppShell({
   );
 
   const handleNewTask = useCallback(() => {
+    historyRequestRef.current += 1;
+    setSidebarView("reviews");
     setActiveKey(null);
     setSelectedFinding(null);
     setSessionError(null);
@@ -347,11 +341,32 @@ function ReviewAppShell({
 
   const handleSelectTask = useCallback(
     async (key: string) => {
+      const requestId = historyRequestRef.current + 1;
+      historyRequestRef.current = requestId;
       const session = tasks.find((task) => task.key === key) ?? null;
+      setSidebarView("reviews");
+      if (activeKey && state.messages.length > 0) {
+        const existing = historyCacheRef.current.get(activeKey);
+        historyCacheRef.current.set(activeKey, {
+          messages: existing?.messages ?? [],
+          task: existing?.task ?? state.task,
+          chatMessages: state.messages,
+        });
+      }
       setActiveKey(key);
       setSelectedFinding(null);
       setSessionError(null);
-      reset();
+      const cached = historyCacheRef.current.get(key);
+      if (cached) {
+        loadHistory(
+          cached.messages,
+          cached.task ?? taskFromHistory(session, cached.messages) ?? historyTaskFallback(session),
+          undefined,
+          cached.chatMessages,
+        );
+      } else {
+        reset();
+      }
       try {
         let messages = (await fetchWebuiThread({ token, refreshAuth }, key))?.messages ?? [];
         if (messages.length === 0) {
@@ -360,16 +375,30 @@ function ReviewAppShell({
             .map(sessionMessageToUIMessage)
             .filter((message): message is UIMessage => message !== null);
         }
-        loadHistory(messages, taskFromHistory(session, messages) ?? historyTaskFallback(session));
+        if (historyRequestRef.current !== requestId) return;
+        const task = taskFromHistory(session, messages) ?? historyTaskFallback(session);
+        const existing = historyCacheRef.current.get(key);
+        historyCacheRef.current.set(key, { messages, task, chatMessages: existing?.chatMessages });
+        loadHistory(messages, task, undefined, existing?.chatMessages);
       } catch (error) {
+        if (historyRequestRef.current !== requestId) return;
         const message = error instanceof Error ? error.message : "Failed to load review session";
         console.error("Failed to load review session", error);
         setSessionError(message);
         loadHistory([], historyTaskFallback(session), message);
       }
     },
-    [loadHistory, refreshAuth, reset, tasks, token],
+    [activeKey, loadHistory, refreshAuth, reset, state.messages, state.task, tasks, token],
   );
+
+  const handleOpenAutoTasks = useCallback(() => {
+    historyRequestRef.current += 1;
+    setSidebarView("auto");
+    setActiveKey(null);
+    setSelectedFinding(null);
+    setSessionError(null);
+    reset();
+  }, [reset]);
 
   const handleDeleteTask = useCallback(
     async (key: string) => {
@@ -378,6 +407,7 @@ function ReviewAppShell({
       setSessionError(null);
       try {
         await deleteTask(key);
+        historyCacheRef.current.delete(key);
         if (deletingActive) handleNewTask();
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to delete review session";
@@ -395,6 +425,8 @@ function ReviewAppShell({
       const task = reviewTaskFromSubmit(submit);
       const chatId = activeChatId ?? (await createTask());
       const key = `websocket:${chatId}`;
+      historyRequestRef.current += 1;
+      historyCacheRef.current.delete(key);
       setActiveKey(key);
       setSelectedFinding(null);
       setSessionError(null);
@@ -403,7 +435,7 @@ function ReviewAppShell({
         review: {
           mode: task.depth ?? "full",
           target: task.target,
-          target_type: task.targetType ?? "auto",
+          target_type: task.targetType,
           action: task.action ?? "repo",
           focus: task.focus,
           target_paths: task.targetPaths,
@@ -447,7 +479,9 @@ function ReviewAppShell({
             ? "completed"
             : state.phase === "error"
               ? "failed"
-              : "running",
+              : state.phase === "stopped"
+                ? "stopped"
+                : "running",
         findingCounts: {
           total: state.findings.length,
           critical: state.findings.filter((finding) => finding.severity === "critical").length,
@@ -460,7 +494,10 @@ function ReviewAppShell({
 
   const showReviewForm = !activeKey;
   const followUpDisabled =
-    state.phase !== "completed" && state.phase !== "error" && state.phase !== "history";
+    state.phase !== "completed"
+    && state.phase !== "error"
+    && state.phase !== "history"
+    && state.phase !== "stopped";
   const isSessionBusy = deletingKey !== null || state.phase === "submitting";
 
   return (
@@ -470,16 +507,20 @@ function ReviewAppShell({
         modelName={modelName}
         onOpenSettings={() => setSettingsOpen(true)}
         onLogout={onLogout}
-        tasks={tasks}
+        autoTaskSessions={autoTaskSessions}
+        dailySessions={dailySessions}
         activeKey={activeKey}
         sidebarLoading={loading}
         sidebarError={tasksError}
         onTaskSelect={handleSelectTask}
         onNewTask={handleNewTask}
         onTaskDelete={handleDeleteTask}
+        onOpenAutoTasks={handleOpenAutoTasks}
         mainContent={
-          showReviewForm ? (
-            <div className="flex h-full items-center justify-center p-8">
+          sidebarView === "auto" ? (
+            <AutoTasksView />
+          ) : showReviewForm ? (
+            <div className="flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
               <NewReviewForm
                 defaultDepth={settings.defaultDepth}
                 defaultFocus={settings.defaultFocus}
@@ -520,7 +561,11 @@ function ReviewAppShell({
                 </Button>
               </div>
             )}
-            <CodePanel finding={selectedFinding} />
+            <CodePanel
+              finding={selectedFinding}
+              sessionKey={activeKey}
+              auth={apiAuth}
+            />
           </div>
         }
         sidebarOpen={sidebarOpen}

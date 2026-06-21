@@ -17,6 +17,7 @@ export interface CodeBlockProps {
   language?: string;
   fileName?: string;
   startLine?: number;
+  highlightLine?: number | null;
   className?: string;
 }
 
@@ -25,6 +26,7 @@ export function CodeBlock({
   language = "typescript",
   fileName,
   startLine,
+  highlightLine,
   className,
 }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
@@ -40,6 +42,8 @@ export function CodeBlock({
   }, [code]);
 
   const showLineNumbers = startLine !== undefined && startLine !== null;
+  const highlightedOffset =
+    showLineNumbers && highlightLine != null ? highlightLine - (startLine ?? 1) + 1 : null;
 
   return (
     <div
@@ -49,10 +53,10 @@ export function CodeBlock({
       )}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#e8e0d4] bg-[#f5f0e8]">
-        <div className="flex items-center gap-2 min-w-0">
-          <FileCode className="h-4 w-4 text-[#8c7b6b] shrink-0" />
-          <span className="text-sm font-medium text-[#5c4f42] truncate">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-[#e8e0d4] bg-[#f5f0e8]">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <FileCode className="h-3.5 w-3.5 text-[#8c7b6b] shrink-0" />
+          <span className="text-xs font-medium text-[#5c4f42] truncate">
             {fileName || language}
           </span>
         </div>
@@ -62,14 +66,14 @@ export function CodeBlock({
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7 shrink-0 text-[#8c7b6b] hover:text-[#5c4f42] hover:bg-[#ebe5db]"
+                className="h-6 w-6 shrink-0 text-[#8c7b6b] hover:text-[#5c4f42] hover:bg-[#ebe5db]"
                 onClick={handleCopy}
                 aria-label={copied ? "Copied" : "Copy code"}
               >
                 {copied ? (
-                  <Check className="h-3.5 w-3.5 text-emerald-600" />
+                  <Check className="h-3 w-3 text-emerald-600" />
                 ) : (
-                  <Clipboard className="h-3.5 w-3.5" />
+                  <Clipboard className="h-3 w-3" />
                 )}
               </Button>
             </TooltipTrigger>
@@ -81,7 +85,7 @@ export function CodeBlock({
       </div>
 
       {/* Code */}
-      <ScrollArea className="max-h-[480px]">
+      <ScrollArea className="max-h-[400px]">
         <div className="relative">
           <SyntaxHighlighter
             language={language}
@@ -89,17 +93,27 @@ export function CodeBlock({
             showLineNumbers={showLineNumbers}
             startingLineNumber={startLine ?? 1}
             wrapLines={false}
+            lineProps={(lineNumber) => ({
+              style:
+                highlightedOffset === lineNumber
+                  ? {
+                      display: "block",
+                      backgroundColor: "rgba(251, 191, 36, 0.18)",
+                      borderLeft: "2px solid #f59e0b",
+                    }
+                  : { display: "block" },
+            })}
             customStyle={{
               margin: 0,
-              padding: "1rem 1.25rem",
-              fontSize: "0.8125rem",
-              lineHeight: "1.6",
+              padding: "0.75rem 1rem",
+              fontSize: "0.75rem",
+              lineHeight: "1.5",
               background: "#2d2a2e",
               borderRadius: 0,
             }}
             lineNumberStyle={{
-              minWidth: "2.5em",
-              paddingRight: "1em",
+              minWidth: "2em",
+              paddingRight: "0.75em",
               color: "#65606b",
               textAlign: "right",
               userSelect: "none",

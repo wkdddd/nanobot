@@ -39,6 +39,18 @@ class _LogSink:
         return "".join(self.messages)
 
 
+class _FakeIndex:
+    def __init__(self, broad_hits: list[IndexedHit], lane_hits: list[IndexedHit] | None = None) -> None:
+        self.broad_hits = broad_hits
+        self.lane_hits = lane_hits or []
+
+    async def search(self, **_kwargs: object) -> list[IndexedHit]:
+        return self.broad_hits
+
+    def lexical_search(self, *_args: object, **_kwargs: object) -> list[IndexedHit]:
+        return self.lane_hits
+
+
 def _git(cwd: Path, *args: str) -> None:
     subprocess.run(
         ["git", *args],
@@ -184,6 +196,107 @@ def test_repository_rag_prioritizes_chunks_overlapping_touched_lines() -> None:
     assert ranked[1].reason == ["diff-line-overlap", "diff-touched"]
     assert ranked[2] is near
     assert ranked[2].reason == ["diff-touched"]
+
+
+@pytest.mark.asyncio
+async def test_repository_rag_quality_filter_drops_duplicate_and_low_value_hits(tmp_path: Path) -> None:
+    good = IndexedHit(
+        IndexedChunk(
+            "code_review",
+            "src/auth.py",
+            1,
+            3,
+            "def auth_token_check():\n    token = request.headers.get('token')\n    return token",
+        ),
+        3.0,
+        ["bm25"],
+    )
+    duplicate = IndexedHit(good.chunk, 2.0, ["risk:security"])
+    empty = IndexedHit(IndexedChunk("code_review", "src/empty.py", 1, 1, ""), 1.0, ["bm25"])
+    short = IndexedHit(IndexedChunk("code_review", "src/short.py", 1, 1, "ok"), 1.0, ["bm25"])
+
+    service = RepositoryRAGService(
+        tmp_path,
+        options=RepositoryRAGOptions(enable_chonkie=False, enable_rrf=False),
+    )
+    service.index = _FakeIndex([good, duplicate, empty, short])  # type: ignore[assignment]
+    sink = _LogSink()
+    handler_id = logger.add(sink, level="INFO", format="{message}")
+    try:
+        hits = await service.retrieve_hits(
+            source_type="code_review",
+            review_query="auth token",
+            max_results=5,
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert [hit.path for hit in hits] == ["src/auth.py"]
+    assert "raw_hits=4" in sink.text
+    assert "kept_hits=1" in sink.text
+    assert "dropped_hits=3" in sink.text
+    assert "duplicate" in sink.text
+    assert "empty_text" in sink.text
+    assert "short_snippet" in sink.text
+
+
+@pytest.mark.asyncio
+async def test_repository_rag_quality_filter_keeps_semantic_hit_without_query_terms(tmp_path: Path) -> None:
+    semantic = IndexedHit(
+        IndexedChunk(
+            "code_review",
+            "src/session.py",
+            1,
+            3,
+            "def verify_session():\n    cookie = load_signed_cookie()\n    return cookie.user_id",
+        ),
+        0.9,
+        ["qdrant"],
+    )
+
+    service = RepositoryRAGService(
+        tmp_path,
+        options=RepositoryRAGOptions(enable_chonkie=False, enable_rrf=False),
+    )
+    service.index = _FakeIndex([semantic])  # type: ignore[assignment]
+
+    hits = await service.retrieve_hits(
+        source_type="code_review",
+        review_query="jwt token",
+        max_results=5,
+    )
+
+    assert [hit.path for hit in hits] == ["src/session.py"]
+    assert hits[0].reason == ["qdrant", "weak-query-match"]
+
+
+@pytest.mark.asyncio
+async def test_repository_rag_quality_filter_returns_no_hits_when_all_low_value(tmp_path: Path) -> None:
+    service = RepositoryRAGService(
+        tmp_path,
+        options=RepositoryRAGOptions(enable_chonkie=False, enable_rrf=False),
+    )
+    service.index = _FakeIndex(
+        [
+            IndexedHit(IndexedChunk("code_review", "src/empty.py", 1, 1, ""), 1.0, ["bm25"]),
+            IndexedHit(IndexedChunk("code_review", "src/short.py", 1, 1, "x"), 1.0, ["bm25"]),
+        ]
+    )  # type: ignore[assignment]
+    sink = _LogSink()
+    handler_id = logger.add(sink, level="INFO", format="{message}")
+    try:
+        hits = await service.retrieve_hits(
+            source_type="code_review",
+            review_query="auth token",
+            max_results=5,
+        )
+    finally:
+        logger.remove(handler_id)
+
+    assert hits == []
+    assert "status=no_hits" in sink.text
+    assert "raw_hits=2" in sink.text
+    assert "kept_hits=0" in sink.text
 
 
 @pytest.mark.asyncio

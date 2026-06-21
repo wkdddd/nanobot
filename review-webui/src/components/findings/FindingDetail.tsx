@@ -30,20 +30,20 @@ function CollapsibleSection({
   const [open, setOpen] = useState(defaultOpen);
 
   return (
-    <div className="mt-2">
+    <div className="mt-1.5">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground transition-colors"
+        className="flex items-center gap-1 text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
       >
         {open ? (
-          <ChevronDown className="w-3 h-3" />
+          <ChevronDown className="w-2.5 h-2.5" />
         ) : (
-          <ChevronRight className="w-3 h-3" />
+          <ChevronRight className="w-2.5 h-2.5" />
         )}
         {title}
       </button>
       {open && (
-        <div className="text-sm text-muted-foreground mt-1.5 leading-relaxed pl-4 border-l-2 border-muted">
+        <div className="text-xs text-muted-foreground mt-1 leading-relaxed pl-3 border-l-2 border-muted">
           {content}
         </div>
       )}
@@ -70,26 +70,26 @@ export function FindingDetail({ finding, variant = "panel" }: FindingDetailProps
     <Card className={cn("overflow-hidden paper-texture", isCard && "shadow-sm")}>
       <div className="flex">
         <div className={cn("w-[3px] flex-shrink-0", SEVERITY_STRIPE[finding.severity.toLowerCase()] ?? "bg-muted")} />
-        <CardContent className={cn("flex-1 min-w-0", isCard ? "p-3" : "p-4")}>
+        <CardContent className={cn("flex-1 min-w-0", isCard ? "p-2.5" : "p-3")}>
           {/* Header row */}
-          <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
             <SeverityBadge severity={finding.severity} />
-            <code className="text-xs font-mono text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+            <code className="text-[11px] font-mono text-muted-foreground bg-muted px-1 py-0 rounded">
               {finding.file}
               {finding.line != null && `:${finding.line}`}
             </code>
-            <Badge variant="secondary" className="text-[10px] capitalize">
+            <Badge variant="secondary" className="text-[9px] capitalize">
               {finding.dimension}
             </Badge>
             {finding.confidence && (
-              <span className="text-[10px] text-muted-foreground ml-auto">
+              <span className="text-[9px] text-muted-foreground ml-auto">
                 Confidence: {finding.confidence}
               </span>
             )}
           </div>
 
           {/* Title */}
-          <h4 className={cn("font-semibold mt-2 text-foreground", isCard ? "text-sm" : "text-sm")}>
+          <h4 className={cn("font-semibold mt-1.5 text-foreground", isCard ? "text-xs" : "text-xs")}>
             {finding.title}
           </h4>
 

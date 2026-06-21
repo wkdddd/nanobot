@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from loguru import logger
 
 from nanobot.rag.index import RAGIndex
 from nanobot.rag.qdrant_store import QdrantVectorHit
@@ -155,23 +156,32 @@ async def test_search_prefers_qdrant_dense_candidates(tmp_path) -> None:
 @pytest.mark.asyncio
 async def test_search_falls_back_to_lexical_when_qdrant_fails(tmp_path) -> None:
     path = _write_repo_file(tmp_path, "def lexical_target():\n    return 'ok'\n")
+    log_lines: list[str] = []
+    sink_id = logger.add(lambda msg: log_lines.append(str(msg)), format="{message}")
     index = RAGIndex(
         tmp_path,
         embedding_client=_EmbeddingClient(),
         vector_store=_VectorStore(fail_search=True),
     )
-    index.sync_files(
-        source_type="repo",
-        files=[path],
-        chunker=_chunk_file,
-        max_file_chars=1000,
-    )
+    try:
+        index.sync_files(
+            source_type="repo",
+            files=[path],
+            chunker=_chunk_file,
+            max_file_chars=1000,
+        )
 
-    hits = await index.search(source_type="repo", query="lexical_target", max_hits=3)
+        hits = await index.search(source_type="repo", query="lexical_target", max_hits=3)
+    finally:
+        logger.remove(sink_id)
 
     assert hits
     assert hits[0].chunk.path == "src/app.py"
     assert "bm25" in hits[0].reason
+    text = "\n".join(log_lines)
+    assert "%s" not in text
+    assert "source_type=repo" in text
+    assert "reason=qdrant unavailable" in text
 
 
 @pytest.mark.asyncio

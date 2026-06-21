@@ -1,8 +1,10 @@
+import asyncio
 import json
 import time
 from types import SimpleNamespace
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from nanobot.agent.loop import AgentLoop, TurnContext
 from nanobot.bus.events import OutboundMessage
@@ -19,6 +21,58 @@ def _request(path: str = "/api/usage", token: str | None = "tok") -> SimpleNames
 
 def _json_body(response) -> dict:
     return json.loads(bytes(response.body).decode("utf-8"))
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_webui_serves_spa_without_ws_auth(tmp_path) -> None:
+    dist = tmp_path / "dist"
+    assets = dist / "assets"
+    assets.mkdir(parents=True)
+    (dist / "index.html").write_text(
+        '<!doctype html><script type="module" src="/assets/app.js"></script>',
+        encoding="utf-8",
+    )
+    (assets / "app.js").write_text("console.log('ok');", encoding="utf-8")
+
+    channel = WebSocketChannel(
+        {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "path": "/",
+            "websocketRequiresToken": True,
+        },
+        MessageBus(),
+        session_manager=SessionManager(tmp_path / "sessions"),
+        static_dist_path=dist,
+    )
+    client = TestClient(TestServer(channel._build_aiohttp_app()))
+    await client.start_server()
+    try:
+        root = await client.get("/")
+        assert root.status == 200
+        assert root.content_type == "text/html"
+        assert root.charset == "utf-8"
+        assert "no-cache" in root.headers["Cache-Control"]
+        assert "<!doctype html>" in await root.text()
+
+        index = await client.get("/index.html")
+        assert index.status == 200
+        assert index.content_type == "text/html"
+        assert index.charset == "utf-8"
+
+        asset = await client.get("/assets/app.js")
+        assert asset.status == 200
+        assert asset.content_type == "text/javascript"
+        assert asset.charset == "utf-8"
+        assert "immutable" in asset.headers["Cache-Control"]
+
+        bootstrap = await client.get("/webui/bootstrap")
+        assert bootstrap.status == 200
+        body = await bootstrap.json()
+        assert body["token"].startswith("nbwt_")
+        assert body["ws_path"] == "/"
+    finally:
+        await client.close()
 
 
 def test_websocket_usage_requires_api_token() -> None:
@@ -136,6 +190,62 @@ async def test_websocket_review_mode_stores_and_clears_target(tmp_path) -> None:
     assert "review_target" not in session.metadata
     assert "review_target_type" not in session.metadata
     assert "target" not in conn.sent[-1]
+
+
+def test_websocket_code_context_reads_local_utf8_file(tmp_path) -> None:
+    source = tmp_path / "src" / "secure.py"
+    source.parent.mkdir()
+    source.write_text("one\n二\nthree\nfour\nfive\n", encoding="utf-8")
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create("websocket:chat")
+    session.metadata.update(
+        {
+            "review_target": str(tmp_path),
+            "review_target_type": "local",
+            "review_action": "repo",
+        }
+    )
+    manager.save(session)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    channel._api_tokens["tok"] = time.monotonic() + 60
+
+    response = channel._handle_code_context_get(
+        _request("/api/sessions/websocket%3Achat/code-context?file=src%2Fsecure.py&line=2&before=1&after=1"),
+        "websocket:chat",
+    )
+    body = _json_body(response)
+
+    assert response.status_code == 200
+    assert body["file"] == "src/secure.py"
+    assert body["line"] == 2
+    assert body["startLine"] == 1
+    assert body["endLine"] == 3
+    assert body["code"] == "one\n二\nthree"
+    assert body["source"] == "local"
+
+
+def test_websocket_code_context_rejects_path_traversal(tmp_path) -> None:
+    manager = SessionManager(tmp_path)
+    session = manager.get_or_create("websocket:chat")
+    session.metadata.update({"review_target": str(tmp_path), "review_target_type": "local"})
+    manager.save(session)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+    channel._api_tokens["tok"] = time.monotonic() + 60
+
+    response = channel._handle_code_context_get(
+        _request("/api/sessions/websocket%3Achat/code-context?file=..%2Fsecret.py&line=1"),
+        "websocket:chat",
+    )
+
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -352,3 +462,46 @@ async def test_review_replaced_content_streams_report_without_duplicate_message(
     assert second.content == ""
     assert second.metadata["_stream_kind"] == "review_report"
     assert second.metadata["_stream_end"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_websocket_review_turn_publishes_terminal_frames(tmp_path) -> None:
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.bus = MessageBus()
+    loop.sessions = SessionManager(tmp_path / "sessions")
+    loop._session_locks = {}
+    loop._pending_queues = {}
+    loop._active_tasks = {}
+    loop._concurrency_gate = None
+    loop._pending_turn_latency_ms = {}
+    loop._pending_turn_traces = {}
+
+    async def cancelled_process_message(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    loop._process_message = cancelled_process_message
+    loop._effective_session_key = lambda msg: msg.session_key
+    loop._restore_runtime_checkpoint = lambda session: False
+    loop._cleanup_session_lock = lambda session_key, lock: None
+
+    msg = SimpleNamespace(
+        channel="websocket",
+        chat_id="chat",
+        sender_id="client",
+        session_key="websocket:chat",
+        metadata={
+            "_wants_stream": True,
+            "review_target": "repo",
+        },
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await loop._dispatch(msg)
+
+    outbound = []
+    while not loop.bus.outbound.empty():
+        outbound.append(loop.bus.outbound.get_nowait())
+
+    assert any(item.metadata.get("_stream_end") and item.metadata.get("_stream_kind") == "review_thinking" for item in outbound)
+    assert any(item.metadata.get("_turn_end") for item in outbound)
+    assert any(item.metadata.get("_goal_status") and item.metadata.get("goal_status") == "idle" for item in outbound)

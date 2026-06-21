@@ -271,6 +271,8 @@ async def test_agent_loop_review_message_metadata_is_visible_same_turn(tmp_path)
         metadata={
             "review_target": "https://github.com/test/repo",
             "review_target_type": "github",
+            "review_focus": ["dependency"],
+            "review_mode_variant": "quick",
         },
     )
     ctx = TurnContext(
@@ -290,6 +292,9 @@ async def test_agent_loop_review_message_metadata_is_visible_same_turn(tmp_path)
     assert runner.initial_messages[0]["role"] == "system"
     assert "- Name: https://github.com/test/repo" in runner.initial_messages[0]["content"]
     assert "- Type: github" in runner.initial_messages[0]["content"]
+    assert session.metadata["allowed_review_dimensions"] == ["dependency"]
+    assert "Dependency Reviewer" in runner.initial_messages[0]["content"]
+    assert "Security Reviewer" not in runner.initial_messages[0]["content"]
 
 
 @pytest.mark.asyncio

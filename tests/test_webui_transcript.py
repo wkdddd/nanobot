@@ -72,3 +72,47 @@ def test_replay_uses_review_report_delta_not_review_thinking() -> None:
     assert len(messages) == 1
     assert messages[0]["role"] == "assistant"
     assert messages[0]["content"] == "## Report"
+    assert messages[0]["reasoning"] == "raw coordinator text"
+
+
+def test_replay_preserves_review_thinking_without_report() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {"event": "delta", "kind": "review_thinking", "text": "checking repo", "createdAt": 100},
+        {"event": "stream_end", "kind": "review_thinking", "createdAt": 110},
+        {"event": "turn_end", "createdAt": 120},
+    ])
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == ""
+    assert messages[0]["reasoning"] == "checking repo"
+    assert not messages[0].get("reasoningStreaming")
+
+
+def test_replay_preserves_review_thinking_when_browser_refresh_saw_no_stream_end() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {"event": "delta", "kind": "review_thinking", "text": "checking repo", "createdAt": 100},
+        {"event": "turn_end", "createdAt": 120},
+    ])
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == ""
+    assert messages[0]["reasoning"] == "checking repo"
+
+
+def test_replay_keeps_review_thinking_separate_from_plain_report_message() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {"event": "delta", "kind": "review_thinking", "text": "checking repo", "createdAt": 100},
+        {"event": "stream_end", "kind": "review_thinking", "createdAt": 110},
+        {"event": "turn_end", "createdAt": 120},
+        {"event": "message", "text": "## Code Review Report: repo", "createdAt": 130},
+    ])
+
+    assert len(messages) == 2
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == ""
+    assert messages[0]["reasoning"] == "checking repo"
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["content"] == "## Code Review Report: repo"
+    assert "reasoning" not in messages[1]

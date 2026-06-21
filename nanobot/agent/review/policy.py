@@ -61,9 +61,5 @@ def apply_policy_to_roles(
 ) -> list[ReviewRole]:
     """Respect explicit focus, otherwise use mode-selected roles."""
     if forced_focus:
-        if policy.depth == "quick":
-            allowed = {role.name for role in policy.roles}
-            selected = [role for role in roles if role.name in allowed]
-            return selected or list(policy.roles)
         return roles
     return list(policy.roles)

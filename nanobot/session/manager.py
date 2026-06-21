@@ -28,6 +28,28 @@ _MESSAGE_TIME_PREFIX_RE = re.compile(r"^\[Message Time: [^\]]+\]\n?")
 _LOCAL_IMAGE_BREADCRUMB_RE = re.compile(r"^\[image: (?:/|~)[^\]]+\]\s*$")
 _TOOL_CALL_ECHO_RE = re.compile(r'^\s*(?:generate_image|message)\([^)]*\)\s*$')
 _SESSION_PREVIEW_MAX_CHARS = 120
+_SESSION_LIST_METADATA_KEYS = {
+    "auto_task_id",
+    "auto_task_run_id",
+    "github_repo",
+    "github_pr_number",
+    "review_target",
+    "review_target_type",
+    "review_action",
+    "review_mode_variant",
+}
+
+
+def _session_list_metadata(metadata: Any) -> dict[str, Any]:
+    """Return non-sensitive metadata fields needed by session navigation."""
+    if not isinstance(metadata, dict):
+        return {}
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key in _SESSION_LIST_METADATA_KEYS
+        and isinstance(value, str | int | float | bool)
+    }
 
 
 def _sanitize_assistant_replay_text(content: str) -> str:
@@ -709,6 +731,7 @@ class SessionManager:
                                 "updated_at": data.get("updated_at"),
                                 "title": title if isinstance(title, str) else "",
                                 "preview": preview,
+                                "metadata": _session_list_metadata(metadata),
                                 "path": str(path)
                             })
             except Exception:
@@ -731,6 +754,7 @@ class SessionManager:
                             ),
                             "",
                         ),
+                        "metadata": _session_list_metadata(repaired.metadata),
                         "path": str(path)
                     })
                 continue

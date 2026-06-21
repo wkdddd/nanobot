@@ -121,16 +121,16 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
   const visibleCount = filteredFindings.length;
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-2">
       {/* Filter bar */}
-      <div className="flex flex-col sm:flex-row gap-2">
+      <div className="flex flex-col sm:flex-row gap-1.5">
         <div className="relative flex-1">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
           <Input
             placeholder="Search findings..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9 h-9 text-sm"
+            className="pl-8 h-8 text-xs"
             name="search"
           />
         </div>
@@ -138,7 +138,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
         <select
           value={severityFilter}
           onChange={(e) => setSeverityFilter(e.target.value)}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
         >
           <option value="all">All Severities</option>
           <option value="critical">Critical</option>
@@ -150,7 +150,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
         <select
           value={activeDimension ?? dimensionFilter}
           onChange={(e) => setDimensionFilter(e.target.value)}
-          className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          className="h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
         >
           <option value="all">All Dimensions</option>
           {uniqueDimensions.map((d) => (
@@ -160,22 +160,22 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
       </div>
 
       {/* Toolbar: group mode, compact toggle, count */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
+      <div className="flex items-center justify-between gap-1.5">
+        <div className="flex items-center gap-1">
           {/* Group mode toggle */}
           <button
             type="button"
             onClick={() => setGroupMode(groupMode === "severity" ? "file" : "severity")}
             className={cn(
-              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
+              "inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors",
               "border-border bg-background hover:bg-accent/50"
             )}
             aria-label={`Group by ${groupMode === "severity" ? "file" : "severity"}`}
           >
             {groupMode === "severity" ? (
-              <Layers className="w-3.5 h-3.5 text-muted-foreground" />
+              <Layers className="w-3 h-3 text-muted-foreground" />
             ) : (
-              <FolderTree className="w-3.5 h-3.5 text-muted-foreground" />
+              <FolderTree className="w-3 h-3 text-muted-foreground" />
             )}
             <span>By {groupMode === "severity" ? "Severity" : "File"}</span>
           </button>
@@ -185,7 +185,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
             type="button"
             onClick={() => setCompact(!compact)}
             className={cn(
-              "inline-flex items-center rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors",
+              "inline-flex items-center rounded-md border px-2 py-1 text-[11px] font-medium transition-colors",
               compact
                 ? "border-primary/30 bg-primary/5 text-primary"
                 : "border-border bg-background hover:bg-accent/50 text-muted-foreground"
@@ -196,7 +196,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
           </button>
         </div>
 
-        <span className="text-xs text-muted-foreground">
+        <span className="text-[11px] text-muted-foreground">
           Showing {visibleCount} of {findings.length} findings
         </span>
       </div>
@@ -253,7 +253,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
 
                 {/* Items */}
                 {!isCollapsed && (
-                  <div className="space-y-1.5 ml-1">
+                  <div className="space-y-1 ml-1">
                     {visibleItems.map((finding, idx) => {
                       const id = getFindingId(finding, idx);
                       return (
@@ -275,7 +275,7 @@ export function FindingList({ findings, activeDimension, onSelectFinding }: Find
                       <button
                         type="button"
                         onClick={() => togglePage(groupKey)}
-                        className="w-full py-2 text-xs text-primary font-medium hover:bg-primary/5 rounded-md transition-colors"
+                        className="w-full py-1.5 text-[11px] text-primary font-medium hover:bg-primary/5 rounded-md transition-colors"
                       >
                         Show {hiddenCount} more...
                       </button>

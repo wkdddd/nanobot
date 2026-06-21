@@ -7,6 +7,7 @@ import type {
   ReviewDepth,
   ReviewFocus,
   ReviewTargetType,
+  ToolProgressEvent,
   UIMessage,
 } from "@/lib/types";
 
@@ -21,6 +22,7 @@ export type ReviewPhase =
   | "finalizing"
   | "history"
   | "completed"
+  | "stopped"
   | "error";
 
 export interface ReviewTask {
@@ -85,15 +87,78 @@ const INITIAL_STATE: ReviewSessionState = {
   messages: [],
 };
 
-function uiMessageToChatMessage(message: UIMessage): ChatMessage | null {
+function labelValue(value: string | undefined, fallback = "auto"): string {
+  const trimmed = value?.trim();
+  return trimmed || fallback;
+}
+
+function formatReviewFocus(focus: ReviewFocus[] | undefined): string {
+  return focus && focus.length > 0 ? focus.join(", ") : "all";
+}
+
+function formatReviewPaths(paths: string[] | undefined): string {
+  return paths && paths.length > 0 ? paths.join(", ") : "all";
+}
+
+function isReviewTask(review: UIMessage["review"] | ReviewTask): review is ReviewTask {
+  if (!review) return false;
+  return "targetType" in review || "depth" in review || "targetPaths" in review;
+}
+
+function formatReviewRequestContent(
+  content: string,
+  review: UIMessage["review"] | ReviewTask | undefined,
+): string {
+  if (!review) return content;
+  const task = isReviewTask(review);
+  const target = review.target;
+  const targetType = task ? review.targetType : review.target_type;
+  const mode = task ? review.depth : review.mode;
+  const action = review.action;
+  const focus = review.focus;
+  const targetPaths = task ? review.targetPaths : review.target_paths;
+  const title = content.trim() || "审查";
+  const lines = [
+    title,
+    `目标: ${labelValue(target, "(not set)")}`,
+    `类型: ${labelValue(targetType)}`,
+    `模式: ${labelValue(mode, "full")}`,
+    `动作: ${labelValue(action, "repo")}`,
+    `关注: ${formatReviewFocus(focus)}`,
+    `路径: ${formatReviewPaths(targetPaths)}`,
+  ];
+  return lines.join("\n");
+}
+
+function isLikelyReviewReport(content: string): boolean {
+  const text = content.trim();
+  if (!text) return false;
+  return (
+    /^#{1,3}\s+.*(?:review|审查|报告)/im.test(text) ||
+    /(?:^|\n)\s*\|\s*(?:severity|严重级别|file|文件|finding|问题)\s*\|/i.test(text) ||
+    /(?:^|\n)\s*(?:findings|审查发现|recommendations|建议)\s*[:：]?/i.test(text)
+  );
+}
+
+export function uiMessageToChatMessage(message: UIMessage): ChatMessage | null {
   if (message.kind === "trace") return null;
   if (message.role !== "user" && message.role !== "assistant") return null;
+  const content = message.role === "user"
+    ? formatReviewRequestContent(message.content, message.review)
+    : message.content;
+  const thinking = message.role === "assistant" ? message.reasoning : undefined;
+  if (message.role === "assistant" && !content.trim() && !thinking?.trim()) {
+    return null;
+  }
+  const type = message.role === "assistant" && isLikelyReviewReport(message.content) ? "report" : "text";
   return {
     id: message.id,
     role: message.role === "user" ? "user" : "agent",
-    type: "text",
-    content: message.content,
+    type,
+    content,
     timestamp: message.createdAt,
+    thinking,
+    streaming: message.role === "assistant" ? message.reasoningStreaming : undefined,
   };
 }
 
@@ -203,6 +268,63 @@ function appendProgressLine(message: ChatMessage, text: string): ChatMessage {
   return appendThinking(message, `${prefix}${trimmed}\n`, true);
 }
 
+function appendProgressLines(message: ChatMessage, lines: string[]): ChatMessage {
+  return lines.reduce((next, line) => appendProgressLine(next, line), message);
+}
+
+function formatElapsed(ms: unknown): string {
+  return typeof ms === "number" && Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)}s` : "";
+}
+
+function formatReviewPrefetchEvent(event: ToolProgressEvent): string | null {
+  if (event.name !== "review_prefetch") return null;
+  const args = event.arguments && typeof event.arguments === "object"
+    ? event.arguments as Record<string, unknown>
+    : {};
+  const action = typeof args.action === "string" ? args.action : "repo";
+  const targetType = typeof args.target_type === "string" ? args.target_type : "auto";
+  const metadata = event.metadata && typeof event.metadata === "object"
+    ? event.metadata as Record<string, unknown>
+    : {};
+  if (event.phase === "start") {
+    return `Preparing review context: ${action} / ${targetType}`;
+  }
+  if (event.phase === "end") {
+    const elapsed = formatElapsed(metadata.elapsed_ms);
+    if (event.result === "ok" || event.result === "no_summary") {
+      const rawChars = typeof metadata.raw_chars === "number" ? metadata.raw_chars : null;
+      const chars = rawChars !== null ? `, ${rawChars} chars` : "";
+      return `Review context ready${elapsed ? ` in ${elapsed}` : ""}${chars}`;
+    }
+    const reason = typeof event.error === "string" && event.error.trim()
+      ? `: ${event.error.trim()}`
+      : "";
+    return `Review context failed${elapsed ? ` after ${elapsed}` : ""}${reason}`;
+  }
+  if (event.phase === "skip") {
+    const reason = typeof event.error === "string" && event.error.trim()
+      ? ` (${event.error.trim()})`
+      : "";
+    return `Review context prefetch skipped${reason}`;
+  }
+  return null;
+}
+
+function progressLinesFromEvent(ev: InboundEvent): string[] {
+  if (ev.event !== "message" || ev.kind !== "progress") return [];
+  const lines: string[] = [];
+  if (ev.text?.trim()) {
+    lines.push(ev.text.trim());
+  }
+  if (Array.isArray(ev.tool_events)) {
+    for (const toolEvent of ev.tool_events) {
+      const line = formatReviewPrefetchEvent(toolEvent);
+      if (line) lines.push(line);
+    }
+  }
+  return lines;
+}
+
 function markLastStreamingComplete(messages: ChatMessage[]): ChatMessage[] {
   if (messages.length === 0) return messages;
   const updated = [...messages];
@@ -214,6 +336,39 @@ function markLastStreamingComplete(messages: ChatMessage[]): ChatMessage[] {
     }
   }
   return updated;
+}
+
+function markAllStreamingComplete(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map((message) =>
+    message.streaming ? { ...message, streaming: false } : message
+  );
+}
+
+function hasVisibleAgentFinal(messages: ChatMessage[]): boolean {
+  return messages.some((message) =>
+    message.role === "agent" && message.content.trim().length > 0
+  );
+}
+
+function hasThinkingOnlyAgent(messages: ChatMessage[]): boolean {
+  return messages.some((message) =>
+    message.role === "agent"
+    && message.content.trim().length === 0
+    && !!message.thinking?.trim()
+  );
+}
+
+function completedOrStoppedPhase(messages: ChatMessage[]): ReviewPhase {
+  if (hasVisibleAgentFinal(messages)) return "completed";
+  if (hasThinkingOnlyAgent(messages)) return "stopped";
+  return "history";
+}
+
+function isBusyPhase(phase: ReviewPhase): boolean {
+  return phase === "submitting"
+    || phase === "prefetching"
+    || phase === "reviewing"
+    || phase === "finalizing";
 }
 
 export function useReviewSession(client: NanobotClient, chatId: string | null) {
@@ -233,15 +388,18 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
     messages: UIMessage[],
     task: ReviewTask | null = null,
     error: string | null = null,
+    preConverted?: ChatMessage[],
   ) => {
-    const chatMessages = messages
+    const chatMessages = preConverted ?? messages
       .map(uiMessageToChatMessage)
       .filter((message): message is ChatMessage => message !== null);
+    const reportMarkdown = [...chatMessages].reverse().find((message) => message.type === "report")?.content ?? "";
     setState({
       ...INITIAL_STATE,
-      phase: error ? "error" : chatMessages.length > 0 ? "completed" : "history",
+      phase: error ? "error" : completedOrStoppedPhase(chatMessages),
       task,
       error,
+      reportMarkdown,
       messages: chatMessages,
     });
     reportBufferRef.current = "";
@@ -264,7 +422,7 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           id: generateId(),
           role: "user",
           type: "text",
-          content: `Start review: ${task.target}`,
+          content: formatReviewRequestContent("审查", task),
           timestamp: Date.now(),
         },
       ],
@@ -344,6 +502,7 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
                       ...message,
                       type: "report" as const,
                       content: message.content + text,
+                      thinking: message.thinking || thinkingBufferRef.current || undefined,
                       streaming: true,
                     }
                   : message
@@ -412,12 +571,13 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
             const updated = prev.messages.map((message) =>
               message.id === existingId ? appendThinking(message, text, true) : message
             );
-            return { ...prev, messages: updated };
+            return { ...prev, phase: "reviewing", messages: updated };
           }
           const id = generateId();
           currentAgentMessageRef.current = id;
           return {
             ...prev,
+            phase: "reviewing",
             messages: [
               ...prev.messages,
               {
@@ -446,9 +606,11 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         }
 
         if (ev.event === "message") {
+          const progressLines = progressLinesFromEvent(ev);
           const newLogs = [...prev.logs];
           if (ev.kind === "tool_hint" || ev.kind === "progress") {
-            newLogs.push(ev.text);
+            if (ev.text?.trim()) newLogs.push(ev.text.trim());
+            newLogs.push(...progressLines.filter((line) => line !== ev.text?.trim()));
           }
 
           // 处理 agent_ui blob 中的 finding 流式事件
@@ -522,19 +684,20 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
             }
           }
 
-          if (ev.kind === "progress" && ev.text) {
+          if (ev.kind === "progress" && progressLines.length > 0) {
             const existingId = currentAgentMessageRef.current;
             if (existingId) {
               const updated = prev.messages.map((message) =>
-                message.id === existingId ? appendProgressLine(message, ev.text) : message
+                message.id === existingId ? appendProgressLines(message, progressLines) : message
               );
-              return { ...prev, logs: newLogs, phase: "reviewing", messages: updated };
+              return { ...prev, logs: newLogs, phase: "prefetching", messages: updated };
             }
             const id = generateId();
             currentAgentMessageRef.current = id;
+            const thinking = progressLines.map((line) => line.trim()).filter(Boolean).join("\n");
             return {
               ...prev,
-              phase: "reviewing",
+              phase: "prefetching",
               logs: newLogs,
               messages: [
                 ...prev.messages,
@@ -544,10 +707,33 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
                   type: "text",
                   content: "",
                   timestamp: Date.now(),
-                  thinking: `${ev.text.trim()}\n`,
+                  thinking: `${thinking}\n`,
                   streaming: true,
                 },
               ],
+            };
+          }
+
+          if (!ev.kind && ev.text?.trim()) {
+            const content = ev.text;
+            const isReport = isLikelyReviewReport(content);
+            const ordinaryMessage: ChatMessage = {
+              id: generateId(),
+              role: "agent",
+              type: isReport ? "report" : "text",
+              content,
+              timestamp: Date.now(),
+              streaming: false,
+            };
+            const logs = isReport
+              ? [...newLogs, "Review report arrived outside review_report stream"]
+              : newLogs;
+            return {
+              ...prev,
+              logs,
+              phase: isReport ? "completed" : prev.phase,
+              reportMarkdown: isReport ? content : prev.reportMarkdown,
+              messages: [...markAllStreamingComplete(prev.messages), ordinaryMessage],
             };
           }
 
@@ -556,10 +742,24 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
 
         if (ev.event === "turn_end") {
           currentAgentMessageRef.current = null;
+          const messages = markLastStreamingComplete(prev.messages);
+          const phase = completedOrStoppedPhase(messages);
           return {
             ...prev,
-            phase: "completed",
-            messages: markLastStreamingComplete(prev.messages),
+            phase: phase === "history" && isBusyPhase(prev.phase) ? "stopped" : phase,
+            messages,
+          };
+        }
+
+        if (ev.event === "goal_status") {
+          if (ev.status !== "idle" || !isBusyPhase(prev.phase)) {
+            return prev;
+          }
+          currentAgentMessageRef.current = null;
+          return {
+            ...prev,
+            phase: "stopped",
+            messages: markAllStreamingComplete(prev.messages),
           };
         }
 
@@ -570,7 +770,7 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
             phase: "error",
             error: ev.detail || "Unknown error",
             messages: [
-              ...prev.messages,
+              ...markAllStreamingComplete(prev.messages),
               {
                 id: generateId(),
                 role: "agent",
