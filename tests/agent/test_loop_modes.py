@@ -290,3 +290,23 @@ async def test_agent_loop_review_message_metadata_is_visible_same_turn(tmp_path)
     assert runner.initial_messages[0]["role"] == "system"
     assert "- Name: https://github.com/test/repo" in runner.initial_messages[0]["content"]
     assert "- Type: github" in runner.initial_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_process_system_message_accepts_agent_loop_return_shape(tmp_path) -> None:
+    from nanobot.bus.events import InboundMessage
+
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    runner = CapturingRunner()
+    loop.runner = runner
+    msg = InboundMessage(
+        channel="system",
+        sender_id="subagent",
+        chat_id="websocket:parent",
+        content="subagent result",
+    )
+
+    response = await loop._process_system_message(msg)
+
+    assert response is not None
+    assert response.content == "ok"

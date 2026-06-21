@@ -327,6 +327,9 @@ def replay_transcript_to_ui_messages(
         if ev == "delta":
             if suppress_until_turn_end:
                 continue
+            kind = rec.get("kind")
+            if kind == "review_thinking":
+                continue
             chunk = rec.get("text")
             if not isinstance(chunk, str):
                 continue

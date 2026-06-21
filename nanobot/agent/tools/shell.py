@@ -21,6 +21,11 @@ from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
 
 _IS_WINDOWS = sys.platform == "win32"
+_CLONE_COMMAND_ERROR = (
+    "Error: Command blocked by safety guard (repository clone commands are disabled). "
+    "Use github_review for GitHub repositories; remote review snapshots are saved only "
+    "under workspace/.nanobot/review_github."
+)
 
 
 # Policy note appended to recoverable workspace-boundary guard errors.
@@ -341,6 +346,9 @@ class ExecTool(Tool):
         """Best-effort safety guard for potentially destructive commands."""
         cmd = command.strip()
         lower = cmd.lower()
+        if self._is_repo_clone_command(lower):
+            logger.warning("exec.clone_blocked cwd={} command={}", cwd, cmd)
+            return _CLONE_COMMAND_ERROR
 
         # allow_patterns take priority over deny_patterns so that users can
         # exempt specific commands (e.g. "rm -rf" inside a build directory)
@@ -399,6 +407,12 @@ class ExecTool(Tool):
 
         return None
 
+    @staticmethod
+    def _is_repo_clone_command(lower_command: str) -> bool:
+        git_clone = r"(?:^|[;&|]\s*)git(?:\s+-c\s+\S+(?:=\S+)?|\s+-c\s+(?:\"[^\"]+\"|'[^']+')|\s+-C\s+(?:\"[^\"]+\"|'[^']+'|\S+))*\s+clone\b"
+        gh_clone = r"(?:^|[;&|]\s*)gh\s+repo\s+clone\b"
+        return bool(re.search(git_clone, lower_command) or re.search(gh_clone, lower_command))
+
     @classmethod
     def _is_benign_device_path(cls, path: str) -> bool:
         """Return True for kernel device files that should never be workspace-blocked."""
@@ -417,3 +431,12 @@ class ExecTool(Tool):
         posix_paths = re.findall(r"(?:^|[\s|>'\"])(/[^\s\"'>;|<]+)", command) # POSIX: /absolute only
         home_paths = re.findall(r"(?:^|[\s>'\"])(~[^\s\"'>;|<]*)", command) # POSIX/Windows home shortcut: ~
         return win_paths + posix_paths + home_paths
+
+
+try:
+    from nanobot.config import schema as _config_schema
+
+    if not getattr(_config_schema.ToolsConfig, "__pydantic_complete__", False):
+        _config_schema._resolve_tool_config_refs()
+except Exception:
+    pass

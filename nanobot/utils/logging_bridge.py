@@ -5,6 +5,8 @@ import logging
 
 from loguru import logger
 
+from nanobot.utils.log_style import event_message
+
 
 class _LoguruBridge(logging.Handler):
     """Route stdlib log records into loguru with consistent formatting."""
@@ -26,8 +28,14 @@ class _LoguruBridge(logging.Handler):
         frame, depth = logging.currentframe(), 2
         while frame and frame.f_code.co_filename == logging.__file__:
             frame, depth = frame.f_back, depth + 1
-        logger.opt(depth=depth, exception=record.exc_info).log(
-            level, "[{lib}] {message}", lib=self.lib_name, message=record.getMessage()
+        logger.opt(depth=depth, exception=record.exc_info, colors=True).log(
+            level,
+            event_message(
+                "lib.log",
+                status="warning" if record.levelno >= logging.WARNING else "neutral",
+                lib=self.lib_name,
+                message=record.getMessage(),
+            ),
         )
 
 

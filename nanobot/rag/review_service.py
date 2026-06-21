@@ -28,6 +28,7 @@ from nanobot.rag.utils import (
     query_terms,
     rrf_merge,
 )
+from nanobot.utils.log_style import log_event
 
 SOURCE_TYPE = "code_review"
 REMOTE_SOURCE_TYPE = "code_review_github"
@@ -247,12 +248,16 @@ class RepositoryRAGService:
         trace_id = request.trace_id or "no-trace"
         started = time.perf_counter()
         if not request.review_query.strip():
-            logger.info(
-                "rag.review.done 🔎 trace_id={} source_type={} status=empty_query hits=0 context_chars={} elapsed_ms={:.1f}",
-                trace_id,
-                request.source_type,
-                len("No relevant repository review references found."),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "rag.review.done",
+                status="empty_query",
+                trace_id=trace_id,
+                source_type=request.source_type,
+                hits=0,
+                context_chars=len("No relevant repository review references found."),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return RepositoryRAGResult(hits=[], context="No relevant repository review references found.")
 
@@ -262,13 +267,16 @@ class RepositoryRAGService:
             cache_root = self.write_snapshot(request.snapshot_name or request.source_type, request.snapshot_files)
             files = list(self.iter_candidate_files(cache_root))
 
-        logger.info(
-            "rag.review.start trace_id={} source_type={} files={} query_chars={} max_results={}",
-            trace_id,
-            request.source_type,
-            len(files),
-            len(request.review_query),
-            request.max_results or self.options.max_results,
+        log_event(
+            logger,
+            "info",
+            "rag.review.start",
+            status="start",
+            trace_id=trace_id,
+            source_type=request.source_type,
+            files=len(files),
+            query_chars=len(request.review_query),
+            max_results=request.max_results or self.options.max_results,
         )
         await asyncio.to_thread(
             self.sync_files,
@@ -283,28 +291,27 @@ class RepositoryRAGService:
             trace_id=trace_id,
         )
         if request.touched_lines:
-            touched_paths = set(request.touched_lines)
-            for hit in hits:
-                if hit.path in touched_paths:
-                    hit.reason = list(dict.fromkeys(["diff-touched", *hit.reason]))
-                    hit.score += 1.0
-            hits.sort(key=lambda hit: -hit.score)
-            hits = hits[: request.max_results or self.options.max_results]
+            hits = self.rank_touched_line_hits(
+                hits,
+                request.touched_lines,
+                limit=request.max_results or self.options.max_results,
+            )
         context = self.format_review_block(
             hits,
             include_tests=request.include_tests,
             related_tests=request.related_tests,
         )
         status = "success" if hits else "no_hits"
-        logger.info(
-            "rag.review.done {} trace_id={} source_type={} status={} hits={} context_chars={} elapsed_ms={:.1f}",
-            "✅" if hits else "🔎",
-            trace_id,
-            request.source_type,
-            status,
-            len(hits),
-            len(context),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "rag.review.done",
+            status=status,
+            trace_id=trace_id,
+            source_type=request.source_type,
+            hits=len(hits),
+            context_chars=len(context),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return RepositoryRAGResult(hits=hits, context=context, cache_root=cache_root)
 
@@ -317,13 +324,16 @@ class RepositoryRAGService:
             max_file_chars=self.options.max_file_chars,
             skip_embed_filter=should_skip_file_embedding,
         )
-        logger.info(
-            "rag.review.index.done trace_id={} source_type={} files={} chunks={} elapsed_ms={:.1f}",
-            trace_id,
-            source_type,
-            len(files),
-            self.index.count(source_type),
-            (time.perf_counter() - start) * 1000,
+        log_event(
+            logger,
+            "info",
+            "rag.review.index.done",
+            status="done",
+            trace_id=trace_id,
+            source_type=source_type,
+            files=len(files),
+            chunks=self.index.count(source_type),
+            elapsed_ms=f"{(time.perf_counter() - start) * 1000:.1f}",
         )
 
     async def retrieve_hits(
@@ -337,11 +347,16 @@ class RepositoryRAGService:
         start = time.perf_counter()
         terms = query_terms(review_query)
         if not terms:
-            logger.info(
-                "rag.review.search.done 🔎 trace_id={} source_type={} status=no_terms terms=0 hits=0 elapsed_ms={:.1f}",
-                trace_id,
-                source_type,
-                (time.perf_counter() - start) * 1000,
+            log_event(
+                logger,
+                "info",
+                "rag.review.search.done",
+                status="no_terms",
+                trace_id=trace_id,
+                source_type=source_type,
+                terms=0,
+                hits=0,
+                elapsed_ms=f"{(time.perf_counter() - start) * 1000:.1f}",
             )
             return []
         limit = max_results or self.options.max_results
@@ -362,24 +377,52 @@ class RepositoryRAGService:
                 if lane_hits:
                     lanes.append((lane_name, lane_hits))
             raw_hits = rrf_merge(lanes, limit=limit)
-            logger.info(
-                "rag.review.rrf.done trace_id={} lanes={} hits={}",
-                trace_id,
-                len(lanes),
-                len(raw_hits),
+            log_event(
+                logger,
+                "info",
+                "rag.review.rrf.done",
+                status="done",
+                trace_id=trace_id,
+                lanes=len(lanes),
+                hits=len(raw_hits),
             )
         else:
             raw_hits = broad_hits[:limit]
         hits = [self.to_hit(hit, terms) for hit in raw_hits]
-        logger.info(
-            "rag.review.search.done trace_id={} source_type={} terms={} hits={} elapsed_ms={:.1f}",
-            trace_id,
-            source_type,
-            len(terms),
-            len(hits),
-            (time.perf_counter() - start) * 1000,
+        log_event(
+            logger,
+            "info",
+            "rag.review.search.done",
+            status="success" if hits else "no_hits",
+            trace_id=trace_id,
+            source_type=source_type,
+            terms=len(terms),
+            hits=len(hits),
+            elapsed_ms=f"{(time.perf_counter() - start) * 1000:.1f}",
         )
         return hits
+
+    @staticmethod
+    def rank_touched_line_hits(
+        hits: list[RepoReviewHit],
+        touched_lines: dict[str, list[int]],
+        *,
+        limit: int,
+    ) -> list[RepoReviewHit]:
+        touched_paths = set(touched_lines)
+        for hit in hits:
+            lines = touched_lines.get(hit.path, [])
+            if hit.path not in touched_paths:
+                continue
+            reasons = ["diff-touched", *hit.reason]
+            if any(hit.start_line <= line <= hit.end_line for line in lines):
+                reasons.insert(0, "diff-line-overlap")
+                hit.score += 3.0
+            else:
+                hit.score += 1.0
+            hit.reason = list(dict.fromkeys(reasons))
+        hits.sort(key=lambda hit: -hit.score)
+        return hits[:limit]
 
     @staticmethod
     def review_lane_queries(review_query: str) -> list[tuple[str, str]]:

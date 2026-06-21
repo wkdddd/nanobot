@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from typing import Any
 
 from loguru import logger
+
+from nanobot.utils.log_style import log_event
 
 _DASHSCOPE_MAX_INPUT_CHARS = 1024
 
@@ -28,7 +31,7 @@ def create_embedding_client_from_config(
     return EmbeddingClient(
         api_key=api_key,
         model=getattr(config, "model", "text-embedding-v3"),
-        base_url=_config_value(config, "baseUrl", "apiBase")
+        base_url=_config_value(config, "base_url", "baseUrl", "apiBase")
         or "https://dashscope.aliyuncs.com/compatible-mode/v1",
         dimensions=getattr(config, "dimensions", 1024),
         batch_size=_config_value(config, "batch_size", "batchSize") or 25,
@@ -64,6 +67,8 @@ class EmbeddingClient:
         self.batch_size = batch_size
         self.max_input_chars = max(1, int(max_input_chars))
         self._client: Any = None
+        self._auth_failed = False
+        self._auth_error_reported = False
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -83,6 +88,8 @@ class EmbeddingClient:
             if (prepared := self._prepare_input(text)) is not None
         ]
         for i in range(0, len(normalized), self.batch_size):
+            if self._auth_failed:
+                break
             batch = normalized[i: i + self.batch_size]
             batch_indexes = [idx for idx, _ in batch]
             batch_texts = [text for _, text in batch]
@@ -91,11 +98,41 @@ class EmbeddingClient:
                     model=self.model,
                     input=batch_texts,
                     dimensions=self.dimensions,
+                    encoding_format="float",
                 )
                 for original_index, item in zip(batch_indexes, response.data):
                     all_embeddings[original_index] = item.embedding
             except Exception as e:
-                logger.warning("Embedding API call failed: {}", e)
+                if _is_auth_error(e):
+                    self._auth_failed = True
+                    message = (
+                        "Embedding API authentication failed; semantic search is disabled "
+                        "for this process. Check rag.embedding.apiKey or DASHSCOPE_API_KEY. "
+                        f"base_url={self.base_url!r} model={self.model!r} "
+                        f"dimensions={self.dimensions} api_key={_mask_key(self.api_key)!r} "
+                        f"error={e}"
+                    )
+                    log_event(
+                        logger,
+                        "error",
+                        "rag.embedding.auth_failed",
+                        status="failed",
+                        base_url=self.base_url,
+                        model=self.model,
+                        dimensions=self.dimensions,
+                        api_key=_mask_key(self.api_key),
+                        reason=e,
+                    )
+                    self._print_terminal_error_once(message)
+                    break
+                log_event(
+                    logger,
+                    "warning",
+                    "rag.embedding.call_failed",
+                    status="failed",
+                    model=self.model,
+                    reason=e,
+                )
         return all_embeddings
 
     async def embed_query(self, query: str) -> list[float] | None:
@@ -110,3 +147,36 @@ class EmbeddingClient:
         if not prepared:
             return None
         return prepared[: self.max_input_chars]
+
+    def _print_terminal_error_once(self, message: str) -> None:
+        if self._auth_error_reported:
+            return
+        self._auth_error_reported = True
+        try:
+            print(f"[nanobot] ERROR: {message}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+
+def _is_auth_error(error: Exception) -> bool:
+    status_code = getattr(error, "status_code", None)
+    if status_code in {401, 403}:
+        return True
+    body = str(error).lower()
+    return any(
+        marker in body
+        for marker in (
+            "invalid_api_key",
+            "incorrect api key",
+            "apikey-error",
+            "unauthorized",
+            "authentication",
+        )
+    )
+
+
+def _mask_key(api_key: str) -> str:
+    key = str(api_key or "")
+    if len(key) <= 8:
+        return "***" if key else ""
+    return f"{key[:4]}...{key[-4:]}"

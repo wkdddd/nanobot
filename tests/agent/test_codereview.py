@@ -147,6 +147,7 @@ def test_build_code_review_context_uses_github_target_type() -> None:
 
     assert "- Type: github" in prompt
     assert "github_review(action='repo'" in prompt
+    assert "Do NOT clone repositories" in prompt
     assert "repo_review" not in prompt
     assert "github_repo_read" not in prompt
 

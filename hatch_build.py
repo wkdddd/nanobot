@@ -1,15 +1,15 @@
-"""Hatch build hook that bundles the webui (Vite) into nanobot/web/dist.
+"""Hatch build hook that bundles the review webui (Vite) into nanobot/web/dist.
 
 Triggered automatically by `python -m build` (and any other hatch-driven build)
-so published wheels and sdists ship a fresh webui without requiring developers
-to remember `cd webui && bun run build` beforehand.
+so published wheels and sdists ship a fresh review webui without requiring developers
+to remember `cd review-webui && bun run build` beforehand.
 
 Behaviour:
 
 - Skips for editable installs (`pip install -e .`). Editable mode is for Python
-  development; webui contributors use `cd webui && bun run dev` (Vite HMR) and
+  development; webui contributors use `cd review-webui && bun run dev` (Vite HMR) and
   do not need a packaged `dist/`.
-- No-op when `webui/package.json` is absent (e.g. installing from an sdist that
+- No-op when `review-webui/package.json` is absent (e.g. installing from an sdist that
   already contains a prebuilt `nanobot/web/dist/`).
 - Skips when `NANOBOT_SKIP_WEBUI_BUILD=1` is set.
 - Skips when `nanobot/web/dist/index.html` already exists, unless
@@ -33,7 +33,7 @@ class WebUIBuildHook(BuildHookInterface):
 
     def initialize(self, version: str, build_data: dict) -> None:  # noqa: D401
         root = Path(self.root)
-        webui_dir = root / "webui"
+        webui_dir = root / "review-webui"
         package_json = webui_dir / "package.json"
         dist_dir = root / "nanobot" / "web" / "dist"
         index_html = dist_dir / "index.html"
@@ -44,7 +44,7 @@ class WebUIBuildHook(BuildHookInterface):
         if self.target_name == "wheel" and version == "editable":
             self.app.display_info(
                 "[webui-build] skipped for editable install "
-                "(use `cd webui && bun run build` to bundle webui manually)"
+                "(use `cd review-webui && bun run build` to bundle webui manually)"
             )
             return
 
@@ -54,7 +54,7 @@ class WebUIBuildHook(BuildHookInterface):
 
         if not package_json.is_file():
             self.app.display_info(
-                "[webui-build] no webui/ source tree, assuming prebuilt nanobot/web/dist/"
+                "[webui-build] no review-webui/ source tree, assuming prebuilt nanobot/web/dist/"
             )
             return
 
@@ -80,7 +80,7 @@ class WebUIBuildHook(BuildHookInterface):
         if not index_html.is_file():
             raise RuntimeError(
                 f"[webui-build] build finished but {index_html} is missing; "
-                "check webui/vite.config.ts outDir."
+                "check review-webui/vite.config.ts outDir."
             )
         self.app.display_info(f"[webui-build] webui ready at {dist_dir}")
 

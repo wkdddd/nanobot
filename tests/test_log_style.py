@@ -1,0 +1,56 @@
+from __future__ import annotations
+
+import logging
+
+from loguru import logger
+
+from nanobot.utils.log_style import event_message
+from nanobot.utils.logging_bridge import redirect_lib_logging
+
+
+class _LogSink:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def write(self, message: str) -> None:
+        self.messages.append(message)
+
+    @property
+    def text(self) -> str:
+        return "".join(self.messages)
+
+
+def test_log_event_message_uses_status_symbol_and_key_values() -> None:
+    message = event_message(
+        "review.evidence.local.done",
+        status="success",
+        trace_id="trace-1",
+        hits=2,
+    )
+
+    assert message.startswith("<green>✓</green> review.evidence.local.done")
+    assert "status=success" in message
+    assert "trace_id=trace-1" in message
+    assert "hits=2" in message
+
+
+def test_logging_bridge_routes_stdlib_once_with_structured_event() -> None:
+    name = "nanobot.test.bridge"
+    lib_logger = logging.getLogger(name)
+    lib_logger.handlers = []
+    lib_logger.propagate = True
+    sink = _LogSink()
+    handler_id = logger.add(sink, level="INFO", format="{message}")
+    try:
+        redirect_lib_logging(name, level="WARNING")
+        redirect_lib_logging(name, level="WARNING")
+        lib_logger.warning("socket closed")
+    finally:
+        logger.remove(handler_id)
+        lib_logger.handlers = []
+        lib_logger.propagate = True
+
+    assert sink.text.count("lib.log") == 1
+    assert "status=warning" in sink.text
+    assert f"lib={name}" in sink.text
+    assert "message='socket closed'" in sink.text

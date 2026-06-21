@@ -14,11 +14,12 @@ from typing import Any
 
 import httpx
 from loguru import logger
-from pydantic import AliasChoices, Field
+from pydantic import Field
 
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_repo
 from nanobot.config.schema import Base
 from nanobot.rag.review_service import DEFAULT_TEXT_EXTS
+from nanobot.utils.log_style import log_event
 
 _DEFAULT_TEXT_EXTS = DEFAULT_TEXT_EXTS
 
@@ -29,7 +30,6 @@ class GitHubRepoConfig(Base):
     enable: bool = True
     token: str = Field(
         default="",
-        validation_alias=AliasChoices("token", "apiKey", "api_key"),
         serialization_alias="token",
     )
     timeout: int = 30
@@ -91,7 +91,13 @@ class GitHubRepoReader:
             source = "workspace config.json" if workspace_token else (
                 "runtime config" if self.config.token.strip() else "GITHUB_TOKEN"
             )
-            logger.info("repo_review github token loaded source={}", source)
+            log_event(
+                logger,
+                "info",
+                "repo_review.github.token.loaded",
+                status="success",
+                source=source,
+            )
             return token
         try:
             result = await asyncio.to_thread(
@@ -128,10 +134,9 @@ class GitHubRepoReader:
             if isinstance(github_repo, dict):
                 candidates.append(github_repo)
         for item in candidates:
-            for key in ("token", "apiKey", "api_key"):
-                value = item.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+            value = item.get("token")
+            if isinstance(value, str) and value.strip():
+                return value.strip()
         return ""
 
     async def _api_get(
@@ -152,19 +157,25 @@ class GitHubRepoReader:
             async with httpx.AsyncClient(timeout=self.config.timeout) as client:
                 response = await client.get(url, headers=headers, params=params or {})
         except httpx.TimeoutException:
-            logger.warning(
-                "repo_review.github.api.timeout trace_id={} endpoint={} timeout={}",
-                trace_id,
-                endpoint,
-                self.config.timeout,
+            log_event(
+                logger,
+                "warning",
+                "repo_review.github.api.timeout",
+                status="failed",
+                trace_id=trace_id,
+                endpoint=endpoint,
+                timeout=self.config.timeout,
             )
             return f"Error: request to GitHub API timed out ({self.config.timeout}s)."
         except httpx.HTTPError as exc:
-            logger.warning(
-                "repo_review.github.api.http_error trace_id={} endpoint={} reason={}",
-                trace_id,
-                endpoint,
-                exc,
+            log_event(
+                logger,
+                "warning",
+                "repo_review.github.api.http_error",
+                status="failed",
+                trace_id=trace_id,
+                endpoint=endpoint,
+                reason=exc,
             )
             return f"Error: HTTP request failed: {exc}"
 
@@ -173,40 +184,59 @@ class GitHubRepoReader:
             if remaining == "0":
                 reset = response.headers.get("X-RateLimit-Reset", "unknown")
                 auth_hint = " Set GITHUB_TOKEN for higher limits (5000 req/hr)." if not token else ""
-                logger.warning(
-                    "repo_review.github.api.rate_limited trace_id={} endpoint={} reset={} authenticated={}",
-                    trace_id,
-                    endpoint,
-                    reset,
-                    bool(token),
+                log_event(
+                    logger,
+                    "warning",
+                    "repo_review.github.api.rate_limited",
+                    status="warning",
+                    trace_id=trace_id,
+                    endpoint=endpoint,
+                    reset=reset,
+                    authenticated=bool(token),
                 )
                 return f"Error: GitHub API rate limited. Resets at timestamp {reset}.{auth_hint}"
-            logger.warning(
-                "repo_review.github.api.forbidden trace_id={} endpoint={} authenticated={}",
-                trace_id,
-                endpoint,
-                bool(token),
+            log_event(
+                logger,
+                "warning",
+                "repo_review.github.api.forbidden",
+                status="failed",
+                trace_id=trace_id,
+                endpoint=endpoint,
+                authenticated=bool(token),
             )
             return "Error: access denied (403). The repo may be private; ensure GITHUB_TOKEN is set."
         if response.status_code == 404:
-            logger.warning("repo_review.github.api.not_found trace_id={} endpoint={}", trace_id, endpoint)
+            log_event(
+                logger,
+                "warning",
+                "repo_review.github.api.not_found",
+                status="failed",
+                trace_id=trace_id,
+                endpoint=endpoint,
+            )
             return "Error: repository or path not found. Check the URL and access permissions."
         if response.status_code >= 400:
-            logger.warning(
-                "repo_review.github.api.error trace_id={} endpoint={} status={} body={}",
-                trace_id,
-                endpoint,
-                response.status_code,
-                response.text[:200],
+            log_event(
+                logger,
+                "warning",
+                "repo_review.github.api.error",
+                status="failed",
+                trace_id=trace_id,
+                endpoint=endpoint,
+                status_code=response.status_code,
+                body=response.text[:200],
             )
             return f"Error: GitHub API returned {response.status_code}: {response.text[:200]}"
-        logger.info(
-            "repo_review.github.api.success ✅ trace_id={} endpoint={} status={} authenticated={} elapsed_ms={:.1f}",
-            trace_id,
-            endpoint,
-            response.status_code,
-            bool(token),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.api.success",
+            status="success",
+            trace_id=trace_id,
+            endpoint=endpoint,
+            status_code=response.status_code,
+            authenticated=bool(token),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return response.json()
 
@@ -228,13 +258,15 @@ class GitHubRepoReader:
             f"License: {(data.get('license') or {}).get('spdx_id', 'unknown')}",
             f"Visibility: {data.get('visibility', 'unknown')}",
         ]
-        logger.info(
-            "repo_review.github.meta.done ✅ trace_id={} repo={}/{} chars={} elapsed_ms={:.1f}",
-            trace_id,
-            owner,
-            repo,
-            len("\n".join(lines)),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.meta.done",
+            status="success",
+            trace_id=trace_id,
+            repo=f"{owner}/{repo}",
+            chars=len("\n".join(lines)),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return "\n".join(lines)
 
@@ -285,15 +317,17 @@ class GitHubRepoReader:
             header += " [GitHub: tree was truncated due to size]"
         header += f"\n{'-' * len(header)}\n"
         result = header + "\n".join(entries) if entries else header + "(no matching entries)"
-        logger.info(
-            "repo_review.github.tree.done 🌳 trace_id={} repo={}/{} ref={} entries={} chars={} elapsed_ms={:.1f}",
-            trace_id,
-            owner,
-            repo,
-            ref,
-            len(entries),
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.tree.done",
+            status="success",
+            trace_id=trace_id,
+            repo=f"{owner}/{repo}",
+            ref=ref,
+            entries=len(entries),
+            chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
@@ -321,15 +355,18 @@ class GitHubRepoReader:
                 suffix = "/" if item.get("type") == "dir" else ""
                 lines.append(f"  {item.get('name', '')}{suffix}")
             result = "\n".join(lines)
-            logger.info(
-                "repo_review.github.file.done 📄 trace_id={} repo={}/{} path={} kind=directory entries={} chars={} elapsed_ms={:.1f}",
-                trace_id,
-                owner,
-                repo,
-                path,
-                len(lines) - 1,
-                len(result),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "repo_review.github.file.done",
+                status="success",
+                trace_id=trace_id,
+                repo=f"{owner}/{repo}",
+                path=path,
+                kind="directory",
+                entries=len(lines) - 1,
+                chars=len(result),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return result
 
@@ -358,16 +395,19 @@ class GitHubRepoReader:
 
         header = f"File: {path} ({size} bytes, sha: {data.get('sha', '?')[:8]})\n{'-' * 40}\n"
         result = header + decoded + truncated_note
-        logger.info(
-            "repo_review.github.file.done 📄 trace_id={} repo={}/{} path={} kind=file size={} chars={} truncated={} elapsed_ms={:.1f}",
-            trace_id,
-            owner,
-            repo,
-            path,
-            size,
-            len(result),
-            bool(truncated_note),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.file.done",
+            status="success",
+            trace_id=trace_id,
+            repo=f"{owner}/{repo}",
+            path=path,
+            kind="file",
+            size=size,
+            chars=len(result),
+            truncated=bool(truncated_note),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
@@ -392,15 +432,17 @@ class GitHubRepoReader:
                 lines.append(patch[:8000])
                 lines.append("```")
         result = "\n".join(lines)
-        logger.info(
-            "repo_review.github.diff.done 🔎 trace_id={} repo={}/{} pr={} files={} chars={} elapsed_ms={:.1f}",
-            trace_id,
-            owner,
-            repo,
-            pr_number,
-            min(len(data), self.config.max_patch_files),
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.diff.done",
+            status="success",
+            trace_id=trace_id,
+            repo=f"{owner}/{repo}",
+            pr=pr_number,
+            files=min(len(data), self.config.max_patch_files),
+            chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
@@ -456,13 +498,15 @@ class GitHubRepoReader:
                 files[path] = content
             if len(files) >= limit:
                 break
-        logger.info(
-            "repo_review github fetched files repo={}/{} ref={} files={} limit={}",
-            owner,
-            repo_name,
-            ref,
-            len(files),
-            limit,
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.fetched_files",
+            status="success",
+            repo=f"{owner}/{repo_name}",
+            ref=ref,
+            files=len(files),
+            limit=limit,
         )
         return f"{owner}/{repo_name}@{ref}", files
 
@@ -511,14 +555,16 @@ class GitHubRepoReader:
                 content = patch
             if content is not None:
                 files[filename] = content
-        logger.info(
-            "repo_review.github.fetched_pr_files ✅ trace_id={} repo={}/{} pr={} files={} touched_files={}",
-            trace_id,
-            owner,
-            repo_name,
-            pr_number,
-            len(files),
-            len(touched),
+        log_event(
+            logger,
+            "info",
+            "repo_review.github.fetched_pr_files",
+            status="success",
+            trace_id=trace_id,
+            repo=f"{owner}/{repo_name}",
+            pr=pr_number,
+            files=len(files),
+            touched_files=len(touched),
         )
         return f"{owner}/{repo_name}#{pr_number}", files, touched
 
@@ -572,12 +618,15 @@ class GitHubRepoReader:
                 files[path] = decoded
                 if len(files) >= limit:
                     break
-            logger.info(
-                "repo_review.github.pygithub.fetched_files ✅ trace_id={} repo={} ref={} files={}",
-                trace_id,
-                repo,
-                ref_name,
-                len(files),
+            log_event(
+                logger,
+                "info",
+                "repo_review.github.pygithub.fetched_files",
+                status="success",
+                trace_id=trace_id,
+                repo=repo,
+                ref=ref_name,
+                files=len(files),
             )
             return f"{repo_slug}@{ref_name}", files
         except Exception as exc:
@@ -614,13 +663,16 @@ class GitHubRepoReader:
                 except Exception:
                     if patch:
                         files[filename] = patch
-            logger.info(
-                "repo_review.github.pygithub.fetched_pr_files ✅ trace_id={} repo={} pr={} files={} touched_files={}",
-                trace_id,
-                repo,
-                pr_number,
-                len(files),
-                len(touched),
+            log_event(
+                logger,
+                "info",
+                "repo_review.github.pygithub.fetched_pr_files",
+                status="success",
+                trace_id=trace_id,
+                repo=repo,
+                pr=pr_number,
+                files=len(files),
+                touched_files=len(touched),
             )
             return f"{repo_slug}#{pr_number}", files, touched
         except Exception as exc:
@@ -650,3 +702,12 @@ class GitHubRepoReader:
                 logger.warning("repo_review github decode failed repo={}/{} path={}", owner, repo, path)
                 return None
         return str(content) if content else None
+
+
+try:
+    from nanobot.config import schema as _config_schema
+
+    if not getattr(_config_schema.ToolsConfig, "__pydantic_complete__", False):
+        _config_schema._resolve_tool_config_refs()
+except Exception:
+    pass

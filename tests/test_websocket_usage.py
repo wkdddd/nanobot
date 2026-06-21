@@ -4,8 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from nanobot.agent.loop import AgentLoop
+from nanobot.agent.loop import AgentLoop, TurnContext
+from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
+from nanobot.channels.manager import ChannelManager
 from nanobot.channels.websocket import WebSocketChannel
 from nanobot.session.manager import SessionManager
 
@@ -249,3 +251,104 @@ async def test_websocket_message_rejects_old_review_action(tmp_path, monkeypatch
     assert handled == []
     assert conn.sent[-1]["event"] == "error"
     assert "Unknown review action 'full_repo'" in conn.sent[-1]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_websocket_stream_delta_includes_review_kind() -> None:
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+    )
+    conn = _FakeConnection()
+    channel._attach(conn, "chat")
+
+    await channel.send_delta(
+        "chat",
+        "## Report",
+        {"_stream_id": "s1", "_stream_kind": "review_report"},
+    )
+    await channel.send_delta(
+        "chat",
+        "",
+        {"_stream_end": True, "_stream_id": "s1", "_stream_kind": "review_report"},
+    )
+
+    assert conn.sent[0]["event"] == "delta"
+    assert conn.sent[0]["kind"] == "review_report"
+    assert conn.sent[1]["event"] == "stream_end"
+    assert conn.sent[1]["kind"] == "review_report"
+
+
+def test_stream_coalescing_keeps_review_stream_kinds_separate() -> None:
+    manager = ChannelManager.__new__(ChannelManager)
+    manager.bus = MessageBus()
+    manager.bus.outbound.put_nowait(OutboundMessage(
+        channel="websocket",
+        chat_id="chat",
+        content="report",
+        metadata={
+            "_stream_delta": True,
+            "_stream_id": "report",
+            "_stream_kind": "review_report",
+        },
+    ))
+    first = OutboundMessage(
+        channel="websocket",
+        chat_id="chat",
+        content="thinking",
+        metadata={
+            "_stream_delta": True,
+            "_stream_id": "thinking",
+            "_stream_kind": "review_thinking",
+        },
+    )
+
+    merged, pending = manager._coalesce_stream_deltas(first)
+
+    assert merged.content == "thinking"
+    assert merged.metadata["_stream_kind"] == "review_thinking"
+    assert len(pending) == 1
+    assert pending[0].metadata["_stream_kind"] == "review_report"
+
+
+@pytest.mark.asyncio
+async def test_review_replaced_content_streams_report_without_duplicate_message() -> None:
+    class NoTools:
+        def get(self, name: str):
+            return None
+
+    loop = AgentLoop.__new__(AgentLoop)
+    loop.bus = MessageBus()
+    loop.tools = NoTools()
+    msg = SimpleNamespace(
+        channel="websocket",
+        chat_id="chat",
+        sender_id="client",
+        session_key="websocket:chat",
+        metadata={
+            "_wants_stream": True,
+            "review_target": "repo",
+        },
+    )
+    ctx = TurnContext(
+        msg=msg,
+        session_key="websocket:chat",
+        state=None,  # type: ignore[arg-type]
+        turn_id="turn",
+        final_content="## Code Review Report: repo",
+        stop_reason="stop",
+        content_replaced=True,
+    )
+
+    result = await loop._state_respond(ctx)
+
+    first = loop.bus.outbound.get_nowait()
+    second = loop.bus.outbound.get_nowait()
+    assert result == "ok"
+    assert ctx.outbound is None
+    assert first.content == "## Code Review Report: repo"
+    assert first.metadata["_stream_kind"] == "review_report"
+    assert first.metadata["_stream_delta"] is True
+    assert second.content == ""
+    assert second.metadata["_stream_kind"] == "review_report"
+    assert second.metadata["_stream_end"] is True

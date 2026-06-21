@@ -11,11 +11,11 @@
 docs/superpowers/
 docs/plans/
 
-# webui (monorepo frontend)
-webui/node_modules/
-webui/dist/
-webui/coverage/
-webui/.vite/
+# review webui (monorepo frontend)
+review-webui/node_modules/
+review-webui/dist/
+review-webui/coverage/
+review-webui/.vite/
 *.tsbuildinfo
 
 # Python bytecode & caches
@@ -104,6 +104,5 @@ requirement.md
 
 trae大赛html/
 
-review-webui
 
 .trae

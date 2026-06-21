@@ -1118,7 +1118,7 @@ class WebSocketChannel(BaseChannel):
                         review["target_paths"] = review_target_paths
                     dup["review"] = review
             append_transcript_object(sk, dup)
-        except (ValueError, TypeError) as e:
+        except (OSError, ValueError, TypeError) as e:
             self.logger.warning("webui transcript append failed: {}", e)
 
     def _augment_transcript_user_media(self, paths: list[str]) -> list[dict[str, Any]]:
@@ -2033,6 +2033,8 @@ class WebSocketChannel(BaseChannel):
             }
         if meta.get("_stream_id") is not None:
             body["stream_id"] = meta["_stream_id"]
+        if meta.get("_stream_kind") is not None:
+            body["kind"] = str(meta["_stream_kind"])
         self._try_append_webui_transcript(chat_id, body)
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:

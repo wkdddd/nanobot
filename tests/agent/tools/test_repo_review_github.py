@@ -8,7 +8,8 @@ from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoConfig
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_pr_target, parse_repo
-from nanobot.agent.tools.repo_review import GitHubReviewTool, LocalReviewTool
+from nanobot.agent.tools.github_review import GitHubReviewTool
+from nanobot.agent.tools.local_review import LocalReviewTool
 from nanobot.config.schema import Config
 from nanobot.rag.review_service import rrf_merge
 from nanobot.rag.utils import IndexedChunk, IndexedHit
@@ -38,20 +39,6 @@ def test_repo_review_github_token_loads_from_tools_config() -> None:
     )
 
     assert config.tools.github_repo.token == "ghp_config_token"
-
-
-def test_repo_review_github_api_key_alias_loads_from_tools_config() -> None:
-    config = Config.model_validate(
-        {
-            "tools": {
-                "githubRepo": {
-                    "apiKey": "ghp_alias_token",
-                }
-            }
-        }
-    )
-
-    assert config.tools.github_repo.token == "ghp_alias_token"
 
 
 def test_parse_github_repo_from_url_and_owner_repo() -> None:
@@ -268,4 +255,5 @@ async def test_github_api_success_logs_structured_event(
     assert result == {"ok": True}
     assert "repo_review.github.api.success" in sink.text
     assert "trace_id=trace-gh" in sink.text
-    assert "status=200" in sink.text
+    assert "status=success" in sink.text
+    assert "status_code=200" in sink.text

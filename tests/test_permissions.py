@@ -27,6 +27,21 @@ class TestExecDenyListPolicy:
                 "Error: Command blocked by deny pattern filter"
             )
 
+    def test_repository_clone_commands_are_blocked(self, tmp_path: Path):
+        tool = ExecTool(working_dir=str(tmp_path))
+
+        for command in (
+            "git clone https://github.com/test/repo",
+            "git -C . clone https://github.com/test/repo",
+            "gh repo clone test/repo",
+        ):
+            result = _guard(tool, command, tmp_path)
+            assert result is not None
+            assert "repository clone commands are disabled" in result
+
+        assert _guard(tool, "git status", tmp_path) is None
+        assert _guard(tool, "git diff -- src/app.py", tmp_path) is None
+
     def test_user_deny_patterns_block_matching_commands(self, tmp_path: Path):
         tool = ExecTool(
             working_dir=str(tmp_path),

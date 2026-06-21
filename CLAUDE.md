@@ -19,11 +19,9 @@ ruff check nanobot/
 # Format ONLY files you changed (never the whole codebase — see Gotchas)
 ruff format <files-you-changed>
 
-# WebUI: dev server (proxies API/WS to gateway :8765), build, test
-cd webui && bun run dev      # or NANOBOT_API_URL=... bun run dev
-cd webui && bun run build
-cd webui && bun run test
-cd webui && bun run lint
+# Review WebUI: dev server (proxies API/WS to gateway :8765), build
+cd review-webui && bun run dev      # or NANOBOT_API_URL=... bun run dev
+cd review-webui && bun run build
 
 # Gateway
 nanobot gateway
@@ -51,7 +49,7 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 - **Config** (`nanobot/config/schema.py`, `loader.py`): Pydantic-based configuration loaded from `~/.nanobot/config.json`. Supports `${VAR}` env-var substitution (no default-value syntax; missing var raises `ValueError`).
 - **Prompt Templates** (`nanobot/templates/`): Jinja2 markdown files that define agent behavior. Changes here alter agent behavior as directly as changing Python code.
 - **Skills** (`nanobot/skills/`): Built-in skill definitions (markdown + YAML frontmatter). Agent know-how should be added as skills, not hardcoded into the agent loop.
-- **WebUI** (`webui/`): Vite + React + Tailwind SPA. Build outputs to `nanobot/web/dist/` (bundled into the Python wheel, git-ignored).
+- **Review WebUI** (`review-webui/`): Vite + React + Tailwind SPA. Build outputs to `nanobot/web/dist/` (bundled into the Python wheel).
 - **API Server** (`nanobot/api/server.py`): OpenAI-compatible HTTP API (`/v1/chat/completions`, `/v1/models`).
 
 ### Entry Points

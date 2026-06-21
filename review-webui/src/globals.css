@@ -1,0 +1,128 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens: warm cream palette ── */
+@layer base {
+  :root {
+    --background: 40 20% 97%;
+    --foreground: 30 10% 15%;
+    --card: 40 15% 99%;
+    --card-foreground: 30 10% 15%;
+    --popover: 40 15% 99%;
+    --popover-foreground: 30 10% 15%;
+    --primary: 25 35% 35%;
+    --primary-foreground: 40 20% 97%;
+    --secondary: 40 12% 93%;
+    --secondary-foreground: 30 10% 20%;
+    --muted: 40 10% 90%;
+    --muted-foreground: 30 8% 45%;
+    --accent: 35 60% 55%;
+    --accent-foreground: 30 10% 15%;
+    --destructive: 0 60% 50%;
+    --destructive-foreground: 40 20% 97%;
+    --border: 40 10% 88%;
+    --input: 40 10% 88%;
+    --ring: 25 35% 35%;
+    --radius: 0.5rem;
+
+    /* Severity palette */
+    --severity-critical: 0 72% 51%;
+    --severity-high: 24 85% 53%;
+    --severity-medium: 45 90% 51%;
+    --severity-low: 210 60% 55%;
+
+    /* Sidebar */
+    --sidebar: 40 18% 95%;
+    --sidebar-foreground: 30 10% 15%;
+    --sidebar-accent: 40 12% 91%;
+    --sidebar-accent-foreground: 30 10% 20%;
+    --sidebar-border: 40 10% 88%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  ::selection {
+    @apply bg-primary/15;
+  }
+}
+
+@layer utilities {
+  /* Markdown body styles */
+  .markdown-content > :first-child {
+    @apply mt-0;
+  }
+  .markdown-content > :last-child {
+    @apply mb-0;
+  }
+
+  .markdown-content {
+    --tw-prose-body: hsl(var(--foreground));
+    --tw-prose-headings: hsl(var(--foreground));
+    --tw-prose-bold: hsl(var(--foreground));
+    --tw-prose-lead: hsl(var(--foreground));
+  }
+
+  /* CJK-friendly line-height */
+  :lang(zh), :lang(zh-CN), :lang(zh-TW), :lang(ja), :lang(ko) {
+    --cjk-line-height: 1.8;
+  }
+  :root {
+    --cjk-line-height: 1.625;
+  }
+
+  /* Subtle scrollbar */
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background-color: hsl(var(--muted-foreground) / 0.3);
+    border-radius: 9999px;
+  }
+  .scrollbar-track-transparent {
+    scrollbar-gutter: stable;
+  }
+  .scrollbar-track-transparent::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  /* Paper texture overlay for cards */
+  .paper-texture {
+    background-image:
+      radial-gradient(ellipse at 20% 50%, hsl(40 20% 96% / 0.4) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, hsl(35 15% 95% / 0.3) 0%, transparent 50%);
+  }
+
+  /* Subtle left border accent for cards */
+  .card-accent-left {
+    border-left: 3px solid hsl(var(--accent));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

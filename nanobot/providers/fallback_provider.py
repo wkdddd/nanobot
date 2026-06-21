@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.utils.log_style import log_event
 
 # Circuit breaker tuned to match OpenAICompatProvider's Responses API breaker.
 _PRIMARY_FAILURE_THRESHOLD = 3
@@ -149,28 +150,48 @@ class FallbackProvider(LLMProvider):
                 return response
 
             if has_streamed is not None and has_streamed[0]:
-                logger.warning(
-                    "Primary model error but content already streamed; skipping failover"
+                log_event(
+                    logger,
+                    "warning",
+                    "provider.fallback.skipped",
+                    status="warning",
+                    reason="content_already_streamed",
+                    primary_model=primary_model,
                 )
                 return response
 
             if not self._should_fallback(response):
-                logger.warning(
-                    "Primary model '{}' returned non-fallbackable error: {}",
-                    primary_model,
-                    (response.content or "")[:120],
+                log_event(
+                    logger,
+                    "warning",
+                    "provider.fallback.skipped",
+                    status="warning",
+                    reason="non_fallbackable_error",
+                    primary_model=primary_model,
+                    error=(response.content or "")[:120],
                 )
                 return response
 
             self._primary_failures += 1
             if self._primary_failures >= _PRIMARY_FAILURE_THRESHOLD:
                 self._primary_tripped_at = time.monotonic()
-                logger.warning(
-                    "Primary model '{}' circuit open after {} consecutive failures",
-                    primary_model, self._primary_failures,
+                log_event(
+                    logger,
+                    "warning",
+                    "provider.primary.circuit_opened",
+                    status="warning",
+                    primary_model=primary_model,
+                    failures=self._primary_failures,
                 )
         else:
-            logger.debug("Primary model '{}' circuit open; skipping", primary_model)
+            log_event(
+                logger,
+                "debug",
+                "provider.primary.skipped",
+                status="skip",
+                reason="circuit_open",
+                primary_model=primary_model,
+            )
 
         last_response: LLMResponse | None = None
         primary_skipped = not self._primary_available()
@@ -179,25 +200,45 @@ class FallbackProvider(LLMProvider):
             if has_streamed is not None and has_streamed[0]:
                 break
             if idx == 0 and primary_skipped:
-                logger.info(
-                    "Primary model '{}' circuit open, trying fallback '{}'",
-                    primary_model, fallback_model,
+                log_event(
+                    logger,
+                    "info",
+                    "provider.fallback.trying",
+                    status="start",
+                    reason="primary_circuit_open",
+                    primary_model=primary_model,
+                    fallback_model=fallback_model,
                 )
             elif idx == 0:
-                logger.info(
-                    "Primary model '{}' failed, trying fallback '{}'",
-                    primary_model, fallback_model,
+                log_event(
+                    logger,
+                    "info",
+                    "provider.fallback.trying",
+                    status="start",
+                    reason="primary_failed",
+                    primary_model=primary_model,
+                    fallback_model=fallback_model,
                 )
             else:
-                logger.info(
-                    "Fallback '{}' also failed, trying next fallback '{}'",
-                    self._fallback_presets[idx - 1].model, fallback_model,
+                log_event(
+                    logger,
+                    "info",
+                    "provider.fallback.trying",
+                    status="start",
+                    reason="previous_fallback_failed",
+                    previous_model=self._fallback_presets[idx - 1].model,
+                    fallback_model=fallback_model,
                 )
             try:
                 fallback_provider = self._provider_factory(fallback)
             except Exception as exc:
-                logger.warning(
-                    "Failed to create provider for fallback '{}': {}", fallback_model, exc
+                log_event(
+                    logger,
+                    "warning",
+                    "provider.fallback.create_failed",
+                    status="failed",
+                    fallback_model=fallback_model,
+                    reason=exc,
                 )
                 continue
 
@@ -222,22 +263,32 @@ class FallbackProvider(LLMProvider):
                         kwargs[name] = value
 
             if fallback_response.finish_reason != "error":
-                logger.info(
-                    "Fallback '{}' succeeded after primary '{}' failed",
-                    fallback_model, primary_model,
+                log_event(
+                    logger,
+                    "info",
+                    "provider.fallback.succeeded",
+                    status="success",
+                    fallback_model=fallback_model,
+                    primary_model=primary_model,
                 )
                 return fallback_response
 
             last_response = fallback_response
-            logger.warning(
-                "Fallback '{}' also failed: {}",
-                fallback_model,
-                (fallback_response.content or "")[:120],
+            log_event(
+                logger,
+                "warning",
+                "provider.fallback.failed",
+                status="failed",
+                fallback_model=fallback_model,
+                error=(fallback_response.content or "")[:120],
             )
 
-        logger.warning(
-            "All {} fallback model(s) failed",
-            len(self._fallback_presets),
+        log_event(
+            logger,
+            "warning",
+            "provider.fallback.all_failed",
+            status="failed",
+            count=len(self._fallback_presets),
         )
         # Return the last error response we saw (primary or last fallback).
         if last_response is not None:

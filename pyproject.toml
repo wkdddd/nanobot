@@ -142,7 +142,7 @@ include = [
     "nanobot/skills/**/*.sh",
     "nanobot/web/dist/**/*",
 ]
-# nanobot/web/dist/ is produced by `cd webui && bun run build` and is
+# nanobot/web/dist/ is produced by `cd review-webui && bun run build` and is
 # git-ignored. List it as an artifact so hatch ships it in both wheel and
 # sdist even though VCS does not track it.
 artifacts = [
@@ -158,6 +158,7 @@ packages = ["nanobot"]
 [tool.hatch.build.targets.sdist]
 include = [
     "nanobot/",
+    "review-webui/",
     "nanobot/web/dist/",
     "hatch_build.py",
     "README.md",

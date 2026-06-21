@@ -35,8 +35,9 @@ Do not use this skill when:
   - `github_review(action="meta", target_repo="owner/repo")`
   - `github_review(action="tree", target_repo="owner/repo", tree_pattern="*.py", tree_limit=500)`
   - `github_review(action="file", target_repo="owner/repo", repo_path="README.md")`
-- If deep full-repository analysis is needed, clone read-only or otherwise get source files locally, then apply the local workflow.
+- If deep full-repository analysis is needed, use `github_review(action="repo", target_repo="owner/repo")`; it stores remote snapshots only in the fixed workspace `.nanobot/review_github` cache.
 - GitHub mode reads metadata, tree entries, and file contents through the GitHub API; it does not perform RAG over the remote repository.
+- Do not run `git clone` or `gh repo clone` for review access unless the user explicitly asks outside the review workflow.
 
 ## Rules
 
@@ -47,7 +48,7 @@ Do not use this skill when:
 - Read source files that establish the directory map, entry points, and call chain.
 - Keep explanations beginner-friendly when the user is learning.
 - Mention uncertainty clearly.
-- If the repository URL has not been cloned or fetched yet, first get access to the source files before applying this workflow.
+- If the repository URL has not been fetched yet, first use `github_review` to access the needed source files before applying this workflow.
 
 ## Output
 

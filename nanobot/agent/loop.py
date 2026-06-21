@@ -47,6 +47,7 @@ from nanobot.utils.artifacts import generated_image_paths_from_messages
 from nanobot.utils.document import extract_documents
 from nanobot.utils.helpers import image_placeholder_text
 from nanobot.utils.helpers import truncate_text as truncate_text_fn
+from nanobot.utils.log_style import log_event
 from nanobot.utils.runtime import EMPTY_FINAL_RESPONSE_MESSAGE
 from nanobot.utils.session_attachments import merge_turn_media_into_last_assistant
 from nanobot.utils.webui_titles import mark_webui_session, maybe_generate_webui_title_after_turn
@@ -118,6 +119,17 @@ class TurnContext:
     turn_latency_ms: int | None = None
 
     trace: list[StateTraceEntry] = field(default_factory=list)
+
+
+def _is_review_turn(metadata: dict[str, Any] | None) -> bool:
+    meta = metadata or {}
+    return bool(meta.get(ReviewMetaKey.TARGET) or meta.get("review_target"))
+
+
+def _stream_chunks(text: str, *, chunk_size: int = 2048) -> list[str]:
+    if not text:
+        return [""]
+    return [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]
 
 
 class AgentLoop:
@@ -408,7 +420,14 @@ class AgentLoop:
                 self.model,
                 model_preset if model_preset is not None else self.model_preset,
             )
-        logger.info("Runtime model switched for next turn: {} -> {}", old_model, model)
+        log_event(
+            logger,
+            "info",
+            "agent.model.switched",
+            status="success",
+            old_model=old_model,
+            model=model,
+        )
 
     def _refresh_provider_snapshot(self) -> None:
         if self._provider_snapshot_loader is None:
@@ -480,7 +499,14 @@ class AgentLoop:
         loader = ToolLoader()
         registered = loader.load(ctx, self.tools)
 
-        logger.info("Registered {} tools: {}", len(registered), registered)
+        log_event(
+            logger,
+            "info",
+            "agent.tools.registered",
+            status="success",
+            count=len(registered),
+            tools=",".join(registered),
+        )
 
     def _build_review_judge(self) -> ReviewJudge | None:
         judge_settings = getattr(self.review_config, "judge", None)
@@ -904,7 +930,7 @@ class AgentLoop:
         
         self._running = True
         await self._connect_mcp()
-        logger.info("Agent loop started")
+        log_event(logger, "info", "agent.loop.started", status="start")
 
         while self._running:
             try:
@@ -973,9 +999,12 @@ class AgentLoop:
                         effective_key,
                     )
                 else:
-                    logger.info(
-                        "Routed follow-up message to pending queue for session {}",
-                        effective_key,
+                    log_event(
+                        logger,
+                        "info",
+                        "agent.pending_queue.routed",
+                        status="success",
+                        session=effective_key,
                     )
                     continue
             # Compute the effective session key before dispatching
@@ -1016,6 +1045,7 @@ class AgentLoop:
                     if msg.metadata.get("_wants_stream"):
                         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
                         stream_segment = 0
+                        review_stream = _is_review_turn(msg.metadata)
 
                         def _current_stream_id() -> str:
                             return f"{stream_base_id}:{stream_segment}"
@@ -1024,6 +1054,8 @@ class AgentLoop:
                             meta = dict(msg.metadata or {})
                             meta["_stream_delta"] = True  # 标记这是流增量
                             meta["_stream_id"] = _current_stream_id()  # 该段的唯一 ID
+                            if review_stream:
+                                meta["_stream_kind"] = "review_thinking"
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content=delta,
@@ -1036,6 +1068,8 @@ class AgentLoop:
                             meta["_stream_end"] = True  # 标记段结束
                             meta["_resuming"] = resuming  # 告诉前端是否继续等待
                             meta["_stream_id"] = _current_stream_id()
+                            if review_stream:
+                                meta["_stream_kind"] = "review_thinking"
                             await self.bus.publish_outbound(OutboundMessage(
                                 channel=msg.channel, chat_id=msg.chat_id,
                                 content="",
@@ -1182,7 +1216,7 @@ class AgentLoop:
     def stop(self) -> None:
         """Stop the agent loop."""
         self._running = False
-        logger.info("Agent loop stopping")
+        log_event(logger, "info", "agent.loop.stopping", status="running")
 
     async def _process_system_message(
         self,
@@ -1197,7 +1231,13 @@ class AgentLoop:
         channel, chat_id = (
             msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
         )
-        logger.info("Processing system message from {}", msg.sender_id)
+        log_event(
+            logger,
+            "info",
+            "agent.system_message.processing",
+            status="running",
+            sender=msg.sender_id,
+        )
         key = msg.session_key_override or f"{channel}:{chat_id}"
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
@@ -1207,7 +1247,13 @@ class AgentLoop:
 
         session, pending = self.auto_compact.prepare_session(session, key)
         if pending:
-            logger.info("Memory compact triggered for session {}", key)
+            log_event(
+                logger,
+                "info",
+                "agent.memory_compact.triggered",
+                status="start",
+                session=key,
+            )
 
         await self.consolidator.maybe_consolidate_by_tokens(
             session,
@@ -1240,7 +1286,7 @@ class AgentLoop:
             session_metadata=session.metadata,
         )
         t_wall = time.time()
-        final_content, _, all_msgs, stop_reason, _ = await self._run_agent_loop(
+        final_content, _, all_msgs, stop_reason, _, _ = await self._run_agent_loop(
             messages, session=session, channel=channel, chat_id=chat_id,
             message_id=msg.metadata.get("message_id"),
             metadata=msg.metadata,
@@ -1622,6 +1668,36 @@ class AgentLoop:
         )
         if ctx.outbound and ctx.content_replaced:
             ctx.outbound.metadata.pop("_streamed", None)
+            if ctx.msg.metadata.get("_wants_stream") and _is_review_turn(ctx.msg.metadata):
+                stream_id = f"{ctx.msg.session_key}:{ctx.turn_id}:review_report"
+                report_meta = dict(ctx.msg.metadata or {})
+                report_meta["_stream_delta"] = True
+                report_meta["_stream_id"] = stream_id
+                report_meta["_stream_kind"] = "review_report"
+                end_meta = dict(ctx.msg.metadata or {})
+                end_meta["_stream_end"] = True
+                end_meta["_stream_id"] = stream_id
+                end_meta["_stream_kind"] = "review_report"
+                logger.info(
+                    "review.report.stream.start session={} chars={}",
+                    ctx.session_key,
+                    len(ctx.final_content or ""),
+                )
+                for chunk in _stream_chunks(ctx.final_content or ""):
+                    await self.bus.publish_outbound(OutboundMessage(
+                        channel=ctx.msg.channel,
+                        chat_id=ctx.msg.chat_id,
+                        content=chunk,
+                        metadata=report_meta,
+                    ))
+                await self.bus.publish_outbound(OutboundMessage(
+                    channel=ctx.msg.channel,
+                    chat_id=ctx.msg.chat_id,
+                    content="",
+                    metadata=end_meta,
+                ))
+                logger.info("review.report.stream.end session={}", ctx.session_key)
+                ctx.outbound = None
         return "ok"
         return "ok"
 

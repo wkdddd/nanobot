@@ -92,3 +92,23 @@ class TestReportStructure:
         report = render_review_report("repo", dims)
         assert "2 critical" in report
         assert "1 high" in report
+
+    def test_markdown_table_cells_are_escaped_and_flattened(self):
+        dims = [_dim("security", accepted=[
+            _candidate(
+                file="src/a|b.py",
+                title="Pipe | issue\nsecond line",
+                impact="Breaks | table\nand layout",
+                recommendation="Use parser | not split\nthen validate",
+            )
+        ])]
+
+        report = render_review_report("repo|name", dims)
+
+        assert "## Code Review Report: repo\\|name" in report
+        assert "src/a\\|b.py:10" in report
+        assert "Pipe \\| issue second line" in report
+        assert "Breaks \\| table and layout" in report
+        assert "Use parser \\| not split then validate" in report
+        finding_rows = [line for line in report.splitlines() if line.startswith("| 1 |")]
+        assert len(finding_rows) == 1

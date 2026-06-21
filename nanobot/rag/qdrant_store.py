@@ -9,6 +9,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.rag.utils import ChunkKey, IndexedChunk, chunk_key
+from nanobot.utils.log_style import log_event
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,11 +126,15 @@ class QdrantVectorStore:
             if vector is None:
                 continue
             if len(vector) != self.dimensions:
-                logger.warning(
-                    "⚠ Qdrant vector skipped: dim mismatch path={} dim={} expected={}",
-                    chunk.path,
-                    len(vector),
-                    self.dimensions,
+                log_event(
+                    logger,
+                    "warning",
+                    "rag.qdrant.vector.skipped",
+                    status="warning",
+                    reason="dim_mismatch",
+                    path=chunk.path,
+                    dim=len(vector),
+                    expected=self.dimensions,
                 )
                 continue
             key = chunk_key(chunk)

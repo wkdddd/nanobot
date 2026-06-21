@@ -20,6 +20,7 @@ from nanobot.utils.helpers import (
     image_placeholder_text,
     safe_filename,
 )
+from nanobot.utils.log_style import event_message, log_event
 from nanobot.utils.subagent_channel_display import scrub_subagent_announce_body
 
 FILE_MAX_MESSAGES = 2000
@@ -294,12 +295,15 @@ class Session:
         archive_chunk = dropped[already_consolidated:]
         if archive_chunk and on_archive:
             on_archive(archive_chunk)
-        logger.info(
-            "Session file cap hit for {}: dropped {}, raw-archived {}, kept {}",
-            self.key,
-            dropped_count,
-            len(archive_chunk),
-            len(self.messages),
+        log_event(
+            logger,
+            "info",
+            "session.file_cap.hit",
+            status="done",
+            session=self.key,
+            dropped=dropped_count,
+            raw_archived=len(archive_chunk),
+            kept=len(self.messages),
         )
 
 
@@ -357,9 +361,21 @@ class SessionManager:
             if legacy_path.exists():
                 try:
                     shutil.move(str(legacy_path), str(path))
-                    logger.info("Migrated session {} from legacy path", key)
+                    log_event(
+                        logger,
+                        "info",
+                        "session.migrated",
+                        status="success",
+                        session=key,
+                    )
                 except Exception:
-                    logger.exception("Failed to migrate session {}", key)
+                    logger.opt(exception=True, colors=True).error(
+                        event_message(
+                            "session.migrate.failed",
+                            status="failed",
+                            session=key,
+                        )
+                    )
 
         if not path.exists():
             return None
@@ -396,10 +412,24 @@ class SessionManager:
                 last_consolidated=last_consolidated
             )
         except Exception as e:
-            logger.warning("Failed to load session {}: {}", key, e)
+            log_event(
+                logger,
+                "warning",
+                "session.load.failed",
+                status="failed",
+                session=key,
+                reason=e,
+            )
             repaired = self._repair(key)
             if repaired is not None:
-                logger.info("Recovered session {} from corrupt file ({} messages)", key, len(repaired.messages))
+                log_event(
+                    logger,
+                    "info",
+                    "session.recovered",
+                    status="success",
+                    session=key,
+                    messages=len(repaired.messages),
+                )
             return repaired
 
     def _repair(self, key: str) -> Session | None:
@@ -440,7 +470,14 @@ class SessionManager:
                         messages.append(data)
 
             if skipped:
-                logger.warning("Skipped {} corrupt lines in session {}", skipped, key)
+                log_event(
+                    logger,
+                    "warning",
+                    "session.repair.skipped_lines",
+                    status="warning",
+                    session=key,
+                    skipped=skipped,
+                )
 
             if not messages and not metadata:
                 return None
@@ -454,7 +491,14 @@ class SessionManager:
                 last_consolidated=last_consolidated
             )
         except Exception as e:
-            logger.warning("Repair failed for session {}: {}", key, e)
+            log_event(
+                logger,
+                "warning",
+                "session.repair.failed",
+                status="failed",
+                session=key,
+                reason=e,
+            )
             return None
 
     @staticmethod
@@ -529,7 +573,13 @@ class SessionManager:
                 self.save(session, fsync=True)
                 flushed += 1
             except Exception:
-                logger.warning("Failed to flush session {}", key, exc_info=True)
+                logger.opt(exception=True, colors=True).warning(
+                    event_message(
+                        "session.flush.failed",
+                        status="failed",
+                        session=key,
+                    )
+                )
         return flushed
 
     def invalidate(self, key: str) -> None:
@@ -549,7 +599,14 @@ class SessionManager:
             path.unlink()
             return True
         except OSError as e:
-            logger.warning("Failed to delete session file {}: {}", path, e)
+            log_event(
+                logger,
+                "warning",
+                "session.delete_file.failed",
+                status="failed",
+                path=path,
+                reason=e,
+            )
             return False
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
@@ -588,10 +645,23 @@ class SessionManager:
                 "messages": messages,
             }
         except Exception as e:
-            logger.warning("Failed to read session {}: {}", key, e)
+            log_event(
+                logger,
+                "warning",
+                "session.read.failed",
+                status="failed",
+                session=key,
+                reason=e,
+            )
             repaired = self._repair(key)
             if repaired is not None:
-                logger.info("Recovered read-only session view {} from corrupt file", key)
+                log_event(
+                    logger,
+                    "info",
+                    "session.readonly.recovered",
+                    status="success",
+                    session=key,
+                )
                 return self._session_payload(repaired)
             return None
 

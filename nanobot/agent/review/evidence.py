@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoReader
-from nanobot.agent.review.utils import clean_scope_paths, parse_repo, path_matches_scope
+from nanobot.agent.review.utils import (
+    changed_lines_from_patch,
+    clean_scope_paths,
+    parse_repo,
+    path_matches_scope,
+)
 from nanobot.rag.review_service import (
     DEFAULT_TEXT_EXTS,
     REMOTE_SOURCE_TYPE,
@@ -18,6 +25,13 @@ from nanobot.rag.review_service import (
     RepositoryRAGRequest,
     RepositoryRAGService,
 )
+from nanobot.utils.log_style import event_message, log_event
+
+
+@dataclass(slots=True)
+class LocalChangedSummary:
+    files: list[str] = field(default_factory=list)
+    touched_lines: dict[str, list[int]] = field(default_factory=dict)
 
 
 class ReviewEvidenceService:
@@ -110,10 +124,14 @@ class ReviewEvidenceService:
         trace_id = "local"
         started = time.perf_counter()
         if not review_query or not review_query.strip():
-            logger.info(
-                "review.evidence.local.done 🔎 trace_id={} status=error reason=missing_query elapsed_ms={:.1f}",
-                trace_id,
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.local.done",
+                status="error",
+                trace_id=trace_id,
+                reason="missing_query",
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "Error: review_query is required."
 
@@ -128,19 +146,27 @@ class ReviewEvidenceService:
             )
         )
         if not result.hits:
-            logger.info(
-                "review.evidence.local.done 🔎 trace_id={} status=no_hits files_count=0 hits_count=0 context_chars={} elapsed_ms={:.1f}",
-                trace_id,
-                len(result.context),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.local.done",
+                status="no_hits",
+                trace_id=trace_id,
+                files_count=0,
+                hits_count=0,
+                context_chars=len(result.context),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "No relevant repository review references found."
-        logger.info(
-            "review.evidence.local.done ✅ trace_id={} status=success hits_count={} context_chars={} elapsed_ms={:.1f}",
-            trace_id,
-            len(result.hits),
-            len(result.context),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.local.done",
+            status="success",
+            trace_id=trace_id,
+            hits_count=len(result.hits),
+            context_chars=len(result.context),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result.context
 
@@ -153,62 +179,197 @@ class ReviewEvidenceService:
         include_tests: bool | None,
     ) -> str:
         started = time.perf_counter()
-        changed = await asyncio.to_thread(self.local_changed_files)
+        summary = await asyncio.to_thread(self.local_changed_summary)
+        changed = summary.files
+        touched_lines = summary.touched_lines
         scopes = clean_scope_paths(target_paths)
         if scopes:
             changed = [path for path in changed if path_matches_scope(path, scopes)]
+            touched_lines = {
+                path: lines for path, lines in touched_lines.items() if path_matches_scope(path, scopes)
+            }
         query = review_query or "code review local changed files regressions tests security"
         if changed:
             query = f"{query} {' '.join(changed[:40])}"
-        block = await self.local_context(
-            review_query=query,
-            max_results=max_results,
-            include_tests=include_tests,
+        result = await self.repository_rag.retrieve(
+            RepositoryRAGRequest(
+                source_type=SOURCE_TYPE,
+                review_query=query.strip(),
+                files=list(self.repository_rag.iter_candidate_files()),
+                max_results=max_results,
+                include_tests=include_tests,
+                touched_lines=touched_lines,
+                related_tests=False,
+                trace_id="local_changed",
+            )
         )
+        block = result.context if result.hits else "No relevant repository review references found."
         if not changed:
             scope_line = f"- scope paths: {', '.join(scopes[:20])}\n" if scopes else ""
             result = "[Local Diff Review Context]\n" + scope_line + "- changed files: unavailable or none\n\n" + block
-            logger.info(
-                "review.evidence.local_changed.done 🔎 trace_id={} status=no_changed_files scopes_count={} changed_files=0 context_chars={} elapsed_ms={:.1f}",
-                "local_changed",
-                len(scopes),
-                len(result),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.local_changed.done",
+                status="empty",
+                trace_id="local_changed",
+                reason="no_changed_files",
+                scopes_count=len(scopes),
+                changed_files=0,
+                context_chars=len(result),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return result
         result = (
             "[Local Diff Review Context]\n"
             + (f"- scope paths: {', '.join(scopes[:20])}\n" if scopes else "")
             + f"- changed files: {len(changed)}\n"
+            + f"- touched files: {len(touched_lines)}\n"
             + "\n".join(f"  - {path}" for path in changed[:80])
             + "\n\n"
             + block
         )
-        logger.info(
-            "review.evidence.local_changed.done ✅ trace_id={} status=success scopes_count={} changed_files={} context_chars={} elapsed_ms={:.1f}",
-            "local_changed",
-            len(scopes),
-            len(changed),
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.local_changed.done",
+            status="success",
+            trace_id="local_changed",
+            scopes_count=len(scopes),
+            changed_files=len(changed),
+            context_chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
-    def local_changed_files(self) -> list[str]:
+    def local_changed_summary(self) -> LocalChangedSummary:
         try:
             from git import Repo  # type: ignore
         except Exception as exc:
             logger.debug("repo_review GitPython unavailable reason={}", exc)
-            return []
+            return self._local_changed_summary_cli()
         try:
             repo = Repo(self.workspace, search_parent_directories=True)
             paths = set(repo.git.diff("--name-only").splitlines())
             paths.update(repo.git.diff("--name-only", "--cached").splitlines())
             paths.update(str(p) for p in repo.untracked_files)
-            return sorted(path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS)
+            text_paths = sorted(
+                path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS
+            )
+            touched: dict[str, list[int]] = {}
+            for path in text_paths:
+                lines: set[int] = set()
+                lines.update(
+                    changed_lines_from_patch(path, self._local_diff_patch(repo, path, cached=False))
+                )
+                lines.update(
+                    changed_lines_from_patch(path, self._local_diff_patch(repo, path, cached=True))
+                )
+                if path in repo.untracked_files:
+                    lines.update(self._untracked_file_lines(repo, path))
+                if lines:
+                    touched[path] = sorted(lines)
+            return LocalChangedSummary(files=text_paths, touched_lines=touched)
         except Exception as exc:
             logger.warning("repo_review local git diff unavailable reason={}", exc)
+            return LocalChangedSummary()
+
+    def local_changed_files(self) -> list[str]:
+        return self.local_changed_summary().files
+
+    def _local_changed_summary_cli(self) -> LocalChangedSummary:
+        try:
+            paths = set(self._git_cli("diff", "--name-only").splitlines())
+            paths.update(self._git_cli("diff", "--name-only", "--cached").splitlines())
+            paths.update(self._git_cli("ls-files", "--others", "--exclude-standard").splitlines())
+            text_paths = sorted(
+                path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS
+            )
+            untracked = set(self._git_cli("ls-files", "--others", "--exclude-standard").splitlines())
+            touched: dict[str, list[int]] = {}
+            for path in text_paths:
+                lines: set[int] = set()
+                lines.update(
+                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=False))
+                )
+                lines.update(
+                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=True))
+                )
+                if path in untracked:
+                    lines.update(self._untracked_workspace_file_lines(path))
+                if lines:
+                    touched[path] = sorted(lines)
+            return LocalChangedSummary(files=text_paths, touched_lines=touched)
+        except Exception as exc:
+            logger.warning("repo_review local git cli diff unavailable reason={}", exc)
+            return LocalChangedSummary()
+
+    def _git_cli(self, *args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=self.workspace,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return result.stdout
+
+    @staticmethod
+    def _local_diff_patch(repo: object, path: str, *, cached: bool) -> str:
+        args = ["--cached"] if cached else []
+        args.extend(["--unified=0", "--", path])
+        patch = repo.git.diff(*args)
+        return ReviewEvidenceService._diff_hunk_lines(patch)
+
+    def _local_diff_patch_cli(self, path: str, *, cached: bool) -> str:
+        args = ["diff"]
+        if cached:
+            args.append("--cached")
+        args.extend(["--unified=0", "--", path])
+        return self._diff_hunk_lines(self._git_cli(*args))
+
+    @staticmethod
+    def _diff_hunk_lines(patch: str) -> str:
+        return "\n".join(
+            line
+            for line in patch.splitlines()
+            if line.startswith("@@")
+            or (line.startswith("+") and not line.startswith("+++"))
+            or (line.startswith("-") and not line.startswith("---"))
+            or line.startswith(" ")
+        )
+
+    def _untracked_file_lines(self, repo: object, path: str) -> list[int]:
+        worktree = getattr(repo, "working_tree_dir", None)
+        if not worktree:
             return []
+        target = (Path(worktree) / path).resolve()
+        try:
+            target.relative_to(Path(worktree).resolve())
+        except ValueError:
+            return []
+        if target.suffix.lower() not in DEFAULT_TEXT_EXTS:
+            return []
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+        return list(range(1, len(text.replace("\r\n", "\n").replace("\r", "\n").splitlines()) + 1))
+
+    def _untracked_workspace_file_lines(self, path: str) -> list[int]:
+        target = (self.workspace / path).resolve()
+        try:
+            target.relative_to(self.workspace)
+        except ValueError:
+            return []
+        if target.suffix.lower() not in DEFAULT_TEXT_EXTS:
+            return []
+        try:
+            text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+        return list(range(1, len(text.replace("\r\n", "\n").replace("\r", "\n").splitlines()) + 1))
 
     async def local_targeted_context(
         self,
@@ -221,10 +382,14 @@ class ReviewEvidenceService:
         started = time.perf_counter()
         cleaned = clean_scope_paths(target_paths)
         if not cleaned:
-            logger.info(
-                "review.evidence.local_targeted.done 🔎 trace_id={} status=error reason=missing_target_paths elapsed_ms={:.1f}",
-                "local_targeted",
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.local_targeted.done",
+                status="error",
+                trace_id="local_targeted",
+                reason="missing_target_paths",
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "Error: target_paths is required for limited repo review."
         query = review_query or "code review targeted files security tests architecture"
@@ -236,12 +401,15 @@ class ReviewEvidenceService:
         )
         header = "[Limited Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80])
         result = header + "\n\n" + block
-        logger.info(
-            "review.evidence.local_targeted.done ✅ trace_id={} status=success scopes_count={} context_chars={} elapsed_ms={:.1f}",
-            "local_targeted",
-            len(cleaned),
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.local_targeted.done",
+            status="success",
+            trace_id="local_targeted",
+            scopes_count=len(cleaned),
+            context_chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
@@ -271,15 +439,18 @@ class ReviewEvidenceService:
                 trace_id=trace_id,
             )
         )
-        logger.info(
-            "review.evidence.snapshot.done ✅ trace_id={} snapshot={} files_count={} hits_count={} context_chars={} cache={} elapsed_ms={:.1f}",
-            trace_id,
-            snapshot_name,
-            len(files),
-            len(result.hits),
-            len(result.context),
-            result.cache_root,
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.snapshot.done",
+            status="success",
+            trace_id=trace_id,
+            snapshot=snapshot_name,
+            files_count=len(files),
+            hits_count=len(result.hits),
+            context_chars=len(result.context),
+            cache=result.cache_root,
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result.cache_root, result.context, len(result.hits)
 
@@ -306,14 +477,24 @@ class ReviewEvidenceService:
                 trace_id=trace_id,
             )
         except Exception as exc:
-            logger.exception("repo_review github context failed trace_id={}", trace_id)
+            logger.opt(exception=True, colors=True).error(
+                event_message(
+                    "review.evidence.github_context.failed",
+                    status="failed",
+                    trace_id=trace_id,
+                )
+            )
             return f"Error: failed to fetch GitHub repository context: {exc}"
         if not files:
-            logger.info(
-                "review.evidence.github_context.done 🔎 trace_id={} status=empty_files repo={} files_count=0 elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_context.done",
+                status="empty_files",
+                trace_id=trace_id,
+                repo=repo,
+                files_count=0,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "No text files found for GitHub repository context retrieval."
         cache_root, context, hits_count = await self.retrieve_snapshot_context(
@@ -324,34 +505,44 @@ class ReviewEvidenceService:
             include_tests=include_tests,
             trace_id=trace_id,
         )
-        logger.info(
-            "repo_review github context trace_id={} snapshot={} cache={} files={} hits={}",
-            trace_id,
-            snapshot,
-            cache_root,
-            len(files),
-            hits_count,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.github_context.cache",
+            status="done",
+            trace_id=trace_id,
+            snapshot=snapshot,
+            cache=cache_root,
+            files=len(files),
+            hits=hits_count,
         )
         if hits_count <= 0:
-            logger.info(
-                "review.evidence.github_context.done 🔎 trace_id={} status=no_hits repo={} snapshot={} files_count={} hits_count=0 context_chars={} elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                snapshot,
-                len(files),
-                len(context),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_context.done",
+                status="no_hits",
+                trace_id=trace_id,
+                repo=repo,
+                snapshot=snapshot,
+                files_count=len(files),
+                hits_count=0,
+                context_chars=len(context),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "No relevant GitHub repository review references found."
-        logger.info(
-            "review.evidence.github_context.done ✅ trace_id={} status=success repo={} snapshot={} files_count={} hits_count={} context_chars={} elapsed_ms={:.1f}",
-            trace_id,
-            repo,
-            snapshot,
-            len(files),
-            hits_count,
-            len(context),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.github_context.done",
+            status="success",
+            trace_id=trace_id,
+            repo=repo,
+            snapshot=snapshot,
+            files_count=len(files),
+            hits_count=hits_count,
+            context_chars=len(context),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return context
 
@@ -369,11 +560,15 @@ class ReviewEvidenceService:
         started = time.perf_counter()
         cleaned = clean_scope_paths(target_paths, remote=True)
         if not cleaned:
-            logger.info(
-                "review.evidence.github_targeted.done 🔎 trace_id={} status=error reason=missing_target_paths repo={} elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_targeted.done",
+                status="error",
+                trace_id=trace_id,
+                reason="missing_target_paths",
+                repo=repo,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "Error: target_paths is required for limited repo review."
         files: dict[str, str] = {}
@@ -384,12 +579,16 @@ class ReviewEvidenceService:
             if text is not None:
                 files[path] = text
         if not files:
-            logger.info(
-                "review.evidence.github_targeted.done 🔎 trace_id={} status=empty_files repo={} scopes_count={} files_count=0 elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                len(cleaned),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_targeted.done",
+                status="empty_files",
+                trace_id=trace_id,
+                repo=repo,
+                scopes_count=len(cleaned),
+                files_count=0,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "No text files found for targeted GitHub review retrieval."
         query = review_query or "code review targeted files security tests architecture"
@@ -402,37 +601,47 @@ class ReviewEvidenceService:
             include_tests=include_tests,
             trace_id=trace_id,
         )
-        logger.info(
-            "repo_review.github_targeted trace_id={} repo={} cache={} files={} hits={}",
-            trace_id,
-            repo,
-            cache_root,
-            len(files),
-            hits_count,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.github_targeted.cache",
+            status="done",
+            trace_id=trace_id,
+            repo=repo,
+            cache=cache_root,
+            files=len(files),
+            hits=hits_count,
         )
         header = "[Limited GitHub Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80]) + "\n\n"
         if hits_count <= 0:
             result = header + "No relevant targeted GitHub repository review references found."
-            logger.info(
-                "review.evidence.github_targeted.done 🔎 trace_id={} status=no_hits repo={} scopes_count={} files_count={} hits_count=0 context_chars={} elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                len(cleaned),
-                len(files),
-                len(result),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_targeted.done",
+                status="no_hits",
+                trace_id=trace_id,
+                repo=repo,
+                scopes_count=len(cleaned),
+                files_count=len(files),
+                hits_count=0,
+                context_chars=len(result),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return result
         result = header + context
-        logger.info(
-            "review.evidence.github_targeted.done ✅ trace_id={} status=success repo={} scopes_count={} files_count={} hits_count={} context_chars={} elapsed_ms={:.1f}",
-            trace_id,
-            repo,
-            len(cleaned),
-            len(files),
-            hits_count,
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.github_targeted.done",
+            status="success",
+            trace_id=trace_id,
+            repo=repo,
+            scopes_count=len(cleaned),
+            files_count=len(files),
+            hits_count=hits_count,
+            context_chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
 
@@ -449,11 +658,15 @@ class ReviewEvidenceService:
     ) -> str:
         started = time.perf_counter()
         if pr_number <= 0:
-            logger.info(
-                "review.evidence.github_diff.done 🔎 trace_id={} status=error reason=missing_pr_number repo={} elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_diff.done",
+                status="error",
+                trace_id=trace_id,
+                reason="missing_pr_number",
+                repo=repo,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "Error: pr_number is required for action='diff'."
         if not review_query or not review_query.strip():
@@ -465,7 +678,13 @@ class ReviewEvidenceService:
                 trace_id=trace_id,
             )
         except Exception as exc:
-            logger.exception("repo_review github diff failed trace_id={}", trace_id)
+            logger.opt(exception=True, colors=True).error(
+                event_message(
+                    "review.evidence.github_diff.failed",
+                    status="failed",
+                    trace_id=trace_id,
+                )
+            )
             return f"Error: failed to fetch GitHub PR diff context: {exc}"
         scopes = clean_scope_paths(target_paths, remote=True)
         if scopes:
@@ -474,13 +693,17 @@ class ReviewEvidenceService:
                 path: lines for path, lines in touched_lines.items() if path_matches_scope(path, scopes)
             }
         if not files:
-            logger.info(
-                "review.evidence.github_diff.done 🔎 trace_id={} status=empty_files repo={} pr={} scopes_count={} files_count=0 elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                pr_number,
-                len(scopes),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_diff.done",
+                status="empty_files",
+                trace_id=trace_id,
+                repo=repo,
+                pr=pr_number,
+                scopes_count=len(scopes),
+                files_count=0,
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return "No text files found for GitHub PR diff retrieval."
         cache_root, context, hits_count = await self.retrieve_snapshot_context(
@@ -503,29 +726,36 @@ class ReviewEvidenceService:
         ]
         if hits_count <= 0:
             result = "\n".join(header) + "No relevant GitHub PR diff references found."
-            logger.info(
-                "review.evidence.github_diff.done 🔎 trace_id={} status=no_hits repo={} pr={} snapshot={} scopes_count={} files_count={} hits_count=0 context_chars={} elapsed_ms={:.1f}",
-                trace_id,
-                repo,
-                pr_number,
-                snapshot,
-                len(scopes),
-                len(files),
-                len(result),
-                (time.perf_counter() - started) * 1000,
+            log_event(
+                logger,
+                "info",
+                "review.evidence.github_diff.done",
+                status="no_hits",
+                trace_id=trace_id,
+                repo=repo,
+                pr=pr_number,
+                snapshot=snapshot,
+                scopes_count=len(scopes),
+                files_count=len(files),
+                hits_count=0,
+                context_chars=len(result),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
             return result
         result = "\n".join(header) + context
-        logger.info(
-            "review.evidence.github_diff.done ✅ trace_id={} status=success repo={} pr={} snapshot={} scopes_count={} files_count={} hits_count={} context_chars={} elapsed_ms={:.1f}",
-            trace_id,
-            repo,
-            pr_number,
-            snapshot,
-            len(scopes),
-            len(files),
-            hits_count,
-            len(result),
-            (time.perf_counter() - started) * 1000,
+        log_event(
+            logger,
+            "info",
+            "review.evidence.github_diff.done",
+            status="success",
+            trace_id=trace_id,
+            repo=repo,
+            pr=pr_number,
+            snapshot=snapshot,
+            scopes_count=len(scopes),
+            files_count=len(files),
+            hits_count=hits_count,
+            context_chars=len(result),
+            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result

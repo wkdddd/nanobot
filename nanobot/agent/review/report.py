@@ -11,6 +11,40 @@ from nanobot.agent.review.types import (
 )
 
 
+def _clean_text(value: object) -> str:
+    """Normalize model-provided text before embedding it in Markdown."""
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [" ".join(line.split()) for line in text.split("\n")]
+    return " ".join(line for line in lines if line).strip()
+
+
+def _escape_markdown_inline(value: object) -> str:
+    text = _clean_text(value)
+    for old, new in (
+        ("\\", "\\\\"),
+        ("`", "\\`"),
+        ("*", "\\*"),
+        ("_", "\\_"),
+        ("[", "\\["),
+        ("]", "\\]"),
+        ("|", "\\|"),
+    ):
+        text = text.replace(old, new)
+    return text
+
+
+def _table_cell(value: object) -> str:
+    text = _clean_text(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|") or "-"
+
+
+def _location(file: object, line: object | None = None) -> str:
+    path = _clean_text(file) or "unknown"
+    if line:
+        return f"{path}:{line}"
+    return path
+
+
 def render_review_report(
     target_name: str,
     dimensions: list[ReviewDimensionResult],
@@ -26,7 +60,7 @@ def render_review_report(
     summary = _build_summary(target_name, stats, dimensions)
 
     sections: list[str] = []
-    sections.append(f"## Code Review Report: {target_name}\n")
+    sections.append(f"## Code Review Report: {_escape_markdown_inline(target_name)}\n")
     sections.append(f"### Executive Summary\n\n{summary}\n")
     sections.append(_render_findings(all_accepted))
     sections.append(_render_checks_performed(dimensions))
@@ -119,15 +153,17 @@ def _render_findings(findings: list[ReviewFindingCandidate]) -> str:
             lines.append("| # | File | Issue | Impact |")
             lines.append("|---|------|-------|--------|")
         idx += 1
-        loc = f"{f.file}:{f.line}" if f.line else f.file
-        lines.append(f"| {idx} | {loc} | {f.title} | {f.impact} |")
+        loc = _location(f.file, f.line)
+        lines.append(
+            f"| {idx} | {_table_cell(loc)} | {_table_cell(f.title)} | {_table_cell(f.impact)} |"
+        )
     lines.append("")
     lines.append("**Details:**\n")
     for i, f in enumerate(findings, 1):
-        loc = f"{f.file}:{f.line}" if f.line else f.file
-        lines.append(f"{i}. **{f.title}** ({loc})")
-        lines.append(f"   - Impact: {f.impact}")
-        lines.append(f"   - Recommendation: {f.recommendation}")
+        loc = _location(f.file, f.line)
+        lines.append(f"{i}. **{_escape_markdown_inline(f.title)}** (`{_clean_text(loc)}`)")
+        lines.append(f"   - Impact: {_escape_markdown_inline(f.impact)}")
+        lines.append(f"   - Recommendation: {_escape_markdown_inline(f.recommendation)}")
     lines.append("")
     return "\n".join(lines)
 
@@ -136,9 +172,11 @@ def _render_checks_performed(dims: list[ReviewDimensionResult]) -> str:
     lines = ["### Checks Performed\n"]
     for d in dims:
         if d.status == "validated":
-            lines.append(f"- [x] {d.dimension}")
+            lines.append(f"- [x] {_escape_markdown_inline(d.dimension)}")
         else:
-            lines.append(f"- [ ] {d.dimension} - {d.status}")
+            lines.append(
+                f"- [ ] {_escape_markdown_inline(d.dimension)} - {_escape_markdown_inline(d.status)}"
+            )
     lines.append("")
     return "\n".join(lines)
 
@@ -163,9 +201,12 @@ def _render_needs_confirmation(
     lines = ["### Needs Confirmation\n"]
     lines.append("The following items could not be definitively verified:\n")
     for c, v in items:
-        loc = f"{c.file}:{c.line}" if c.line else c.file
+        loc = _location(c.file, c.line)
         reason = v.reason
-        lines.append(f"- **{c.title}** ({loc}) - {reason}")
+        lines.append(
+            f"- **{_escape_markdown_inline(c.title)}** (`{_clean_text(loc)}`) - "
+            f"{_escape_markdown_inline(reason)}"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -176,7 +217,10 @@ def _render_rejected_summary(
     lines = ["### Rejected/Skipped Summary\n"]
     lines.append(f"{len(items)} candidates rejected during validation:\n")
     for c, v in items[:10]:
-        lines.append(f"- {c.title} ({c.file}) - {v.reason}")
+        lines.append(
+            f"- {_escape_markdown_inline(c.title)} (`{_clean_text(c.file)}`) - "
+            f"{_escape_markdown_inline(v.reason)}"
+        )
     if len(items) > 10:
         lines.append(f"- ... and {len(items) - 10} more")
     lines.append("")
@@ -190,7 +234,7 @@ def _render_recommendations(findings: list[ReviewFindingCandidate]) -> str:
         return "\n".join(lines)
     critical_high = [f for f in findings if f.severity in ("critical", "high")]
     for i, f in enumerate(critical_high[:5], 1):
-        lines.append(f"{i}. {f.recommendation}")
+        lines.append(f"{i}. {_escape_markdown_inline(f.recommendation)}")
     if not critical_high:
         lines.append("1. Address medium-severity findings when convenient.")
     lines.append("")

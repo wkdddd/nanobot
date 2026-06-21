@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
 from loguru import logger
 
-from nanobot.agent.review.evidence import ReviewEvidenceService
+from nanobot.agent.review.evidence import LocalChangedSummary, ReviewEvidenceService
 from nanobot.agent.review.utils import (
     changed_lines_from_patch,
     parse_pr_target,
     parse_repo,
 )
 from nanobot.rag.review_service import (
+    RepoReviewHit,
     RepositoryRAGRequest,
     RepositoryRAGOptions,
     RepositoryRAGService,
@@ -35,6 +37,17 @@ class _LogSink:
     @property
     def text(self) -> str:
         return "".join(self.messages)
+
+
+def _git(cwd: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
 
 
 def test_parse_github_repo_from_url_and_owner_repo() -> None:
@@ -95,14 +108,25 @@ async def test_review_evidence_dispatches_local_targeted_context(tmp_path: Path,
 @pytest.mark.asyncio
 async def test_review_evidence_dispatches_local_changed_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = ReviewEvidenceService(RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False)))
-    called: dict[str, object] = {}
+    captured: dict[str, object] = {}
 
-    async def fake_local(**kwargs: object) -> str:
-        called.update(kwargs)
-        return "context"
+    class _Result:
+        hits: list[object] = [object()]
+        context = "context"
 
-    monkeypatch.setattr(service, "local_changed_files", lambda: ["src/auth.py", "docs/readme.md"])
-    monkeypatch.setattr(service, "local_context", fake_local)
+    async def fake_retrieve(request: RepositoryRAGRequest) -> _Result:
+        captured["request"] = request
+        return _Result()
+
+    monkeypatch.setattr(
+        service,
+        "local_changed_summary",
+        lambda: LocalChangedSummary(
+            files=["src/auth.py", "docs/readme.md"],
+            touched_lines={"src/auth.py": [2], "docs/readme.md": [1]},
+        ),
+    )
+    monkeypatch.setattr(service.repository_rag, "retrieve", fake_retrieve)
 
     result = await service.local_changed_context(
         review_query="regression",
@@ -114,7 +138,52 @@ async def test_review_evidence_dispatches_local_changed_context(tmp_path: Path, 
     assert result.startswith("[Local Diff Review Context]")
     assert "src/auth.py" in result
     assert "docs/readme.md" not in result
-    assert called["review_query"] == "regression src/auth.py"
+    request = captured["request"]
+    assert isinstance(request, RepositoryRAGRequest)
+    assert request.review_query == "regression src/auth.py"
+    assert request.touched_lines == {"src/auth.py": [2]}
+
+
+def test_local_changed_summary_parses_staged_unstaged_and_untracked_lines(tmp_path: Path) -> None:
+    _git(tmp_path, "init")
+    _git(tmp_path, "config", "user.email", "test@example.com")
+    _git(tmp_path, "config", "user.name", "Test User")
+    (tmp_path / "src").mkdir()
+    tracked = tmp_path / "src" / "app.py"
+    tracked.write_text("one\nold two\nthree\nold four\n", encoding="utf-8")
+    _git(tmp_path, "add", "src/app.py")
+    _git(tmp_path, "commit", "-m", "init")
+
+    tracked.write_text("one\nnew two\nthree\nold four\n", encoding="utf-8")
+    _git(tmp_path, "add", "src/app.py")
+    tracked.write_text("one\nnew two\nthree\nnew four\n", encoding="utf-8")
+    untracked = tmp_path / "src" / "new_file.py"
+    untracked.write_text("alpha\nbeta\n", encoding="utf-8")
+
+    service = ReviewEvidenceService(RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False)))
+    summary = service.local_changed_summary()
+
+    assert summary.files == ["src/app.py", "src/new_file.py"]
+    assert summary.touched_lines["src/app.py"] == [2, 4]
+    assert summary.touched_lines["src/new_file.py"] == [1, 2]
+
+
+def test_repository_rag_prioritizes_chunks_overlapping_touched_lines() -> None:
+    near = RepoReviewHit(path="src/app.py", score=1.0, start_line=20, end_line=30)
+    overlapping = RepoReviewHit(path="src/app.py", score=1.0, start_line=3, end_line=8)
+    other = RepoReviewHit(path="src/other.py", score=10.0, start_line=1, end_line=5)
+
+    ranked = RepositoryRAGService.rank_touched_line_hits(
+        [near, overlapping, other],
+        {"src/app.py": [5]},
+        limit=3,
+    )
+
+    assert ranked[0] is other
+    assert ranked[1] is overlapping
+    assert ranked[1].reason == ["diff-line-overlap", "diff-touched"]
+    assert ranked[2] is near
+    assert ranked[2].reason == ["diff-touched"]
 
 
 @pytest.mark.asyncio

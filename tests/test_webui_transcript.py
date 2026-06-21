@@ -59,3 +59,16 @@ def test_replay_preserves_user_review_reference() -> None:
         "target_type": "github",
         "target": "https://github.com/test/repo",
     }
+
+
+def test_replay_uses_review_report_delta_not_review_thinking() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {"event": "delta", "kind": "review_thinking", "text": "raw coordinator text", "createdAt": 100},
+        {"event": "stream_end", "kind": "review_thinking", "createdAt": 110},
+        {"event": "delta", "kind": "review_report", "text": "## Report", "createdAt": 120},
+        {"event": "stream_end", "kind": "review_report", "createdAt": 130},
+    ])
+
+    assert len(messages) == 1
+    assert messages[0]["role"] == "assistant"
+    assert messages[0]["content"] == "## Report"

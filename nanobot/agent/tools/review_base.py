@@ -1,0 +1,125 @@
+"""Shared base for repository review tools."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+from nanobot.agent.review.evidence import ReviewEvidenceService
+from nanobot.agent.review.github import GitHubRepoConfig, GitHubRepoReader
+from nanobot.agent.review.local import LocalRepoReader
+from nanobot.agent.review.types import ReviewAction
+from nanobot.agent.tools.base import Tool
+from nanobot.rag import create_rag_runtime
+from nanobot.rag.config import RAGConfig
+from nanobot.rag.review_service import (
+    SOURCE_TYPE,
+    RepositoryRAGOptions,
+    RepositoryRAGService,
+)
+from nanobot.rag.runtime import RAGRuntime
+
+
+READER_ACTIONS = ("meta", "tree", "file")
+REVIEW_ACTIONS = tuple(action.value for action in ReviewAction)
+ALL_REVIEW_TOOL_ACTIONS = (*READER_ACTIONS, *REVIEW_ACTIONS)
+
+
+def review_result_kind(result: str, *, status: str) -> str:
+    if status == "error":
+        return "error"
+    if result.startswith("Error:"):
+        return "error"
+    if result.startswith("No text files found"):
+        return "empty_files"
+    if "No relevant" in result:
+        return "no_hits"
+    return "success"
+
+
+class ReviewToolBase(Tool):
+    _scopes = {"core", "subagent"}
+
+    @classmethod
+    def create(cls, ctx: Any) -> Tool:
+        rag_config = getattr(ctx, "rag_config", None) or RAGConfig()
+        runtime = create_rag_runtime(rag_config)
+        tools_config = ctx.config if ctx.config else None
+        return cls(
+            workspace=Path(ctx.workspace),
+            runtime=runtime,
+            github_config=getattr(tools_config, "github_repo", None),
+        )
+
+    def __init__(
+        self,
+        workspace: Path,
+        embedding_client: Any | None = None,
+        rerank_client: Any | None = None,
+        vector_store: Any | None = None,
+        runtime: RAGRuntime | None = None,
+        github_config: GitHubRepoConfig | None = None,
+    ) -> None:
+        self.workspace = workspace.expanduser().resolve()
+        if runtime is None:
+            runtime = RAGRuntime(
+                embedding_client=embedding_client,
+                rerank_client=rerank_client,
+                vector_store=vector_store,
+            )
+        self.runtime = runtime
+        options = RepositoryRAGOptions.from_retrieval_config(runtime.retrieval)
+        self.repository_rag = RepositoryRAGService(
+            workspace,
+            runtime=runtime,
+            options=options,
+            source_type=SOURCE_TYPE,
+        )
+        self.local = LocalRepoReader(self.workspace, options=options)
+        self.github = GitHubRepoReader(github_config, workspace=workspace)
+        self.evidence_service = ReviewEvidenceService(
+            self.repository_rag,
+            self.github,
+            workspace=self.workspace,
+        )
+
+    @property
+    def evidence_provider(self) -> ReviewEvidenceService:
+        return self.evidence_service
+
+    @property
+    def read_only(self) -> bool:
+        return False
+
+    def _unknown_action(self, action: str) -> str:
+        allowed = ", ".join(ALL_REVIEW_TOOL_ACTIONS)
+        return f"Error: unknown {self.name} action '{action}'. Use {allowed}."
+
+    def _log_finish(
+        self,
+        *,
+        trace_id: str,
+        action: str,
+        target_type: str,
+        result_text: str,
+        status: str,
+        error: str,
+        started: float,
+    ) -> None:
+        result_kind = review_result_kind(result_text, status=status)
+        logger.info(
+            "{}.finish {} trace_id={} action={} target_type={} status={} result_kind={} result_chars={} error={} elapsed_ms={:.1f}",
+            self.name,
+            "ok" if result_kind == "success" else "check",
+            trace_id,
+            action,
+            target_type,
+            status,
+            result_kind,
+            len(result_text),
+            error,
+            (time.perf_counter() - started) * 1000,
+        )
