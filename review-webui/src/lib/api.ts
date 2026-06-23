@@ -133,6 +133,8 @@ export async function listSessions(auth: ApiAuth): Promise<ChatSummary[]> {
       reviewTargetType,
       reviewAction,
       reviewMode,
+      pinned: metadata?.pinned === true,
+      customTitle: stringField(metadata, "custom_title"),
     };
   });
 }
@@ -227,6 +229,20 @@ export async function deleteSession(auth: ApiAuth, key: string): Promise<boolean
     { method: "POST" },
   );
   return body.deleted;
+}
+
+export async function updateSession(
+  auth: ApiAuth,
+  key: string,
+  updates: { pinned?: boolean; custom_title?: string },
+): Promise<boolean> {
+  const params = new URLSearchParams();
+  if (updates.pinned !== undefined) params.set("pinned", String(updates.pinned));
+  if (updates.custom_title !== undefined) params.set("custom_title", updates.custom_title);
+  const qs = params.toString();
+  const path = `/api/sessions/${encodeURIComponent(key)}/update${qs ? `?${qs}` : ""}`;
+  const body = await request<{ updated: boolean }>(path, auth, { method: "GET" });
+  return body.updated;
 }
 
 export async function listAutoTasks(auth: ApiAuth): Promise<AutoTask[]> {

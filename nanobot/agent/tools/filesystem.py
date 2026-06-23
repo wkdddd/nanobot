@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
+from nanobot.agent.review.types import ReviewMetaKey
+from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
-from nanobot.agent.tools.path_utils import resolve_workspace_path
+from nanobot.agent.tools.path_utils import is_under, resolve_workspace_path
 from nanobot.agent.tools.schema import (
     BooleanSchema,
     IntegerSchema,
@@ -178,6 +180,12 @@ class ReadFileTool(_FsTool):
             fp = self._resolve(path)
             if _is_blocked_device(fp):
                 return f"Error: Reading {fp} is blocked (device path that could hang or produce infinite output)."
+            if self._blocks_github_review_local_read(fp):
+                return (
+                    "Error: read_file cannot read local workspace files during a GitHub review target. "
+                    "Use github_review(action='file', target_repo=..., repo_path=..., offset=..., limit=...) "
+                    "for remote content; if GitHub content is unavailable, report the evidence limitation."
+                )
             if not fp.exists():
                 return f"Error: File not found: {path}"
             if not fp.is_file():
@@ -279,6 +287,15 @@ class ReadFileTool(_FsTool):
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading file: {e}"
+
+    def _blocks_github_review_local_read(self, fp: Path) -> bool:
+        ctx = current_request_context()
+        metadata = ctx.metadata if ctx is not None else {}
+        if str(metadata.get(ReviewMetaKey.TARGET_TYPE) or "").strip().lower() != "github":
+            return False
+        if self._workspace is None:
+            return False
+        return is_under(fp, self._workspace)
 
     def _read_pdf(self, fp: Path, pages: str | None) -> str:
         try:

@@ -7,7 +7,7 @@ import pytest
 from loguru import logger
 
 from nanobot.rag.index import RAGIndex
-from nanobot.rag.qdrant_store import QdrantVectorHit
+from nanobot.rag.qdrant_store import QdrantVectorHit, QdrantVectorStore, stable_point_id
 from nanobot.rag.utils import IndexedChunk, IndexedHit
 
 
@@ -24,12 +24,25 @@ class _EmbeddingClient:
         self.embedded_texts.extend(texts)
         return [[1.0, 0.0, 0.0] for _ in texts]
 
+    async def ensure_available(self) -> bool:
+        return True
+
+
+class _UnavailableEmbeddingClient(_EmbeddingClient):
+    unavailable = False
+
+    async def ensure_available(self) -> bool:
+        self.unavailable = True
+        return False
+
 
 @dataclass
 class _VectorStore:
     fail_search: bool = False
     search_key: tuple[str, int, int, str] = ("src/app.py", 1, 1, "text")
     upsert_count: int | None = None
+    existing_point_ids: set[str] | None = None
+    existing_payloads: dict[str, str | None] | None = None
 
     def __post_init__(self) -> None:
         self.upserted: list[IndexedChunk] = []
@@ -42,9 +55,10 @@ class _VectorStore:
         chunks: list[IndexedChunk],
         vectors: list[list[float] | None],
     ) -> int:
-        self.upserted.extend(chunks)
         if self.upsert_count is not None:
+            self.upserted.extend(chunks[: self.upsert_count])
             return self.upsert_count
+        self.upserted.extend(chunks)
         return len([vector for vector in vectors if vector is not None])
 
     def search(
@@ -68,6 +82,22 @@ class _VectorStore:
     def prune_missing(self, *, source_type: str, keep_point_ids: set[str]) -> int:
         return 0
 
+    def list_point_ids(self, *, source_type: str) -> set[str]:
+        return set(self.list_point_payloads(source_type=source_type))
+
+    def list_point_payloads(self, *, source_type: str) -> dict[str, str | None]:
+        if self.existing_payloads is not None:
+            return dict(self.existing_payloads)
+        if self.existing_point_ids is not None:
+            return {point_id: None for point_id in self.existing_point_ids}
+        return {
+            stable_point_id(
+                source_type,
+                (chunk.path, int(chunk.start_line), int(chunk.end_line), chunk.kind),
+            ): chunk.content_hash
+            for chunk in self.upserted
+        }
+
 
 class _CapturingReranker:
     def __init__(self) -> None:
@@ -76,6 +106,31 @@ class _CapturingReranker:
     async def rerank(self, query: str, documents: list[str], top_n: int):
         self.documents = documents
         return [(0, 0.9)]
+
+
+class _PayloadSchemaType:
+    KEYWORD = "keyword"
+
+
+class _QdrantModels:
+    PayloadSchemaType = _PayloadSchemaType
+
+
+class _QdrantClient:
+    def __init__(self) -> None:
+        self.created_indexes: list[tuple[str, str, object]] = []
+
+    def collection_exists(self, _collection: str) -> bool:
+        return True
+
+    def create_payload_index(
+        self,
+        *,
+        collection_name: str,
+        field_name: str,
+        field_schema: object,
+    ) -> None:
+        self.created_indexes.append((collection_name, field_name, field_schema))
 
 
 @pytest.mark.asyncio
@@ -234,14 +289,31 @@ def test_sync_files_backfills_qdrant_for_current_sqlite_chunks(tmp_path) -> None
 
     assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
 
-    second_index.sync_files(
-        source_type="repo",
-        files=[path],
-        chunker=_chunk_file,
-        max_file_chars=1000,
-    )
 
-    assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
+def test_sync_files_skips_qdrant_when_embedding_preflight_fails(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "def lexical_only():\n    return 'ok'\n")
+    vector_store = _VectorStore()
+    log_lines: list[str] = []
+    sink_id = logger.add(lambda msg: log_lines.append(str(msg)), format="{message}")
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=_UnavailableEmbeddingClient(),
+        vector_store=vector_store,
+    )
+    try:
+        index.sync_files(
+            source_type="repo",
+            files=[path],
+            chunker=_chunk_file,
+            max_file_chars=1000,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    assert vector_store.upserted == []
+    text = "\n".join(log_lines)
+    assert "embedding provider preflight failed" in text
+    assert "lexical fallback active" in text
 
 
 def test_sync_files_skips_unchanged_files_before_chunking(tmp_path) -> None:
@@ -260,6 +332,33 @@ def test_sync_files_skips_unchanged_files_before_chunking(tmp_path) -> None:
         chunker=chunker,
         max_file_chars=1000,
     )
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=chunker,
+        max_file_chars=1000,
+    )
+
+    assert calls == 1
+
+
+def test_sync_files_skips_same_content_even_when_mtime_changes(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "def same_content_new_mtime():\n    return 'ok'\n")
+    index = RAGIndex(tmp_path)
+    calls = 0
+
+    def chunker(path: Path, text: str) -> list[IndexedChunk]:
+        nonlocal calls
+        calls += 1
+        return _chunk_file(path, text)
+
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=chunker,
+        max_file_chars=1000,
+    )
+    path.write_text("def same_content_new_mtime():\n    return 'ok'\n", encoding="utf-8")
     index.sync_files(
         source_type="repo",
         files=[path],
@@ -300,4 +399,112 @@ def test_sync_files_retries_qdrant_backfill_after_incomplete_upsert(tmp_path) ->
         max_file_chars=1000,
     )
 
-    assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py", "src/app.py"]
+    assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
+    assert [text.replace("\r\n", "\n") for text in second_index.embedding_client.embedded_texts] == [
+        "def retry_qdrant_sync():\n    return 'ok'\n"
+    ]
+
+
+def test_sync_files_reuses_embedding_cache_after_incomplete_qdrant_upsert(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "def cached_vector_retry():\n    return 'ok'\n")
+    vector_store = _VectorStore(upsert_count=0)
+    embedding_client = _EmbeddingClient()
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=embedding_client,
+        vector_store=vector_store,
+    )
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=_chunk_file,
+        max_file_chars=1000,
+    )
+    embedding_client.embedded_texts.clear()
+    vector_store.upsert_count = None
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=_chunk_file,
+        max_file_chars=1000,
+    )
+
+    assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
+    assert embedding_client.embedded_texts == []
+
+
+def test_sync_files_backfills_only_missing_qdrant_points(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "def first_chunk():\n    pass\n\ndef second_chunk():\n    pass\n")
+    embedding_client = _EmbeddingClient()
+    first_key = ("src/app.py", 1, 2, "text")
+    existing = {stable_point_id("repo", first_key)}
+    vector_store = _VectorStore(existing_point_ids=existing)
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=embedding_client,
+        vector_store=vector_store,
+    )
+
+    def two_chunks(path: Path, text: str) -> list[IndexedChunk]:
+        return [
+            IndexedChunk(
+                source_type="repo",
+                path=path.as_posix(),
+                start_line=1,
+                end_line=2,
+                kind="text",
+                text="first chunk has enough useful review content\nwith another line",
+            ),
+            IndexedChunk(
+                source_type="repo",
+                path=path.as_posix(),
+                start_line=3,
+                end_line=4,
+                kind="text",
+                text="second chunk has enough useful review content\nwith another line",
+            ),
+        ]
+
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=two_chunks,
+        max_file_chars=1000,
+    )
+
+    assert [(chunk.start_line, chunk.text) for chunk in vector_store.upserted] == [
+        (3, "second chunk has enough useful review content\nwith another line")
+    ]
+    assert embedding_client.embedded_texts == [
+        "second chunk has enough useful review content\nwith another line"
+    ]
+
+
+def test_sync_files_backfills_stale_qdrant_point_hash(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "def changed_chunk():\n    return 'new'\n")
+    point_id = stable_point_id("repo", ("src/app.py", 1, 1, "text"))
+    vector_store = _VectorStore(existing_payloads={point_id: "old-hash"})
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=_EmbeddingClient(),
+        vector_store=vector_store,
+    )
+
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=_chunk_file,
+        max_file_chars=1000,
+    )
+
+    assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
+
+
+def test_qdrant_existing_collection_ensures_source_type_payload_index() -> None:
+    client = _QdrantClient()
+    store = QdrantVectorStore(url="http://localhost:6333", collection="chunks")
+    store._client = client
+
+    store._ensure_payload_indexes(client, _QdrantModels)
+
+    assert client.created_indexes == [("chunks", "source_type", "keyword")]

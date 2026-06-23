@@ -8,7 +8,11 @@ import pytest
 from nanobot.agent.lifecycle_hook import AgentHookContext
 from nanobot.agent.review.finalizer import ReviewFinalizer, ReviewFinalizerHook
 from nanobot.agent.review.policy import policy_for_depth
-from nanobot.agent.review.types import ReviewJudgeDecision, ReviewJudgeVerdict
+from nanobot.agent.review.types import (
+    ReviewJudgeDecision,
+    ReviewJudgeVerdict,
+    normalize_review_dimension,
+)
 
 
 class FakeJudge:
@@ -29,6 +33,9 @@ def workspace(tmp_path):
 
 
 class TestParsingJsonArray:
+    def test_normalizes_review_label_suffix(self):
+        assert normalize_review_dimension("Architecture Review") == "architecture"
+
     def test_parse_json_array(self, workspace):
         raw = json.dumps([{
             "severity": "high",
@@ -140,6 +147,14 @@ class TestSemanticVerdicts:
 
 
 class TestFinalize:
+    def test_finalize_without_dimensions_is_incomplete_not_clean(self, workspace):
+        f = ReviewFinalizer(workspace)
+        result = f.finalize("repo")
+
+        assert result.errors == ["No review dimension results were produced."]
+        assert "Review incomplete" in result.report_markdown
+        assert "No actionable issues found" not in result.report_markdown
+
     def test_finalize_produces_report(self, workspace):
         raw = json.dumps([{
             "severity": "critical", "file": "src/app.py", "line": 1,
@@ -164,6 +179,17 @@ class TestFinalize:
 
         assert result.status == "incomplete"
         assert result.errors
+        assert "Review incomplete" in report
+        assert "No actionable issues found" not in report
+
+    def test_unstructured_subagent_output_renders_incomplete_not_clean(self, workspace):
+        raw = "I inspected the files but did not produce the required JSON array."
+        f = ReviewFinalizer(workspace)
+        result = f.ingest_subagent_output("architecture", raw)
+        report = f.finalize("repo").report_markdown
+
+        assert result.status == "incomplete"
+        assert result.errors == ["No structured findings were produced by this reviewer."]
         assert "Review incomplete" in report
         assert "No actionable issues found" not in report
 
@@ -197,6 +223,29 @@ class TestFinalize:
         assert "Unpinned dependency" in result.report_markdown
         assert "Security finding" not in result.report_markdown
         assert [dimension.dimension for dimension in result.dimensions] == ["dependency"]
+
+    def test_finalizer_accepts_spawn_labels_with_task_suffix(self, workspace):
+        raw = json.dumps([{
+            "severity": "high",
+            "file": "review-webui/index.html",
+            "line": 1,
+            "title": "Font loading blocks render",
+            "evidence": "Google Fonts stylesheet",
+            "impact": "Slower first paint",
+            "recommendation": "Use font-display swap",
+        }])
+        f = ReviewFinalizer(workspace, allowed_dimensions={"performance"})
+
+        accepted = f.ingest_subagent_output(
+            "Performance Reviewer for review-webui/index.html",
+            raw,
+        )
+        result = f.finalize("review-webui/index.html")
+
+        assert accepted.status != "skipped_disallowed"
+        assert accepted.dimension == "performance"
+        assert "Font loading blocks render" in result.report_markdown
+        assert not result.errors
 
     def test_ingest_runner_message_metadata_prefers_raw_result(self, workspace):
         raw_result = json.dumps([{
@@ -335,7 +384,8 @@ class TestFinalize:
         content = hook.finalize_content(context, "raw assistant prose")
 
         assert "Disallowed finding" not in (content or "")
-        assert "No actionable issues found" in (content or "")
+        assert "Review incomplete" in (content or "")
+        assert "No actionable issues found" not in (content or "")
 
     @pytest.mark.asyncio
     async def test_hook_ingests_incremental_subagent_results(self, workspace):

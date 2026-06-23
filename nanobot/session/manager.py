@@ -37,6 +37,8 @@ _SESSION_LIST_METADATA_KEYS = {
     "review_target_type",
     "review_action",
     "review_mode_variant",
+    "pinned",
+    "custom_title",
 }
 
 
@@ -630,6 +632,21 @@ class SessionManager:
                 reason=e,
             )
             return False
+
+    def update_session_metadata(self, key: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Merge *updates* into a session's metadata and persist to disk.
+
+        Returns the updated metadata dict, or ``None`` when the session file
+        does not exist.  Only websocket-channel sessions are supported (the
+        caller is responsible for key validation).
+        """
+        session = self.get_or_create(key)
+        if not isinstance(session.metadata, dict):
+            session.metadata = {}
+        session.metadata.update(updates)
+        session.updated_at = datetime.now()
+        self.save(session)
+        return session.metadata
 
     def read_session_file(self, key: str) -> dict[str, Any] | None:
         """Load a session from disk without caching; intended for read-only HTTP endpoints.

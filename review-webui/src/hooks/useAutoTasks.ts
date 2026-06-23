@@ -27,8 +27,10 @@ export function useAutoTasks() {
     [],
   );
 
+  const initializedRef = useRef(false);
+
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!initializedRef.current) setLoading(true);
     setError(null);
     try {
       const nextTasks = await listAutoTasks(auth());
@@ -42,6 +44,7 @@ export function useAutoTasks() {
       setError(message);
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, [auth]);
 

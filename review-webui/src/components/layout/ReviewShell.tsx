@@ -23,6 +23,8 @@ export interface ReviewShellProps {
   onTaskSelect: (key: string) => void;
   onNewTask: () => void;
   onTaskDelete: (key: string) => void;
+  onTaskPin: (key: string) => void;
+  onTaskRename: (key: string, customTitle: string) => Promise<void>;
   onOpenAutoTasks: () => void;
 
   /** Content areas */
@@ -50,6 +52,8 @@ export function ReviewShell({
   onTaskSelect,
   onNewTask,
   onTaskDelete,
+  onTaskPin,
+  onTaskRename,
   onOpenAutoTasks,
   mainContent,
   rightPanelContent,
@@ -81,6 +85,8 @@ export function ReviewShell({
               onSelect={onTaskSelect}
               onNewTask={onNewTask}
               onDelete={onTaskDelete}
+              onPin={onTaskPin}
+              onRename={onTaskRename}
               onOpenAutoTasks={onOpenAutoTasks}
             />
           </div>
@@ -111,9 +117,9 @@ export function ReviewShell({
               {mainContent}
             </div>
 
-            {/* Right panel (always visible if content exists) */}
+            {/* Right panel (hidden on narrow screens to avoid squeezing chat area) */}
             {rightPanelContent ? (
-              <aside className="h-full w-[300px] shrink-0 overflow-y-auto border-l bg-card scrollbar-thin scrollbar-track-transparent">
+              <aside className="hidden h-full w-[300px] shrink-0 overflow-y-auto border-l bg-card scrollbar-thin scrollbar-track-transparent md:block">
                 {rightPanelContent}
               </aside>
             ) : null}

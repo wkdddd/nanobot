@@ -15,7 +15,15 @@ from typing import Any, Iterable
 from loguru import logger
 
 from nanobot.rag.qdrant_store import stable_point_id
-from nanobot.rag.utils import ChunkerFn, ChunkKey, IndexedChunk, IndexedHit, chunk_from_row, hit_key
+from nanobot.rag.utils import (
+    ChunkerFn,
+    ChunkKey,
+    IndexedChunk,
+    IndexedHit,
+    chunk_from_row,
+    chunk_key,
+    hit_key,
+)
 
 
 def _vec_norm(vec: list[float]) -> float:
@@ -46,7 +54,7 @@ def _rerank_document_text(hit: IndexedHit) -> str:
 class RAGIndex:
     """Unified RAG index: SQLite storage + FTS5 lexical search + hnswlib ANN."""
 
-    _SCHEMA_VERSION = 3
+    _SCHEMA_VERSION = 4
 
     def __init__(
         self,
@@ -409,6 +417,28 @@ class RAGIndex:
     def _sync_vector_store_from_sqlite(self, source_type: str) -> None:
         if not self.embedding_client or not self.vector_store:
             return
+        if getattr(self.embedding_client, "unavailable", False):
+            logger.warning(
+                "Qdrant dense sync skipped source_type={} reason=embedding provider unavailable; lexical fallback active",
+                source_type,
+            )
+            return
+        ensure_available = getattr(self.embedding_client, "ensure_available", None)
+        if callable(ensure_available):
+            try:
+                if not self._run_async_blocking(ensure_available()):
+                    logger.warning(
+                        "Qdrant dense sync skipped source_type={} reason=embedding provider preflight failed; lexical fallback active",
+                        source_type,
+                    )
+                    return
+            except RuntimeError as exc:
+                logger.warning(
+                    "Qdrant dense sync skipped source_type={} reason={}",
+                    source_type,
+                    exc,
+                )
+                return
 
         embeddable = self._list_embeddable_chunks(source_type)
         if not embeddable:
@@ -416,17 +446,28 @@ class RAGIndex:
 
         collection = getattr(self.vector_store, "collection", "")
         dimensions = getattr(self.embedding_client, "dimensions", self.dimensions)
+        embedding_model = getattr(self.embedding_client, "model", "")
         fingerprint = self._vector_sync_fingerprint(
             embeddable,
             collection=collection,
-            embedding_model=getattr(self.embedding_client, "model", ""),
+            embedding_model=embedding_model,
             dimensions=dimensions,
         )
         meta_key = f"qdrant_sync:{source_type}:{collection}:{dimensions}"
         if self._meta_get(meta_key) == fingerprint:
             return
 
-        if self._sync_vector_store(source_type, embeddable):
+        chunks_to_sync = self._qdrant_chunks_needing_sync(source_type, embeddable)
+        if not chunks_to_sync:
+            self._meta_set(meta_key, fingerprint)
+            return
+
+        if self._sync_vector_store(
+            source_type,
+            chunks_to_sync,
+            embedding_model=embedding_model,
+            dimensions=dimensions,
+        ):
             self._meta_set(meta_key, fingerprint)
 
     def _list_embeddable_chunks(self, source_type: str) -> list[IndexedChunk]:
@@ -484,7 +525,69 @@ class RAGIndex:
                 (key, value),
             )
 
-    def _sync_vector_store(self, source_type: str, chunks: list[IndexedChunk]) -> bool:
+    def _qdrant_chunks_needing_sync(
+        self, source_type: str, chunks: list[IndexedChunk]
+    ) -> list[IndexedChunk]:
+        existing = self._qdrant_existing_points(source_type)
+        if existing is None:
+            return chunks
+        stale_or_missing = [
+            chunk for chunk in chunks
+            if self._qdrant_point_missing_or_stale(source_type, chunk, existing)
+        ]
+        if stale_or_missing:
+            logger.info(
+                "Qdrant dense sync backfill source_type={} chunks={} missing_or_stale={}",
+                source_type,
+                len(chunks),
+                len(stale_or_missing),
+            )
+        return stale_or_missing
+
+    @staticmethod
+    def _qdrant_point_missing_or_stale(
+        source_type: str,
+        chunk: IndexedChunk,
+        existing: dict[str, str | None],
+    ) -> bool:
+        point_id = stable_point_id(source_type, chunk_key(chunk))
+        if point_id not in existing:
+            return True
+        content_hash = existing.get(point_id)
+        return bool(content_hash and content_hash != chunk.content_hash)
+
+    def _qdrant_existing_points(self, source_type: str) -> dict[str, str | None] | None:
+        list_payloads = getattr(self.vector_store, "list_point_payloads", None)
+        if callable(list_payloads):
+            try:
+                return dict(list_payloads(source_type=source_type))
+            except Exception as exc:
+                logger.debug(
+                    "Qdrant existing payload lookup skipped source_type={} reason={}",
+                    source_type,
+                    exc,
+                )
+        list_ids = getattr(self.vector_store, "list_point_ids", None)
+        if not callable(list_ids):
+            return None
+        try:
+            return {str(point_id): None for point_id in list_ids(source_type=source_type)}
+        except Exception as exc:
+            logger.debug(
+                "Qdrant existing point lookup skipped source_type={} reason={}",
+                source_type,
+                exc,
+            )
+            return None
+
+    def _sync_vector_store(
+        self,
+        source_type: str,
+        chunks: list[IndexedChunk],
+        *,
+        embedding_model: str,
+        dimensions: int,
+    ) -> bool:
         """Best-effort dense index sync for newly replaced chunks."""
         if not self.embedding_client or not self.vector_store or not chunks:
             return False
@@ -494,12 +597,14 @@ class RAGIndex:
             return True
 
         try:
-            vectors = self._run_async_blocking(
-                self.embedding_client.embed_texts([chunk.text for chunk in embeddable])
+            vectors = self._vectors_for_chunks(
+                embeddable,
+                embedding_model=embedding_model,
+                dimensions=dimensions,
             )
             if len(vectors) != len(embeddable) or any(vector is None for vector in vectors):
                 logger.warning(
-                    "Qdrant dense sync incomplete source_type={} chunks={} vectors={}",
+                    "Qdrant dense sync skipped source_type={} reason=embedding provider unavailable; lexical fallback active chunks={} vectors={}",
                     source_type,
                     len(embeddable),
                     len(vectors),
@@ -511,7 +616,7 @@ class RAGIndex:
                 vectors=vectors,
             )
             if upserted:
-                logger.debug(
+                logger.info(
                     "Qdrant dense sync source_type={} chunks={} upserted={}",
                     source_type,
                     len(embeddable),
@@ -532,6 +637,78 @@ class RAGIndex:
                 exc,
             )
             return False
+
+    def _vectors_for_chunks(
+        self,
+        chunks: list[IndexedChunk],
+        *,
+        embedding_model: str,
+        dimensions: int,
+    ) -> list[list[float] | None]:
+        vectors: list[list[float] | None] = [None] * len(chunks)
+        missing: list[tuple[int, IndexedChunk, str]] = []
+        with self._connect() as conn:
+            for index, chunk in enumerate(chunks):
+                cache_key = self._embedding_cache_key(
+                    chunk,
+                    embedding_model=embedding_model,
+                    dimensions=dimensions,
+                )
+                cached = self._embedding_cache_get(conn, cache_key)
+                if cached is not None:
+                    vectors[index] = cached
+                else:
+                    missing.append((index, chunk, cache_key))
+        if missing:
+            texts = [chunk.text for _, chunk, _ in missing]
+            embedded = self._run_async_blocking(self.embedding_client.embed_texts(texts))
+            with self._connect() as conn:
+                for (index, _chunk, cache_key), vector in zip(missing, embedded):
+                    vectors[index] = vector
+                    if vector is not None:
+                        self._embedding_cache_set(conn, cache_key, vector)
+        return vectors
+
+    @staticmethod
+    def _embedding_cache_key(
+        chunk: IndexedChunk,
+        *,
+        embedding_model: str,
+        dimensions: int,
+    ) -> str:
+        text_hash = hashlib.sha256(chunk.text.encode("utf-8", errors="replace")).hexdigest()
+        raw = json.dumps(
+            {
+                "model": embedding_model,
+                "dimensions": int(dimensions),
+                "content_hash": chunk.content_hash,
+                "text_hash": text_hash,
+            },
+            sort_keys=True,
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _embedding_cache_get(conn: sqlite3.Connection, cache_key: str) -> list[float] | None:
+        row = conn.execute(
+            "SELECT embedding FROM embedding_cache WHERE cache_key = ?",
+            (cache_key,),
+        ).fetchone()
+        if not row or not row[0]:
+            return None
+        blob = row[0]
+        n = len(blob) // 4
+        return list(struct.unpack(f"{n}f", blob))
+
+    @staticmethod
+    def _embedding_cache_set(
+        conn: sqlite3.Connection, cache_key: str, vector: list[float]
+    ) -> None:
+        data = struct.pack(f"{len(vector)}f", *vector)
+        conn.execute(
+            "INSERT OR REPLACE INTO embedding_cache(cache_key, embedding) VALUES(?, ?)",
+            (cache_key, data),
+        )
 
     @staticmethod
     def _run_async_blocking(coro: Any) -> Any:
@@ -714,6 +891,12 @@ class RAGIndex:
                 )
             """)
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    embedding BLOB NOT NULL
+                )
+            """)
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS chunks (
                     source_type TEXT NOT NULL,
                     path TEXT NOT NULL,
@@ -802,7 +985,7 @@ class RAGIndex:
         ).fetchone()
         if not row:
             return False
-        return row[0] == content_hash and float(row[1]) == float(mtime)
+        return row[0] == content_hash
 
     @staticmethod
     def _replace_chunks(

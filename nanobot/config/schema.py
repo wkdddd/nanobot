@@ -304,6 +304,9 @@ class ReviewConfig(Base):
     rag_budget_chars: int = Field(default=16000, ge=1000, le=100000)
     rag_use_chonkie: bool = True
     rag_use_rrf: bool = True
+    token_budget: int = Field(default=100_000, ge=10_000)
+    prefetch_budget_chars: int = Field(default=16_000, ge=1_000)
+    subagent_evidence_budget_chars: int = Field(default=24_000, ge=4_000)
     github_diff_enable: bool = True
     judge: ReviewJudgeSettings = Field(default_factory=ReviewJudgeSettings)
     auto_tasks: ReviewAutoTaskSettings = Field(

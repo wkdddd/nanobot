@@ -1,18 +1,22 @@
 import { useRef, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  isStreaming?: boolean;
+  onPause?: () => void;
 }
 
 export function ChatInput({
   onSend,
   disabled = false,
-  placeholder = "Type a message\u2026",
+  placeholder = "Type a message…",
+  isStreaming = false,
+  onPause,
 }: ChatInputProps) {
   const [text, setText] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -69,18 +73,29 @@ export function ChatInput({
           style={{ height: "auto" }}
         />
       </div>
-      <Button
-        size="icon"
-        className={cn(
-          "h-8 w-8 shrink-0 rounded-lg transition-opacity",
-          isEmpty && "opacity-50"
-        )}
-        onClick={handleSend}
-        disabled={disabled || isEmpty}
-        aria-label="Send message"
-      >
-        <ArrowUp className="h-3.5 w-3.5" />
-      </Button>
+      {isStreaming ? (
+        <Button
+          size="icon"
+          className="h-8 w-8 shrink-0 rounded-lg bg-destructive/90 hover:bg-destructive text-destructive-foreground transition-opacity"
+          onClick={onPause}
+          aria-label="Stop task"
+        >
+          <Square className="h-3.5 w-3.5" />
+        </Button>
+      ) : (
+        <Button
+          size="icon"
+          className={cn(
+            "h-8 w-8 shrink-0 rounded-lg transition-opacity",
+            isEmpty && "opacity-50"
+          )}
+          onClick={handleSend}
+          disabled={disabled || isEmpty}
+          aria-label="Send message"
+        >
+          <ArrowUp className="h-3.5 w-3.5" />
+        </Button>
+      )}
     </div>
   );
 }

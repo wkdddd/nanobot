@@ -7,6 +7,8 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from nanobot.agent.loop import AgentLoop, TurnContext
+from nanobot.auto_tasks.service import AutoTaskService
+from nanobot.auto_tasks.store import AutoTaskStore
 from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.manager import ChannelManager
@@ -71,6 +73,41 @@ async def test_aiohttp_webui_serves_spa_without_ws_auth(tmp_path) -> None:
         body = await bootstrap.json()
         assert body["token"].startswith("nbwt_")
         assert body["ws_path"] == "/"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_aiohttp_empty_session_and_auto_task_lists(tmp_path) -> None:
+    channel = WebSocketChannel(
+        {
+            "enabled": True,
+            "host": "127.0.0.1",
+            "path": "/",
+        },
+        MessageBus(),
+        session_manager=SessionManager(tmp_path / "sessions"),
+        root_config=SimpleNamespace(review=SimpleNamespace(auto_tasks=SimpleNamespace())),
+    )
+    channel._auto_tasks = AutoTaskService(
+        SimpleNamespace(review=SimpleNamespace(auto_tasks=SimpleNamespace())),
+        AutoTaskStore(tmp_path / "auto-tasks.json"),
+    )
+    client = TestClient(TestServer(channel._build_aiohttp_app()))
+    await client.start_server()
+    try:
+        bootstrap = await client.get("/webui/bootstrap")
+        assert bootstrap.status == 200
+        token = (await bootstrap.json())["token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        sessions = await client.get("/api/sessions", headers=headers)
+        assert sessions.status == 200
+        assert await sessions.json() == {"sessions": []}
+
+        auto_tasks = await client.get("/api/auto-tasks", headers=headers)
+        assert auto_tasks.status == 200
+        assert await auto_tasks.json() == {"tasks": []}
     finally:
         await client.close()
 
@@ -387,6 +424,32 @@ async def test_websocket_stream_delta_includes_review_kind() -> None:
     assert conn.sent[0]["kind"] == "review_report"
     assert conn.sent[1]["event"] == "stream_end"
     assert conn.sent[1]["kind"] == "review_report"
+
+
+@pytest.mark.asyncio
+async def test_websocket_send_persists_final_message_during_refresh_gap(tmp_path, monkeypatch) -> None:
+    from nanobot.utils import webui_transcript
+
+    webui_dir = tmp_path / "webui"
+    monkeypatch.setattr(webui_transcript, "get_webui_dir", lambda: webui_dir)
+    manager = SessionManager(tmp_path)
+    channel = WebSocketChannel(
+        {"enabled": True, "host": "127.0.0.1"},
+        MessageBus(),
+        session_manager=manager,
+    )
+
+    await channel.send(OutboundMessage(
+        channel="websocket",
+        chat_id="chat",
+        content="## Performance Review Summary\n\nDone.",
+        metadata={},
+    ))
+
+    payload = channel._webui_thread_payload("websocket:chat")
+    assert payload is not None
+    assert payload["messages"][-1]["role"] == "assistant"
+    assert payload["messages"][-1]["content"] == "## Performance Review Summary\n\nDone."
 
 
 def test_stream_coalescing_keeps_review_stream_kinds_separate() -> None:

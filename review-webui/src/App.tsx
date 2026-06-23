@@ -106,6 +106,13 @@ function historyTaskFallback(session: ChatSummary | null): ReviewTask | null {
   return { target: session.title || session.preview || session.chatId };
 }
 
+function hasAssistantContent(messages: ChatMessage[] | undefined): boolean {
+  return !!messages?.some((message) =>
+    message.role === "agent"
+    && (message.content.trim().length > 0 || !!message.thinking?.trim())
+  );
+}
+
 function AuthForm({
   failed,
   onSecret,
@@ -292,7 +299,7 @@ function ReviewAppShell({
   onLogout: () => void;
 }) {
   const { client, modelName, token, refreshAuth } = useClient();
-  const { tasks, loading, error: tasksError, refresh, createTask, deleteTask } = useReviewTasks();
+  const { tasks, loading, error: tasksError, refresh, createTask, deleteTask, updateTask } = useReviewTasks();
   const [activeKey, setActiveKey] = useState<string | null>(null);
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -304,21 +311,47 @@ function ReviewAppShell({
   const [deletingKey, setDeletingKey] = useState<string | null>(null);
   const historyCacheRef = useRef<Map<string, { messages: UIMessage[]; task: ReviewTask | null; chatMessages?: ChatMessage[] }>>(new Map());
   const historyRequestRef = useRef(0);
+  const restoredActiveKeyRef = useRef(false);
+  const activeKeyInitializedRef = useRef(false);
+
+  // Persist activeKey to sessionStorage so it survives page refresh.
+  // On the initial render, activeKey is null, but we must NOT clear
+  // sessionStorage — otherwise the auto-restore effect below can never
+  // read the saved value.
+  useEffect(() => {
+    const KEY = "nanobot-review-webui.active-key";
+    if (activeKey) {
+      sessionStorage.setItem(KEY, activeKey);
+    } else if (activeKeyInitializedRef.current) {
+      sessionStorage.removeItem(KEY);
+    }
+    activeKeyInitializedRef.current = true;
+  }, [activeKey]);
 
   const activeSession = useMemo(
     () => tasks.find((task) => task.key === activeKey) ?? null,
     [activeKey, tasks],
   );
   const autoTaskSessions = useMemo(
-    () => tasks.filter((task) => !!task.autoTaskRunId),
+    () => tasks
+      .filter((task) => !!task.autoTaskRunId)
+      .sort((a, b) => {
+        if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
+        return 0;
+      }),
     [tasks],
   );
   const dailySessions = useMemo(
-    () => tasks.filter((task) => !task.autoTaskRunId),
+    () => tasks
+      .filter((task) => !task.autoTaskRunId)
+      .sort((a, b) => {
+        if (!!b.pinned !== !!a.pinned) return b.pinned ? 1 : -1;
+        return 0;
+      }),
     [tasks],
   );
   const activeChatId = activeSession?.chatId ?? (activeKey?.startsWith("websocket:") ? activeKey.slice(10) : null);
-  const { state, reset, loadHistory, startReview, sendFollowUp } = useReviewSession(
+  const { state, reset, loadHistory, startReview, sendFollowUp, cancelTurn } = useReviewSession(
     client,
     activeChatId,
   );
@@ -378,8 +411,11 @@ function ReviewAppShell({
         if (historyRequestRef.current !== requestId) return;
         const task = taskFromHistory(session, messages) ?? historyTaskFallback(session);
         const existing = historyCacheRef.current.get(key);
-        historyCacheRef.current.set(key, { messages, task, chatMessages: existing?.chatMessages });
-        loadHistory(messages, task, undefined, existing?.chatMessages);
+        const cachedChatMessages = hasAssistantContent(existing?.chatMessages)
+          ? existing?.chatMessages
+          : undefined;
+        historyCacheRef.current.set(key, { messages, task, chatMessages: cachedChatMessages });
+        loadHistory(messages, task, undefined, cachedChatMessages);
       } catch (error) {
         if (historyRequestRef.current !== requestId) return;
         const message = error instanceof Error ? error.message : "Failed to load review session";
@@ -390,6 +426,16 @@ function ReviewAppShell({
     },
     [activeKey, loadHistory, refreshAuth, reset, state.messages, state.task, tasks, token],
   );
+
+  // Auto-restore the last active session after page refresh.
+  useEffect(() => {
+    if (restoredActiveKeyRef.current || loading || tasks.length === 0 || activeKey) return;
+    const savedKey = sessionStorage.getItem("nanobot-review-webui.active-key");
+    if (savedKey && tasks.some((t) => t.key === savedKey)) {
+      restoredActiveKeyRef.current = true;
+      handleSelectTask(savedKey);
+    }
+  }, [loading, tasks, activeKey, handleSelectTask]);
 
   const handleOpenAutoTasks = useCallback(() => {
     historyRequestRef.current += 1;
@@ -418,6 +464,31 @@ function ReviewAppShell({
       }
     },
     [activeKey, deleteTask, handleNewTask],
+  );
+
+  const handlePinTask = useCallback(
+    async (key: string) => {
+      const task = tasks.find((t) => t.key === key);
+      if (!task) return;
+      try {
+        await updateTask(key, { pinned: !task.pinned });
+      } catch (error) {
+        console.error("Failed to pin review session", error);
+      }
+    },
+    [tasks, updateTask],
+  );
+
+  const handleRenameTask = useCallback(
+    async (key: string, customTitle: string) => {
+      try {
+        await updateTask(key, { custom_title: customTitle });
+      } catch (error) {
+        console.error("Failed to rename review session", error);
+        throw error;
+      }
+    },
+    [updateTask],
   );
 
   const handleSubmitReview = useCallback(
@@ -515,10 +586,12 @@ function ReviewAppShell({
         onTaskSelect={handleSelectTask}
         onNewTask={handleNewTask}
         onTaskDelete={handleDeleteTask}
+        onTaskPin={handlePinTask}
+        onTaskRename={handleRenameTask}
         onOpenAutoTasks={handleOpenAutoTasks}
         mainContent={
           sidebarView === "auto" ? (
-            <AutoTasksView />
+            <AutoTasksView onSessionsChanged={refresh} />
           ) : showReviewForm ? (
             <div className="flex h-full min-h-0 items-center justify-center overflow-hidden p-3">
               <NewReviewForm
@@ -532,6 +605,7 @@ function ReviewAppShell({
           ) : (
             <ChatThread
               messages={state.messages}
+              phase={state.phase}
               onSend={handleSendFollowUp}
               disabled={isSessionBusy || followUpDisabled}
               emptyTitle={
@@ -543,30 +617,33 @@ function ReviewAppShell({
                   : "The session exists, but no replayable review transcript was found."
               }
               onSelectFinding={setSelectedFinding}
+              onPause={() => cancelTurn()}
             />
           )
         }
         rightPanelContent={
-          <div className="p-4 pt-2">
-            {state.reportMarkdown && (
-              <div className="mb-3">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full gap-1.5 text-xs"
-                  onClick={handleExport}
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  Export Report
-                </Button>
-              </div>
-            )}
-            <CodePanel
-              finding={selectedFinding}
-              sessionKey={activeKey}
-              auth={apiAuth}
-            />
-          </div>
+          showReviewForm ? undefined : (
+            <div className="p-4 pt-2">
+              {state.reportMarkdown && (
+                <div className="mb-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full gap-1.5 text-xs"
+                    onClick={handleExport}
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    Export Report
+                  </Button>
+                </div>
+              )}
+              <CodePanel
+                finding={selectedFinding}
+                sessionKey={activeKey}
+                auth={apiAuth}
+              />
+            </div>
+          )
         }
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((value) => !value)}

@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FindingDetail } from "@/components/findings/FindingDetail";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Finding } from "@/hooks/useReviewSession";
 
 interface ChatMessageProps {
@@ -42,9 +42,43 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
     && message.type === "text"
     && message.content.trim().length === 0
     && !!message.thinking?.trim();
-  const [showThinking, setShowThinking] = useState(Boolean(message.streaming || isThinkingOnly));
   const hasThinking = message.thinking && message.thinking.length > 0;
+  const [userToggledThinking, setUserToggledThinking] = useState(false);
+  const [showThinking, setShowThinking] = useState(() => Boolean(message.streaming || isThinkingOnly));
+  const collapseTimerRef = useRef<number | null>(null);
   const hasVisibleContent = message.type !== "text" || message.content.trim().length > 0;
+  const toggleThinking = () => {
+    setUserToggledThinking(true);
+    setShowThinking((value) => !value);
+  };
+
+  useEffect(() => {
+    if (!hasThinking) return;
+    if (collapseTimerRef.current !== null) {
+      window.clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
+    }
+    if (message.streaming) {
+      if (!userToggledThinking) setShowThinking(true);
+      return;
+    }
+    if (isThinkingOnly) {
+      if (!userToggledThinking) setShowThinking(true);
+      return;
+    }
+    if (!userToggledThinking) {
+      collapseTimerRef.current = window.setTimeout(() => {
+        setShowThinking(false);
+        collapseTimerRef.current = null;
+      }, 700);
+    }
+    return () => {
+      if (collapseTimerRef.current !== null) {
+        window.clearTimeout(collapseTimerRef.current);
+        collapseTimerRef.current = null;
+      }
+    };
+  }, [hasThinking, isThinkingOnly, message.streaming, userToggledThinking]);
 
   return (
     <div className={cn("flex flex-col", isUser ? "items-end" : "items-start")}>
@@ -52,7 +86,7 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
       {hasThinking && !isUser && (
         <div className="mb-1.5 w-full max-w-[80%]">
           <button
-            onClick={() => setShowThinking(!showThinking)}
+            onClick={toggleThinking}
             className="flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground transition-colors px-1"
             aria-label="Toggle thinking"
             aria-expanded={showThinking}

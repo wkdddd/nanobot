@@ -541,7 +541,11 @@ class AgentLoop:
         session_key: str | None = None,
     ) -> None:
         """Update context for all tools that need routing info."""
-        from nanobot.agent.tools.context import ContextAware, RequestContext
+        from nanobot.agent.tools.context import (
+            ContextAware,
+            RequestContext,
+            set_current_request_context,
+        )
 
         if session_key is not None:
             effective_key = session_key
@@ -562,6 +566,7 @@ class AgentLoop:
             tool = self.tools.get(name)
             if tool and isinstance(tool, ContextAware):
                 tool.set_context(request_ctx)
+        set_current_request_context(request_ctx)
 
     @staticmethod
     def _runtime_chat_id(msg: InboundMessage) -> str:
@@ -832,11 +837,22 @@ class AgentLoop:
                 _session_meta[ReviewMetaKey.ALLOWED_DIMENSIONS] = review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS]
                 if review_hook is not None and hasattr(review_hook, "set_allowed_dimensions"):
                     review_hook.set_allowed_dimensions(review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS])
+            if ReviewMetaKey.GITHUB_PREFETCH_READY in review_meta:
+                _session_meta[ReviewMetaKey.GITHUB_PREFETCH_READY] = review_meta[ReviewMetaKey.GITHUB_PREFETCH_READY]
+            if review_meta:
+                updated_tool_meta = {
+                    **dict(metadata or {}),
+                    **{
+                        key: value
+                        for key, value in review_meta.items()
+                        if key != ReviewMetaKey.EVIDENCE_PROVIDER
+                    },
+                }
                 self._set_tool_context(
                     channel,
                     chat_id,
                     message_id,
-                    {**(metadata or {}), ReviewMetaKey.ALLOWED_DIMENSIONS: review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS]},
+                    updated_tool_meta,
                     session_key=session_key,
                 )
             if specialist_prompt:
@@ -1017,6 +1033,9 @@ class AgentLoop:
                         "agent.pending_queue.routed",
                         status="success",
                         session=effective_key,
+                        source=msg.metadata.get("injected_event") or "user_message",
+                        sender=msg.sender_id,
+                        content_chars=len(msg.content or ""),
                     )
                     continue
             # Compute the effective session key before dispatching

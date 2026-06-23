@@ -18,9 +18,11 @@ class ReviewMetaKey:
     ACTION = "review_action"
     FOCUS = "review_focus"
     TARGET_PATHS = "review_target_paths"
+    TARGET_REF = "review_target_ref"
     MAX_SUBAGENTS = "review_max_subagents"
     ALLOWED_DIMENSIONS = "allowed_review_dimensions"
     EVIDENCE_PROVIDER = "_review_evidence_service"
+    GITHUB_PREFETCH_READY = "_review_github_prefetch_ready"
 
 ReviewTargetType = Literal["auto", "github", "local"]
 ReviewDepth = Literal["quick", "full", "deep"]
@@ -147,7 +149,15 @@ def normalize_review_dimension(value: str | None) -> str | None:
         return simplified
     for key, role in ALL_REVIEW_ROLES.items():
         label = role.label.strip().lower()
-        if raw == label or raw == label.removesuffix(" reviewer").strip():
+        short_label = label.removesuffix(" reviewer").strip()
+        if (
+            raw == label
+            or raw == short_label
+            or raw == short_label + " review"
+            or raw.startswith(label + " ")
+            or raw.startswith(short_label + " review ")
+            or raw.startswith(short_label + " reviewer ")
+        ):
             return key
     return None
 
@@ -166,6 +176,7 @@ class ReviewPlan:
     target_repo: str | None = None
     pr_number: int | None = None
     target_paths: list[str] = field(default_factory=list)
+    target_ref: str | None = None
     prefetch_summary: str | None = None
 
 

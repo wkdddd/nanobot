@@ -14,6 +14,7 @@ from loguru import logger
 
 from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.agent.violation_classifier import classify_violation
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.utils.helpers import (
     IncrementalThinkExtractor,
@@ -34,7 +35,6 @@ from nanobot.utils.runtime import (
     ensure_nonempty_tool_result,
     is_blank_text,
     repeated_external_lookup_error,
-    repeated_workspace_violation_error,
 )
 
 _DEFAULT_ERROR_MESSAGE = "Sorry, I encountered an error calling the AI model."
@@ -273,14 +273,7 @@ class AgentRunner:
                 # may repair or compact historical messages for the model, but
                 # those synthetic edits must not shift the append boundary used
                 # later when the caller saves only the new turn.
-                messages_for_model = self._drop_orphan_tool_results(messages)
-                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
-                messages_for_model = self._microcompact(messages_for_model)
-                messages_for_model = self._apply_tool_result_budget(spec, messages_for_model)
-                messages_for_model = self._snip_history(spec, messages_for_model)
-                # Snipping may have created new orphans; clean them up.
-                messages_for_model = self._drop_orphan_tool_results(messages_for_model)
-                messages_for_model = self._backfill_missing_tool_results(messages_for_model)
+                messages_for_model = self._prepare_messages(spec, messages)
             except Exception:
                 logger.exception(
                     "Context governance failed on turn {} for {}; applying minimal repair",
@@ -823,7 +816,7 @@ class AgentRunner:
                 "status": "error",
                 "detail": prep_error.split(": ", 1)[-1][:120],
             }
-            handled = self._classify_violation(
+            handled = classify_violation(
                 raw_text=prep_error,
                 soft_payload=prep_error + hint,
                 event=event,
@@ -879,9 +872,8 @@ class AgentRunner:
                 "detail": exc_text.replace("\n", " ").strip()[:160],
             }
             payload = f"Error: {exc_text}"
-            handled = self._classify_violation(
+            handled = classify_violation(
                 raw_text=str(exc),
-                # Preserve legacy exception payloads without the retry hint.
                 soft_payload=payload,
                 event=event,
                 tool_call=tool_call,
@@ -899,7 +891,7 @@ class AgentRunner:
                 "status": "error",
                 "detail": result.replace("\n", " ").strip()[:120],
             }
-            handled = self._classify_violation(
+            handled = classify_violation(
                 raw_text=result,
                 soft_payload=result + hint,
                 event=event,
@@ -919,98 +911,6 @@ class AgentRunner:
         elif len(detail) > 120:
             detail = detail[:120] + "..."
         return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
-
-    # SSRF is a hard security block at the tool boundary, but the agent turn
-    # should recover conversationally instead of aborting the runtime.
-    _SSRF_MARKERS: tuple[str, ...] = (
-        "internal/private url detected",
-        "private/internal address",
-        "private address",
-    )
-    _SSRF_BOUNDARY_NOTE: str = (
-        "This is a non-bypassable security boundary. Stop trying to access "
-        "private/internal URLs. Do not retry with curl, wget, encoded IPs, "
-        "alternate DNS, redirects, proxies, or another tool. Ask the user for "
-        "local files, logs, screenshots, or an explicit safe public URL instead. "
-        "If the user explicitly trusts this private URL, ask them to whitelist "
-        "the exact IP/CIDR via tools.ssrfWhitelist."
-    )
-
-    # Non-SSRF boundary markers returned to the LLM as recoverable tool errors.
-    _WORKSPACE_VIOLATION_MARKERS: tuple[str, ...] = (
-        "outside the configured workspace",
-        "outside allowed directory",
-        "working_dir is outside",
-        "working_dir could not be resolved",
-        "path outside working dir",
-        "path traversal detected",
-    )
-
-    @classmethod
-    def _is_ssrf_violation(cls, text: str) -> bool:
-        if not text:
-            return False
-        lowered = text.lower()
-        return any(marker in lowered for marker in cls._SSRF_MARKERS)
-
-    @classmethod
-    def _is_workspace_violation(cls, text: str) -> bool:
-        """True when *text* looks like any policy boundary rejection."""
-        if not text:
-            return False
-        lowered = text.lower()
-        if cls._is_ssrf_violation(lowered):
-            return True
-        return any(marker in lowered for marker in cls._WORKSPACE_VIOLATION_MARKERS)
-
-    def _classify_violation(
-        self,
-        *,
-        raw_text: str,
-        soft_payload: str,
-        event: dict[str, str],
-        tool_call: ToolCallRequest,
-        workspace_violation_counts: dict[str, int],
-    ) -> tuple[Any, dict[str, str], BaseException | None] | None:
-        """Classify safety-boundary failures, or return ``None`` to pass through."""
-        if self._is_ssrf_violation(raw_text):
-            logger.warning(
-                "Tool {} blocked by SSRF guard; returning non-retryable tool error: {}",
-                tool_call.name,
-                raw_text.replace("\n", " ").strip()[:200],
-            )
-            event["detail"] = self._event_detail("ssrf_violation: ", raw_text)
-            return self._ssrf_soft_payload(raw_text), event, None
-
-        if self._is_workspace_violation(raw_text):
-            escalation = repeated_workspace_violation_error(
-                tool_call.name,
-                tool_call.arguments,
-                workspace_violation_counts,
-            )
-            event["detail"] = self._event_detail("workspace_violation: ", raw_text)
-            if escalation is not None:
-                logger.warning(
-                    "Tool {} hit workspace boundary repeatedly; escalating hint",
-                    tool_call.name,
-                )
-                event["detail"] = self._event_detail(
-                    "workspace_violation_escalated: ",
-                    raw_text,
-                )
-                return escalation, event, None
-            return soft_payload, event, None
-
-        return None
-
-    @classmethod
-    def _ssrf_soft_payload(cls, raw_text: str) -> str:
-        text = raw_text.strip() or "Error: request blocked by SSRF guard"
-        return f"{text}\n\n{cls._SSRF_BOUNDARY_NOTE}"
-
-    @staticmethod
-    def _event_detail(prefix: str, text: str, limit: int = 160) -> str:
-        return (prefix + text.replace("\n", " ").strip())[:limit]
 
     async def _emit_checkpoint(
         self,
@@ -1068,6 +968,22 @@ class AgentRunner:
         if isinstance(content, str) and len(content) > spec.max_tool_result_chars:
             return truncate_text(content, spec.max_tool_result_chars)
         return content
+
+    def _prepare_messages(
+        self,
+        spec: AgentRunSpec,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Prepare message history for the model in a fixed-order pipeline."""
+        result = self._drop_orphan_tool_results(messages)
+        result = self._backfill_missing_tool_results(result)
+        result = self._microcompact(result)
+        result = self._apply_tool_result_budget(spec, result)
+        result = self._snip_history(spec, result)
+        # Snipping may create new orphans
+        result = self._drop_orphan_tool_results(result)
+        result = self._backfill_missing_tool_results(result)
+        return result
 
     @staticmethod
     def _drop_orphan_tool_results(

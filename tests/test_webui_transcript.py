@@ -101,6 +101,19 @@ def test_replay_preserves_review_thinking_when_browser_refresh_saw_no_stream_end
     assert messages[0]["reasoning"] == "checking repo"
 
 
+def test_replay_flushes_open_review_thinking_at_eof_for_browser_refresh() -> None:
+    messages = replay_transcript_to_ui_messages([
+        {"event": "user", "text": "审查", "createdAt": 90},
+        {"event": "delta", "kind": "review_thinking", "text": "checking", "createdAt": 100},
+        {"event": "delta", "kind": "review_thinking", "text": " repo", "createdAt": 110},
+    ])
+
+    assert len(messages) == 2
+    assert messages[1]["role"] == "assistant"
+    assert messages[1]["content"] == ""
+    assert messages[1]["reasoning"] == "checking repo"
+
+
 def test_replay_keeps_review_thinking_separate_from_plain_report_message() -> None:
     messages = replay_transcript_to_ui_messages([
         {"event": "delta", "kind": "review_thinking", "text": "checking repo", "createdAt": 100},

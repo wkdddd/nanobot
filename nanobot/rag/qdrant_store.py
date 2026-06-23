@@ -44,6 +44,7 @@ class QdrantVectorStore:
         self.dimensions = dimensions
         self.check_compatibility = check_compatibility
         self._client: Any | None = None
+        self._payload_indexes_ready = False
 
     @classmethod
     def from_config(cls, config: Any, *, dimensions: int = 1024) -> "QdrantVectorStore | None":
@@ -102,6 +103,7 @@ class QdrantVectorStore:
             except Exception:
                 exists = False
         if exists:
+            self._ensure_payload_indexes(client, models)
             return
         client.create_collection(
             collection_name=self.collection,
@@ -110,6 +112,31 @@ class QdrantVectorStore:
                 distance=models.Distance.COSINE,
             ),
         )
+        self._ensure_payload_indexes(client, models)
+
+    def _ensure_payload_indexes(self, client: Any, models: Any) -> None:
+        if self._payload_indexes_ready:
+            return
+        try:
+            field_schema = getattr(models, "PayloadSchemaType", None)
+            if field_schema is not None:
+                field_schema = field_schema.KEYWORD
+            else:
+                field_schema = "keyword"
+            client.create_payload_index(
+                collection_name=self.collection,
+                field_name="source_type",
+                field_schema=field_schema,
+            )
+        except Exception as exc:
+            if not _is_payload_index_exists_error(exc):
+                logger.warning(
+                    "Qdrant payload index ensure skipped collection={} field=source_type reason={}",
+                    self.collection,
+                    exc,
+                )
+                return
+        self._payload_indexes_ready = True
 
     def upsert_chunks(
         self,
@@ -258,6 +285,43 @@ class QdrantVectorStore:
             )
         return len(removed)
 
+    def list_point_ids(self, *, source_type: str) -> set[str]:
+        return set(self.list_point_payloads(source_type=source_type))
+
+    def list_point_payloads(self, *, source_type: str) -> dict[str, str | None]:
+        from qdrant_client import models
+
+        self.ensure_collection()
+        client = self._get_client()
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="source_type",
+                    match=models.MatchValue(value=source_type),
+                )
+            ]
+        )
+        points_by_id: dict[str, str | None] = {}
+        offset: Any | None = None
+        while True:
+            points, offset = client.scroll(
+                collection_name=self.collection,
+                scroll_filter=query_filter,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                payload = dict(getattr(point, "payload", {}) or {})
+                content_hash = payload.get("content_hash")
+                points_by_id[str(getattr(point, "id"))] = (
+                    str(content_hash) if content_hash else None
+                )
+            if offset is None:
+                break
+        return points_by_id
+
 
 def _payload_key(payload: dict[str, Any]) -> ChunkKey | None:
     raw = payload.get("chunk_key")
@@ -270,3 +334,15 @@ def _payload_key(payload: dict[str, Any]) -> ChunkKey | None:
     if path is None or start_line is None or end_line is None or kind is None:
         return None
     return (str(path), int(start_line), int(end_line), str(kind))
+
+
+def _is_payload_index_exists_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "already exists",
+            "already has an index",
+            "index already",
+        )
+    )

@@ -21,11 +21,26 @@ class AutoTaskStore:
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or (get_runtime_subdir("auto_tasks") / "tasks.json")
 
+    @staticmethod
+    def _empty_data() -> dict[str, Any]:
+        return {"tasks": [], "runs": []}
+
+    @classmethod
+    def _normalize_data(cls, data: Any) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            return cls._empty_data()
+        normalized = dict(data)
+        if not isinstance(normalized.get("tasks"), list):
+            normalized["tasks"] = []
+        if not isinstance(normalized.get("runs"), list):
+            normalized["runs"] = []
+        return normalized
+
     def _read(self) -> dict[str, Any]:
         if not self.path.is_file():
-            return {"tasks": [], "runs": []}
+            return self._empty_data()
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            return self._normalize_data(json.loads(self.path.read_text(encoding="utf-8")))
         except Exception as exc:
             log_event(
                 logger,
@@ -35,7 +50,7 @@ class AutoTaskStore:
                 path=self.path,
                 reason=exc,
             )
-            return {"tasks": [], "runs": []}
+            return self._empty_data()
 
     def _write(self, data: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)

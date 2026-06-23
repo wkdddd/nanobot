@@ -48,6 +48,12 @@ class ReviewFinalizer:
         "could not fetch",
         "context unavailable",
         "no repository context",
+        "error:",
+        "failed",
+        "blocked",
+        "disabled",
+        "no structured findings",
+        "invalid json",
         "无法审查",
         "无法直接拉取",
         "未找到",
@@ -199,6 +205,8 @@ class ReviewFinalizer:
 
     def finalize(self, target_name: str) -> ReviewFinalizerResult:
         """Produce final report markdown from all ingested dimensions."""
+        if not self._dimensions:
+            self._errors.append("No review dimension results were produced.")
         self._apply_judged_defaults()
         needs_confirmation = self.get_needs_confirmation()
         try:
@@ -235,6 +243,8 @@ class ReviewFinalizer:
             return ""
         lower = text.lower()
         if not any(pattern in lower for pattern in cls._INCOMPLETE_ERROR_PATTERNS):
+            if not cls._looks_like_empty_or_structured_output(text):
+                return "No structured findings were produced by this reviewer."
             return ""
         for line in text.splitlines():
             stripped = line.strip()
@@ -243,6 +253,20 @@ class ReviewFinalizer:
             if any(pattern in stripped.lower() for pattern in cls._INCOMPLETE_ERROR_PATTERNS):
                 return stripped[:300]
         return text[:300]
+
+    @classmethod
+    def _looks_like_empty_or_structured_output(cls, text: str) -> bool:
+        stripped = text.strip()
+        if stripped in {"[]", "```json\n[]\n```", "```[]```"}:
+            return True
+        for candidate in cls._json_candidate_texts(stripped):
+            try:
+                data = json.loads(candidate)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(data, list):
+                return True
+        return False
 
     @staticmethod
     def _normalize_allowed_dimensions(

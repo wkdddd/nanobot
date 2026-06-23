@@ -20,11 +20,13 @@ export interface ChatMessageItem {
 
 interface ChatThreadProps {
   messages: ChatMessageItem[];
+  phase?: string;
   onSend: (text: string) => void;
   disabled?: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
   onSelectFinding?: (finding: Finding) => void;
+  onPause?: () => void;
 }
 
 /** Group consecutive finding messages into batches */
@@ -98,17 +100,29 @@ function FindingSkeletonRow() {
 
 export function ChatThread({
   messages,
+  phase,
   onSend,
   disabled = false,
   emptyTitle = "Start a review to see messages here",
   emptyDescription = "Your conversation with the review agent will appear in this thread.",
   onSelectFinding,
+  onPause,
 }: ChatThreadProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const shouldScrollRef = useRef(true);
   const [collapsedBatches, setCollapsedBatches] = useState<Set<number>>(new Set());
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+
+  const isStreaming = useMemo(
+    () =>
+      messages.some((msg) => msg.streaming)
+      || phase === "submitting"
+      || phase === "prefetching"
+      || phase === "reviewing"
+      || phase === "finalizing",
+    [messages, phase],
+  );
 
   const scrollToBottom = useCallback(() => {
     if (bottomRef.current) {
@@ -338,6 +352,8 @@ export function ChatThread({
         onSend={onSend}
         disabled={disabled}
         placeholder={disabled ? "Please wait..." : "Type a message..."}
+        isStreaming={isStreaming}
+        onPause={onPause}
       />
     </div>
   );

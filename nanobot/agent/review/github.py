@@ -37,6 +37,7 @@ class GitHubRepoConfig(Base):
     max_tree_entries: int = 10_000
     max_index_files: int = 400
     max_patch_files: int = 200
+    fetch_concurrency: int = 8
 
 
 class GitHubRepoReader:
@@ -57,6 +58,8 @@ class GitHubRepoReader:
         pattern: str | None = None,
         max_entries: int = 500,
         pr_number: int | None = None,
+        offset: int = 1,
+        limit: int = 200,
     ) -> str:
         try:
             owner, repo_name = parse_repo(repo)
@@ -70,7 +73,7 @@ class GitHubRepoReader:
         if action == "file":
             if not path:
                 return "Error: 'path' parameter is required for GitHub file action."
-            return await self._action_file(owner, repo_name, path, ref)
+            return await self._action_file(owner, repo_name, path, ref, offset=offset, limit=limit)
         if action == "diff":
             if pr_number is None:
                 return "Error: pr_number is required for GitHub diff action."
@@ -145,6 +148,7 @@ class GitHubRepoReader:
         params: dict[str, Any] | None = None,
         *,
         trace_id: str = "no-trace",
+        client: httpx.AsyncClient | None = None,
     ) -> dict | list | str:
         started = time.perf_counter()
         token = await self._get_token()
@@ -154,8 +158,11 @@ class GitHubRepoReader:
 
         url = f"https://api.github.com/{endpoint.lstrip('/')}"
         try:
-            async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+            if client is not None:
                 response = await client.get(url, headers=headers, params=params or {})
+            else:
+                async with httpx.AsyncClient(timeout=self.config.timeout) as owned_client:
+                    response = await owned_client.get(url, headers=headers, params=params or {})
         except httpx.TimeoutException:
             log_event(
                 logger,
@@ -229,7 +236,7 @@ class GitHubRepoReader:
             return f"Error: GitHub API returned {response.status_code}: {response.text[:200]}"
         log_event(
             logger,
-            "info",
+            "debug",
             "repo_review.github.api.success",
             status="success",
             trace_id=trace_id,
@@ -337,6 +344,9 @@ class GitHubRepoReader:
         repo: str,
         path: str,
         ref: str | None,
+        *,
+        offset: int = 1,
+        limit: int = 200,
     ) -> str:
         trace_id = "github.file"
         started = time.perf_counter()
@@ -382,19 +392,36 @@ class GitHubRepoReader:
         elif encoding == "none" or not content:
             return (
                 f"File '{path}' is too large for the Contents API ({size} bytes). "
-                "Consider using a smaller file or cloning the repo."
+                "Use github_review(action='repo', review_query=...) to retrieve targeted evidence."
             )
         else:
             decoded = content
 
-        if size > self.config.max_file_size:
-            decoded = decoded[: self.config.max_file_size]
-            truncated_note = f"\n\n[Truncated at {self.config.max_file_size} bytes, total {size}]"
-        else:
-            truncated_note = ""
+        all_lines = decoded.replace("\r\n", "\n").splitlines()
+        total_lines = len(all_lines)
+        offset = max(int(offset or 1), 1)
+        limit = min(max(int(limit or 200), 1), 500)
+        if total_lines and offset > total_lines:
+            return f"Error: offset {offset} is beyond end of GitHub file '{path}' ({total_lines} lines)."
 
-        header = f"File: {path} ({size} bytes, sha: {data.get('sha', '?')[:8]})\n{'-' * 40}\n"
-        result = header + decoded + truncated_note
+        start = offset - 1
+        end = min(start + limit, total_lines)
+        numbered = [f"{start + idx + 1}| {line}" for idx, line in enumerate(all_lines[start:end])]
+        header = (
+            f"GitHub File: {owner}/{repo}/{path} "
+            f"({size} bytes, sha: {data.get('sha', '?')[:8]}, lines {offset}-{end} of {total_lines})"
+            f"\n{'-' * 40}\n"
+        )
+        result = header + "\n".join(numbered)
+        if end < total_lines:
+            result += (
+                "\n\n(Continue with "
+                f"github_review(action='file', target_repo='{owner}/{repo}', repo_path='{path}', "
+                f"offset={end + 1}, limit={limit})"
+                ")"
+            )
+        else:
+            result += f"\n\n(End of GitHub file - {total_lines} lines total)"
         log_event(
             logger,
             "info",
@@ -406,7 +433,9 @@ class GitHubRepoReader:
             kind="file",
             size=size,
             chars=len(result),
-            truncated=bool(truncated_note),
+            truncated=end < total_lines,
+            offset=offset,
+            limit=limit,
             elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )
         return result
@@ -481,6 +510,7 @@ class GitHubRepoReader:
             raise RuntimeError(tree_data)
         files: dict[str, str] = {}
         limit = min(max_files or self.config.max_index_files, self.config.max_index_files)
+        candidates: list[str] = []
         for item in tree_data.get("tree", []):
             if item.get("type") != "blob":
                 continue
@@ -493,11 +523,27 @@ class GitHubRepoReader:
             size = int(item.get("size") or 0)
             if size > self.config.max_file_size:
                 continue
-            content = await self._fetch_file_text(owner, repo_name, path, ref, trace_id=trace_id)
-            if content is not None:
-                files[path] = content
-            if len(files) >= limit:
+            candidates.append(path)
+            if len(candidates) >= limit:
                 break
+        concurrency = min(max(int(self.config.fetch_concurrency or 1), 1), 32)
+        semaphore = asyncio.Semaphore(concurrency)
+        async with httpx.AsyncClient(timeout=self.config.timeout) as client:
+            async def fetch(path: str) -> tuple[str, str | None]:
+                async with semaphore:
+                    content = await self._fetch_file_text(
+                        owner,
+                        repo_name,
+                        path,
+                        ref,
+                        trace_id=trace_id,
+                        client=client,
+                    )
+                    return path, content
+
+            for path, content in await asyncio.gather(*(fetch(path) for path in candidates)):
+                if content is not None:
+                    files[path] = content
         log_event(
             logger,
             "info",
@@ -505,8 +551,10 @@ class GitHubRepoReader:
             status="success",
             repo=f"{owner}/{repo_name}",
             ref=ref,
+            mode="full_repo",
             files=len(files),
             limit=limit,
+            concurrency=concurrency,
         )
         return f"{owner}/{repo_name}@{ref}", files
 
@@ -687,9 +735,15 @@ class GitHubRepoReader:
         ref: str | None,
         *,
         trace_id: str = "no-trace",
+        client: httpx.AsyncClient | None = None,
     ) -> str | None:
         params = {"ref": ref} if ref else {}
-        data = await self._api_get(f"repos/{owner}/{repo}/contents/{path}", params, trace_id=trace_id)
+        data = await self._api_get(
+            f"repos/{owner}/{repo}/contents/{path}",
+            params,
+            trace_id=trace_id,
+            client=client,
+        )
         if isinstance(data, str) or isinstance(data, list):
             return None
         if int(data.get("size") or 0) > self.config.max_file_size:

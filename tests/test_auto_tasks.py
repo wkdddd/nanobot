@@ -53,6 +53,23 @@ def test_store_crud_and_runs(tmp_path) -> None:
     assert store.get_task(task.id) is None
 
 
+def test_store_treats_malformed_empty_state_as_empty_lists(tmp_path) -> None:
+    path = tmp_path / "tasks.json"
+    path.write_text("null", encoding="utf-8")
+    store = AutoTaskStore(path)
+
+    assert store.list_tasks() == []
+    assert store.list_runs() == []
+
+    path.write_text("[]", encoding="utf-8")
+    assert store.list_tasks() == []
+    assert store.list_runs() == []
+
+    path.write_text('{"tasks": null, "runs": null}', encoding="utf-8")
+    assert store.list_tasks() == []
+    assert store.list_runs() == []
+
+
 def test_session_list_includes_safe_auto_task_metadata(tmp_path) -> None:
     manager = SessionManager(tmp_path)
     session = manager.get_or_create("websocket:auto-task-chat")

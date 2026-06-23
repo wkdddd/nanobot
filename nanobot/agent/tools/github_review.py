@@ -8,8 +8,10 @@ import uuid
 from loguru import logger
 
 from nanobot.agent.review.types import ReviewAction
+from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.review.utils import parse_pr_target
 from nanobot.agent.tools.base import tool_parameters
+from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.review_base import (
     ALL_REVIEW_TOOL_ACTIONS,
     READER_ACTIONS,
@@ -66,6 +68,17 @@ from nanobot.agent.tools.schema import (
             minimum=1,
             maximum=10000,
         ),
+        offset=IntegerSchema(
+            1,
+            description="Line number to start reading from for action='file' (1-indexed)",
+            minimum=1,
+        ),
+        limit=IntegerSchema(
+            200,
+            description="Maximum lines to return for action='file'",
+            minimum=1,
+            maximum=500,
+        ),
         review_query=StringSchema(
             "Question or keywords describing repository review references to retrieve",
             nullable=True,
@@ -111,6 +124,8 @@ class GitHubReviewTool(ReviewToolBase):
         ref: str | None = None,
         tree_pattern: str | None = None,
         tree_limit: int = 500,
+        offset: int = 1,
+        limit: int = 200,
         max_results: int = 5,
         include_tests: bool | None = None,
     ) -> str:
@@ -164,6 +179,18 @@ class GitHubReviewTool(ReviewToolBase):
                 result_text = "Error: pr_number is required for github_review action='diff'."
                 logger.warning("github_review.missing_pr trace_id={} repo={}", trace_id, repo)
                 return result_text
+            if action_value == ReviewAction.REPO.value and self._has_github_prefetch_for(repo):
+                result_text = (
+                    "Error: full GitHub repository evidence was already prefetched for this review turn. "
+                    "Use github_review(action='meta'/'tree'/'file') for precise follow-up evidence instead "
+                    "of re-fetching the whole repository."
+                )
+                logger.warning(
+                    "github_review.duplicate_repo_blocked trace_id={} repo={}",
+                    trace_id,
+                    repo,
+                )
+                return result_text
             if action_value in READER_ACTIONS:
                 result_text = await self.github.execute(
                     action=action_value,
@@ -173,6 +200,8 @@ class GitHubReviewTool(ReviewToolBase):
                     pattern=tree_pattern,
                     max_entries=tree_limit,
                     pr_number=int(pr_number or 0),
+                    offset=offset,
+                    limit=limit,
                 )
                 return result_text
             result_text = await self.evidence_service.dispatch(
@@ -211,3 +240,16 @@ class GitHubReviewTool(ReviewToolBase):
                 error=error,
                 started=started,
             )
+
+    @staticmethod
+    def _has_github_prefetch_for(repo: str) -> bool:
+        ctx = current_request_context()
+        metadata = ctx.metadata if ctx is not None else {}
+        if str(metadata.get(ReviewMetaKey.TARGET_TYPE) or "").strip().lower() != "github":
+            return False
+        if not metadata.get(ReviewMetaKey.GITHUB_PREFETCH_READY):
+            return False
+        target_repo = str(metadata.get(ReviewMetaKey.TARGET) or metadata.get("github_repo") or "")
+        if "/" in repo and "/" in target_repo:
+            return repo.strip().lower().rstrip("/") in target_repo.lower()
+        return True

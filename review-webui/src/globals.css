@@ -62,6 +62,14 @@
 }
 
 @layer utilities {
+  /* Fix Radix ScrollArea horizontal overflow: the internal wrapper uses
+     ``display: table`` which expands to fit content, pushing elements
+     (e.g. delete buttons in the sidebar) outside the visible viewport. */
+  [data-radix-scroll-area-viewport] > div {
+    display: block !important;
+    max-width: 100% !important;
+  }
+
   /* Markdown body styles */
   .markdown-content > :first-child {
     @apply mt-0;

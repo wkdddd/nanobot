@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { deleteSession, listSessions, type ApiAuth } from "@/lib/api";
+import { deleteSession, listSessions, updateSession, type ApiAuth } from "@/lib/api";
 import type { ChatSummary } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
 
@@ -21,8 +21,10 @@ export function useReviewTasks() {
     [],
   );
 
+  const initializedRef = useRef(false);
+
   const refresh = useCallback(async () => {
-    setLoading(true);
+    if (!initializedRef.current) setLoading(true);
     setError(null);
     try {
       setTasks(await listSessions(auth()));
@@ -32,6 +34,7 @@ export function useReviewTasks() {
       setError(message);
     } finally {
       setLoading(false);
+      initializedRef.current = true;
     }
   }, [auth]);
 
@@ -74,5 +77,31 @@ export function useReviewTasks() {
     }
   }, [auth]);
 
-  return { tasks, loading, error, refresh, createTask, deleteTask };
+  const updateTask = useCallback(
+    async (key: string, updates: { pinned?: boolean; custom_title?: string }) => {
+      try {
+        await updateSession(auth(), key, updates);
+        setTasks((prev) =>
+          prev.map((task) =>
+            task.key === key
+              ? {
+                  ...task,
+                  pinned: updates.pinned ?? task.pinned,
+                  customTitle: updates.custom_title ?? task.customTitle,
+                }
+              : task,
+          ),
+        );
+        setError(null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to update session";
+        console.error("Failed to update review session", err);
+        setError(message);
+        throw err;
+      }
+    },
+    [auth],
+  );
+
+  return { tasks, loading, error, refresh, createTask, deleteTask, updateTask };
 }

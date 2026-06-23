@@ -1,5 +1,5 @@
-import { useRef } from "react";
-import { Plus, MessageSquare, Trash2, Loader2, Github } from "lucide-react";
+import { useState, useRef, useEffect } from "react";
+import { Plus, MessageSquare, Trash2, Loader2, Github, Pin, Pencil, Check, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -11,9 +11,12 @@ export interface ReviewSidebarProps {
   activeKey: string | null;
   loading: boolean;
   error?: string | null;
+  deletingKey?: string | null;
   onSelect: (key: string) => void;
   onNewTask: () => void;
   onDelete: (key: string) => void;
+  onPin: (key: string) => void;
+  onRename: (key: string, customTitle: string) => Promise<void>;
   onOpenAutoTasks: () => void;
 }
 
@@ -61,20 +64,37 @@ function reviewFocusLabel(focus: ReviewFocus[] | string[]): string {
   return focus.length > 0 ? focus.join(", ") : "";
 }
 
+function getDisplayTitle(task: ChatSummary, autoTask?: boolean): string {
+  if (task.customTitle?.trim()) return task.customTitle.trim();
+  const isReview = !!task.reviewTarget;
+  if (isReview) return shortReviewTarget(task.reviewTarget) || "Review";
+  return task.title
+    || (autoTask && task.githubRepo && task.githubPrNumber
+      ? `${task.githubRepo} PR #${task.githubPrNumber}`
+      : autoTask
+        ? "AutoTask Review"
+        : "Untitled Review");
+}
+
 function TaskItem({
   task,
   isActive,
   autoTask,
+  isDeleting,
   onSelect,
   onDelete,
+  onPin,
+  onRename,
 }: {
   task: ChatSummary;
   isActive: boolean;
   autoTask?: boolean;
+  isDeleting?: boolean;
   onSelect: () => void;
   onDelete: () => void;
+  onPin: () => void;
+  onRename: (customTitle: string) => Promise<void>;
 }) {
-  const deleteBtnRef = useRef<HTMLButtonElement>(null);
   const isReview = !!task.reviewTarget;
   const reviewFocus = reviewListField(task.metadata, "review_focus");
   const reviewPaths = reviewListField(task.metadata, "review_target_paths");
@@ -85,14 +105,7 @@ function TaskItem({
     reviewFocusLabel(reviewFocus),
     reviewPaths.length > 0 ? `${reviewPaths.length} path${reviewPaths.length === 1 ? "" : "s"}` : "",
   ].filter(Boolean).join(" · ");
-  const title = isReview
-    ? shortReviewTarget(task.reviewTarget) || "Review"
-    : task.title
-    || (autoTask && task.githubRepo && task.githubPrNumber
-      ? `${task.githubRepo} PR #${task.githubPrNumber}`
-      : autoTask
-        ? "AutoTask Review"
-        : "Untitled Review");
+  const displayTitle = getDisplayTitle(task, autoTask);
   const source = isReview
     ? reviewSource
     : autoTask
@@ -105,19 +118,52 @@ function TaskItem({
     : "";
   const preview = isReview ? (task.reviewTarget || "") : (task.preview || "");
 
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(displayTitle);
+  const [renameSubmitting, setRenameSubmitting] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    if (renaming) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renaming]);
+
+  const submitRename = async () => {
+    const trimmed = renameValue.trim();
+    if (!trimmed || trimmed === displayTitle) {
+      setRenaming(false);
+      return;
+    }
+    setRenameSubmitting(true);
+    try {
+      await onRename(trimmed);
+      setRenaming(false);
+    } catch {
+      // Error handled by parent
+    } finally {
+      setRenameSubmitting(false);
+    }
+  };
+
   return (
     <div
-      role="button"
-      tabIndex={0}
-      onClick={onSelect}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          onSelect();
-        }
-      }}
       className={cn(
-        "group relative flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors cursor-pointer",
+        "group relative flex w-full min-w-0 items-start gap-1.5 rounded-md px-2 py-1.5 text-left transition-colors",
         "hover:bg-secondary/60",
         isActive && "bg-secondary",
       )}
@@ -127,52 +173,154 @@ function TaskItem({
         <span className="absolute left-0 top-1/2 h-4 w-[2px] -translate-y-1/2 rounded-r-full bg-primary" />
       )}
 
-      {/* Title row */}
-      <div className="flex items-start justify-between gap-1.5">
-        <span
-          className={cn(
-            "line-clamp-1 text-xs font-medium leading-snug",
-            isActive ? "text-foreground" : "text-foreground/80",
-          )}
-        >
-          {title}
-        </span>
+      {/* Pinned indicator */}
+      {task.pinned && (
+        <Pin className="absolute right-1 top-1 h-2.5 w-2.5 text-primary/50" fill="currentColor" />
+      )}
 
-        {/* Delete button, visible on hover. */}
-        <button
-          ref={deleteBtnRef}
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete();
-          }}
-          className={cn(
-            "shrink-0 flex h-5 w-5 items-center justify-center rounded-md",
-            "text-muted-foreground/0 opacity-0 transition-all",
-            "group-hover:text-muted-foreground group-hover:opacity-100",
-            "hover:bg-destructive/10 hover:text-destructive",
-          )}
-          aria-label="Delete task"
-        >
-          <Trash2 className="h-3 w-3" />
-        </button>
-      </div>
+      {renaming ? (
+        <div className="flex min-w-0 flex-1 items-center gap-1">
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => setRenameValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); submitRename(); }
+              if (e.key === "Escape") { setRenaming(false); setRenameValue(displayTitle); }
+            }}
+            disabled={renameSubmitting}
+            className="min-w-0 flex-1 rounded border border-primary/30 bg-background px-1 py-0.5 text-xs font-medium text-foreground outline-none focus:border-primary"
+            maxLength={200}
+          />
+          <button
+            type="button"
+            onClick={submitRename}
+            disabled={renameSubmitting}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-emerald-600 hover:bg-emerald-500/10"
+            aria-label="Confirm rename"
+          >
+            {renameSubmitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+          </button>
+          <button
+            type="button"
+            onClick={() => { setRenaming(false); setRenameValue(displayTitle); }}
+            disabled={renameSubmitting}
+            className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-secondary"
+            aria-label="Cancel rename"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={onSelect}
+            title={displayTitle}
+            className="min-w-0 flex-1 overflow-hidden text-left"
+          >
+            <span
+              className={cn(
+                "block w-full truncate text-xs font-medium leading-snug",
+                isActive ? "text-foreground" : "text-foreground/80",
+              )}
+            >
+              {displayTitle}
+            </span>
 
-      {source ? (
-        <p className="line-clamp-1 text-[11px] font-medium text-muted-foreground leading-relaxed">
-          {source}
-        </p>
-      ) : null}
+            {source ? (
+              <span className="block w-full truncate text-[11px] font-medium leading-relaxed text-muted-foreground">
+                {source}
+              </span>
+            ) : null}
 
-      <p className="line-clamp-1 text-[11px] text-muted-foreground leading-relaxed">
-        {preview}
-      </p>
+            <span className="block w-full truncate text-[11px] leading-relaxed text-muted-foreground">
+              {preview}
+            </span>
 
-      {/* Relative time */}
-      {task.updatedAt && (
-        <span className="text-[10px] text-muted-foreground/60">
-          {formatRelativeTime(task.updatedAt)}
-        </span>
+            {task.updatedAt ? (
+              <span className="block text-[10px] text-muted-foreground/60">
+                {formatRelativeTime(task.updatedAt)}
+              </span>
+            ) : null}
+          </button>
+
+          {/* Action menu trigger */}
+          <div className="relative shrink-0" ref={menuRef}>
+            <button
+              type="button"
+              disabled={isDeleting}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (isDeleting) return;
+                setMenuOpen((v) => !v);
+              }}
+              className={cn(
+                "inline-flex h-6 w-6 items-center justify-center rounded-md",
+                "text-muted-foreground/80 transition-colors",
+                "hover:bg-secondary hover:text-foreground",
+                "disabled:cursor-not-allowed disabled:opacity-50",
+                menuOpen && "bg-secondary text-foreground",
+              )}
+              aria-label="Task actions"
+              title="Task actions"
+            >
+              {isDeleting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor">
+                  <circle cx="8" cy="3" r="1.5" />
+                  <circle cx="8" cy="8" r="1.5" />
+                  <circle cx="8" cy="13" r="1.5" />
+                </svg>
+              )}
+            </button>
+
+            {/* Dropdown menu */}
+            {menuOpen && !isDeleting && (
+              <div className="absolute right-0 top-7 z-50 w-32 rounded-md border bg-popover py-1 shadow-md">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    onPin();
+                  }}
+                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary"
+                >
+                  <Pin className="h-3 w-3" />
+                  {task.pinned ? "取消置顶" : "置顶"}
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    setRenameValue(displayTitle);
+                    setRenaming(true);
+                  }}
+                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-foreground hover:bg-secondary"
+                >
+                  <Pencil className="h-3 w-3" />
+                  重命名
+                </button>
+                <div className="my-0.5 h-px bg-border" />
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    onDelete();
+                  }}
+                  className="flex w-full items-center gap-2 px-2.5 py-1.5 text-xs text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 className="h-3 w-3" />
+                  删除
+                </button>
+              </div>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
@@ -186,8 +334,11 @@ function SessionSection({
   emptyTitle,
   emptyDescription,
   autoTask,
+  deletingKey,
   onSelect,
   onDelete,
+  onPin,
+  onRename,
 }: {
   title: string;
   tasks: ChatSummary[];
@@ -196,8 +347,11 @@ function SessionSection({
   emptyTitle: string;
   emptyDescription: string;
   autoTask?: boolean;
+  deletingKey?: string | null;
   onSelect: (key: string) => void;
   onDelete: (key: string) => void;
+  onPin: (key: string) => void;
+  onRename: (key: string, customTitle: string) => Promise<void>;
 }) {
   return (
     <section className="mb-3">
@@ -224,8 +378,11 @@ function SessionSection({
               task={task}
               autoTask={autoTask}
               isActive={task.key === activeKey}
+              isDeleting={task.key === deletingKey}
               onSelect={() => onSelect(task.key)}
               onDelete={() => onDelete(task.key)}
+              onPin={() => onPin(task.key)}
+              onRename={(customTitle) => onRename(task.key, customTitle)}
             />
           ))}
         </div>
@@ -243,6 +400,8 @@ export function ReviewSidebar({
   onSelect,
   onNewTask,
   onDelete,
+  onPin,
+  onRename,
   onOpenAutoTasks,
 }: ReviewSidebarProps) {
   return (
@@ -281,40 +440,46 @@ export function ReviewSidebar({
 
       {/* Task list */}
       <ScrollArea className="flex-1 px-1.5 py-1">
-        {error ? (
-          <div className="px-3 py-4 text-xs text-destructive">
-            {error}
-          </div>
-        ) : (
-          <>
-            <SessionSection
-              title="AutoTask"
-              tasks={autoTaskSessions}
-              activeKey={activeKey}
-              loading={loading}
-              emptyTitle="No AutoTask sessions"
-              emptyDescription="GitHub PR auto reviews will appear here after a rule runs."
-              autoTask
-              onSelect={onSelect}
-              onDelete={onDelete}
-            />
-            <SessionSection
-              title="日常任务"
-              tasks={dailySessions}
-              activeKey={activeKey}
-              loading={loading}
-              emptyTitle="No daily sessions"
-              emptyDescription="Click + to start a manual review."
-              onSelect={onSelect}
-              onDelete={onDelete}
-            />
-            {!loading && autoTaskSessions.length === 0 && dailySessions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-10 text-muted-foreground/50">
-                <MessageSquare className="h-7 w-7 stroke-[1.5]" />
-              </div>
-            ) : null}
-          </>
-        )}
+        <div className="min-w-0">
+          {error ? (
+            <div className="px-3 py-4 text-xs text-destructive">
+              {error}
+            </div>
+          ) : (
+            <>
+              <SessionSection
+                title="AutoTask"
+                tasks={autoTaskSessions}
+                activeKey={activeKey}
+                loading={loading}
+                emptyTitle="No AutoTask sessions"
+                emptyDescription="GitHub PR auto reviews will appear here after a rule runs."
+                autoTask
+                onSelect={onSelect}
+                onDelete={onDelete}
+                onPin={onPin}
+                onRename={onRename}
+              />
+              <SessionSection
+                title="日常任务"
+                tasks={dailySessions}
+                activeKey={activeKey}
+                loading={loading}
+                emptyTitle="No daily sessions"
+                emptyDescription="Click + to start a manual review."
+                onSelect={onSelect}
+                onDelete={onDelete}
+                onPin={onPin}
+                onRename={onRename}
+              />
+              {!loading && autoTaskSessions.length === 0 && dailySessions.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-10 text-muted-foreground/50">
+                  <MessageSquare className="h-7 w-7 stroke-[1.5]" />
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
       </ScrollArea>
     </aside>
   );

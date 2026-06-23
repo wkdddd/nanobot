@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from loguru import logger
@@ -22,6 +23,14 @@ _PREFETCH_ACTIONS = {
 }
 
 ReviewProgressCallback = Callable[..., Awaitable[None]]
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewPrefetchResult:
+    attempted: bool
+    status: str
+    summary: str | None = None
+    reason: str = ""
 
 
 async def _emit_prefetch_progress(
@@ -94,7 +103,7 @@ async def maybe_prefetch_review_context(
     plan: ReviewPlan,
     session_meta: dict[str, Any],
     progress_callback: ReviewProgressCallback | None = None,
-) -> str | None:
+) -> ReviewPrefetchResult:
     if plan.action not in _PREFETCH_ACTIONS:
         logger.info("review.prefetch.skip action={} reason=non_prefetch_action", plan.action.value)
         await _emit_prefetch_progress(
@@ -106,7 +115,7 @@ async def maybe_prefetch_review_context(
             status="skip",
             reason="non_prefetch_action",
         )
-        return None
+        return ReviewPrefetchResult(False, "skip", reason="non_prefetch_action")
     evidence_service: ReviewEvidenceProvider | None = session_meta.get(ReviewMetaKey.EVIDENCE_PROVIDER)
     if evidence_service is None:
         logger.info("review.prefetch.skip action={} reason=evidence_service_unavailable", plan.action.value)
@@ -119,7 +128,7 @@ async def maybe_prefetch_review_context(
             status="skip",
             reason="evidence_service_unavailable",
         )
-        return None
+        return ReviewPrefetchResult(False, "skip", reason="evidence_service_unavailable")
 
     trace_id = uuid.uuid4().hex[:8]
     started = time.perf_counter()
@@ -150,6 +159,7 @@ async def maybe_prefetch_review_context(
             target_type=target_type,
             action=plan.action.value,
             repo=(plan.target_repo or plan.target or "").strip(),
+            ref=plan.target_ref,
             pr_number=plan.pr_number or 0,
             target_paths=plan.target_paths or None,
             review_query=query,
@@ -177,7 +187,7 @@ async def maybe_prefetch_review_context(
             reason=str(exc),
             elapsed_ms=elapsed_ms,
         )
-        return None
+        return ReviewPrefetchResult(True, "error", reason=str(exc))
     raw = str(result)
     summary = _compact_evidence(raw)
     elapsed_ms = (time.perf_counter() - started) * 1000
@@ -201,5 +211,5 @@ async def maybe_prefetch_review_context(
         summary_chars=len(summary),
     )
     if not summary:
-        return None
-    return summary
+        return ReviewPrefetchResult(True, "no_summary")
+    return ReviewPrefetchResult(True, "ok", summary=summary)

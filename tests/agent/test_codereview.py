@@ -14,6 +14,7 @@ from nanobot.agent.review import (
     build_review_plan,
     normalize_focus,
     normalize_review_action,
+    resolve_code_review_context,
 )
 from nanobot.bus.queue import MessageBus
 from nanobot.providers.base import LLMProvider, LLMResponse
@@ -163,6 +164,26 @@ def test_build_code_review_context_requires_local_review_without_prefetch() -> N
     assert "MUST call local_review" in prompt
     assert "local_review(action='diff'" in prompt
     assert "repo_review" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_resolved_github_prompt_does_not_refetch_after_empty_prefetch() -> None:
+    class EmptyEvidence:
+        async def dispatch(self, **kwargs: object) -> str:
+            return ""
+
+    prompt = await resolve_code_review_context(
+        [{"role": "user", "content": "review https://github.com/test/repo"}],
+        {
+            "review_target": "https://github.com/test/repo",
+            "review_target_type": "github",
+            "_review_evidence_service": EmptyEvidence(),
+        },
+    )
+
+    assert "GitHub evidence prefetch was already attempted" in prompt
+    assert "Do not call `github_review` again" in prompt
+    assert "MUST call github_review" not in prompt
 
 
 def test_build_code_review_context_uses_user_requirements() -> None:

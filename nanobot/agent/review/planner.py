@@ -22,7 +22,14 @@ from nanobot.agent.review.types import (
     ReviewTargetType,
     review_action_values,
 )
-from nanobot.agent.review.utils import GITHUB_PR_URL_RE, GITHUB_URL_RE, parse_pr_target, parse_repo
+from nanobot.agent.review.utils import (
+    GITHUB_PR_URL_RE,
+    GITHUB_SCOPED_URL_RE,
+    GITHUB_URL_RE,
+    parse_github_scoped_target,
+    parse_pr_target,
+    parse_repo,
+)
 from nanobot.session.manager import Session
 
 _LOCAL_CHANGED_HINT_RE = re.compile(
@@ -95,6 +102,12 @@ def parse_target_paths(raw: Any) -> list[str]:
 
 
 def extract_review_target(text: str) -> tuple[str, str] | None:
+    scoped_match = GITHUB_SCOPED_URL_RE.search(text)
+    if scoped_match:
+        target = scoped_match.group(0).rstrip(".,;:!?)）】]")
+        repo = f"{scoped_match.group('owner')}/{scoped_match.group('repo').removesuffix('.git')}"
+        return target, repo
+
     github_match = GITHUB_URL_RE.search(text)
     if github_match:
         owner, repo = github_match.group(1), github_match.group(2).removesuffix(".git")
@@ -157,6 +170,7 @@ def build_review_plan(
     target_type: str | None = None,
     action: str | None = None,
     target_paths: Any = None,
+    target_ref: str | None = None,
     prefetch_summary: str | None = None,
 ) -> ReviewPlan | None:
     trace_id = uuid.uuid4().hex[:8]
@@ -195,6 +209,13 @@ def build_review_plan(
         user_content=user_content,
     )
     target_repo, pr_number = parse_pr_target(target)
+    normalized_ref: str | None = target_ref.strip() if isinstance(target_ref, str) and target_ref.strip() else None
+    scoped_target = parse_github_scoped_target(target)
+    if scoped_target is not None and target_type_value == "github":
+        target_repo = scoped_target.repo
+        normalized_ref = scoped_target.ref
+        if scoped_target.path and scoped_target.path not in paths:
+            paths.append(scoped_target.path)
     if target_repo is None and target_type_value == "github":
         target_repo = parse_repo_target(target)
 
@@ -222,6 +243,7 @@ def build_review_plan(
         target_repo=target_repo,
         pr_number=pr_number,
         target_paths=paths,
+        target_ref=normalized_ref,
         prefetch_summary=prefetch_summary,
     )
     logger.info(
@@ -283,6 +305,7 @@ async def resolve_code_review_context(
         target_type=session_meta.get(ReviewMetaKey.TARGET_TYPE) if isinstance(session_meta.get(ReviewMetaKey.TARGET_TYPE), str) else None,
         action=session_meta.get(ReviewMetaKey.ACTION) if isinstance(session_meta.get(ReviewMetaKey.ACTION), str) else None,
         target_paths=session_meta.get(ReviewMetaKey.TARGET_PATHS),
+        target_ref=session_meta.get(ReviewMetaKey.TARGET_REF) if isinstance(session_meta.get(ReviewMetaKey.TARGET_REF), str) else None,
     )
     if plan is None:
         return build_review_fallback_prompt()
@@ -291,8 +314,25 @@ async def resolve_code_review_context(
         session_meta,
         progress_callback=progress_callback,
     )
-    if prefetch_summary:
-        plan = replace(plan, prefetch_summary=prefetch_summary)
+    if prefetch_summary.summary:
+        plan = replace(plan, prefetch_summary=prefetch_summary.summary)
+        if plan.target_type == "github":
+            session_meta[ReviewMetaKey.GITHUB_PREFETCH_READY] = True
+    elif prefetch_summary.attempted:
+        target_label = "GitHub" if plan.target_type == "github" else "repository"
+        if plan.target_type == "github":
+            session_meta[ReviewMetaKey.GITHUB_PREFETCH_READY] = True
+        detail = f": {prefetch_summary.reason}" if prefetch_summary.reason else ""
+        plan = replace(
+            plan,
+            prefetch_summary=(
+                f"{target_label} evidence prefetch was already attempted for this review "
+                f"and returned {prefetch_summary.status}{detail}. Do not call "
+                f"{'github_review' if plan.target_type == 'github' else 'local_review'} again "
+                "for the same target in this turn; continue with the available context and "
+                "state any evidence limitations in the review."
+            ),
+        )
     session_meta[ReviewMetaKey.ALLOWED_DIMENSIONS] = [role.name for role in plan.roles]
     return render_review_prompt(plan)
 
@@ -307,6 +347,7 @@ def build_code_review_context(
     target_type: str | None = None,
     action: str | None = None,
     target_paths: Any = None,
+    target_ref: str | None = None,
 ) -> str:
     from nanobot.agent.review.prompt import build_review_fallback_prompt, render_review_prompt
 
@@ -319,6 +360,7 @@ def build_code_review_context(
         target_type=target_type,
         action=action,
         target_paths=target_paths,
+        target_ref=target_ref,
     )
     if plan is None:
         return build_review_fallback_prompt()
@@ -339,6 +381,7 @@ def apply_review_metadata_from_message(
         ReviewMetaKey.ACTION,
         ReviewMetaKey.FOCUS,
         ReviewMetaKey.TARGET_PATHS,
+        ReviewMetaKey.TARGET_REF,
     )
     if not any(key in metadata for key in keys):
         return False
@@ -391,6 +434,12 @@ def apply_review_metadata_from_message(
         _set_meta(ReviewMetaKey.TARGET_PATHS, paths)
     elif ReviewMetaKey.TARGET_PATHS in metadata:
         _pop_meta(ReviewMetaKey.TARGET_PATHS)
+
+    raw_ref = metadata.get(ReviewMetaKey.TARGET_REF)
+    if isinstance(raw_ref, str) and raw_ref.strip():
+        _set_meta(ReviewMetaKey.TARGET_REF, raw_ref.strip())
+    elif ReviewMetaKey.TARGET_REF in metadata:
+        _pop_meta(ReviewMetaKey.TARGET_REF)
 
     target_type = normalize_review_target_type(
         metadata.get(ReviewMetaKey.TARGET_TYPE) if isinstance(metadata.get(ReviewMetaKey.TARGET_TYPE), str) else None,

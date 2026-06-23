@@ -15,13 +15,11 @@ class BaseRAGConfig(BaseModel):
 class EmbeddingConfig(BaseRAGConfig):
     """Embedding model configuration for vector generation."""
 
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
     enable: bool = False
     api_key: str = ""
-    base_url: str = Field(
-        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        validation_alias=AliasChoices("baseUrl", "apiBase", "base_url"),
-        serialization_alias="baseUrl",
-    )
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: str = "BAAI/bge-m3"
     dimensions: int = 1024
     batch_size: int = 10

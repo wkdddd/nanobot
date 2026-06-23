@@ -7,7 +7,14 @@ import pytest
 from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoConfig
+from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_pr_target, parse_repo
+from nanobot.agent.tools.context import (
+    RequestContext,
+    reset_current_request_context,
+    set_current_request_context,
+)
+from nanobot.agent.tools.filesystem import ReadFileTool
 from nanobot.agent.tools.github_review import GitHubReviewTool
 from nanobot.agent.tools.local_review import LocalReviewTool
 from nanobot.config.schema import Config
@@ -139,8 +146,137 @@ async def test_github_review_reader_actions_pass_aligned_arguments(
             "pattern": "*.md",
             "max_entries": 25,
             "pr_number": 0,
+            "offset": 1,
+            "limit": 200,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_github_review_file_passes_pagination_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = GitHubReviewTool(workspace=tmp_path)
+    calls: list[dict[str, object]] = []
+
+    async def fake_execute(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "page"
+
+    monkeypatch.setattr(tool.github, "execute", fake_execute)
+
+    result = await tool.execute(
+        action="file",
+        target_repo="test/repo",
+        repo_path="src/app.py",
+        offset=401,
+        limit=50,
+    )
+
+    assert result == "page"
+    assert calls[0]["offset"] == 401
+    assert calls[0]["limit"] == 50
+
+
+@pytest.mark.asyncio
+async def test_github_reader_file_returns_remote_line_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = GitHubReviewTool(workspace=tmp_path)
+    content = "\n".join(f"line {i}" for i in range(1, 11))
+
+    async def fake_api_get(*_args, **_kwargs):
+        import base64
+
+        return {
+            "encoding": "base64",
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+            "size": len(content),
+            "sha": "abcdef123456",
+        }
+
+    monkeypatch.setattr(tool.github, "_api_get", fake_api_get)
+
+    result = await tool.github.execute(
+        action="file",
+        repo="test/repo",
+        path="src/app.py",
+        offset=4,
+        limit=3,
+    )
+
+    assert "GitHub File: test/repo/src/app.py" in result
+    assert "4| line 4" in result
+    assert "6| line 6" in result
+    assert "7| line 7" not in result
+    assert "offset=7, limit=3" in result
+
+
+@pytest.mark.asyncio
+async def test_github_review_blocks_duplicate_repo_after_prefetch(tmp_path: Path) -> None:
+    token = set_current_request_context(
+        RequestContext(
+            channel="websocket",
+            chat_id="review",
+            metadata={
+                ReviewMetaKey.TARGET_TYPE: "github",
+                ReviewMetaKey.TARGET: "https://github.com/test/repo",
+                ReviewMetaKey.GITHUB_PREFETCH_READY: True,
+            },
+        )
+    )
+    try:
+        tool = GitHubReviewTool(workspace=tmp_path)
+
+        result = await tool.execute(action="repo", target_repo="test/repo")
+    finally:
+        reset_current_request_context(token)
+
+    assert result.startswith("Error:")
+    assert "already prefetched" in result
+
+
+@pytest.mark.asyncio
+async def test_local_review_blocked_for_github_review_context(tmp_path: Path) -> None:
+    token = set_current_request_context(
+        RequestContext(
+            channel="websocket",
+            chat_id="review",
+            metadata={ReviewMetaKey.TARGET_TYPE: "github"},
+        )
+    )
+    try:
+        tool = LocalReviewTool(workspace=tmp_path)
+
+        result = await tool.execute(action="meta", target=str(tmp_path))
+    finally:
+        reset_current_request_context(token)
+
+    assert result.startswith("Error:")
+    assert "disabled for GitHub review targets" in result
+
+
+@pytest.mark.asyncio
+async def test_read_file_blocks_workspace_files_for_github_review_context(tmp_path: Path) -> None:
+    target = tmp_path / ".nanobot" / "tool-results" / "session" / "call.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("remote output cache\n", encoding="utf-8")
+    token = set_current_request_context(
+        RequestContext(
+            channel="websocket",
+            chat_id="review",
+            metadata={ReviewMetaKey.TARGET_TYPE: "github"},
+        )
+    )
+    try:
+        tool = ReadFileTool(workspace=tmp_path, allowed_dir=tmp_path)
+
+        result = await tool.execute(path=str(target))
+    finally:
+        reset_current_request_context(token)
+
+    assert isinstance(result, str)
+    assert result.startswith("Error:")
+    assert "github_review(action='file'" in result
 
 
 @pytest.mark.asyncio
@@ -231,7 +367,7 @@ async def test_github_api_success_logs_structured_event(
 
     monkeypatch.setattr(tool.github, "_get_token", fake_token)
     sink = _LogSink()
-    handler_id = logger.add(sink, level="INFO", format="{message}")
+    handler_id = logger.add(sink, level="DEBUG", format="{message}")
 
     class _Client:
         def __init__(self, *args, **kwargs) -> None:

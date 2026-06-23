@@ -36,6 +36,13 @@ def _dim(name, accepted=None, uncertain=None, rejected=None):
 
 
 class TestReportStructure:
+    def test_no_dimensions_is_incomplete_not_clean(self):
+        report = render_review_report("repo", [])
+
+        assert "Review incomplete" in report
+        assert "No actionable issues found" not in report
+        assert "- [ ] review - incomplete: no review dimension results were produced" in report
+
     def test_empty_findings(self):
         report = render_review_report("myproject", [_dim("security")])
         assert "## Code Review Report: myproject" in report

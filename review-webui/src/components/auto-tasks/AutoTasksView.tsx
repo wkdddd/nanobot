@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  ArrowLeft,
   Check,
   Download,
   Github,
@@ -37,9 +38,11 @@ function isGitHubRepo(value: string): boolean {
 
 function TaskForm({
   onSubmit,
+  onCancel,
   submitting,
 }: {
   onSubmit: (payload: AutoTaskPayload) => Promise<void>;
+  onCancel: () => void;
   submitting: boolean;
 }) {
   const [name, setName] = useState("");
@@ -74,55 +77,69 @@ function TaskForm({
   };
 
   return (
-    <div className="border-b bg-card/40 px-5 py-4">
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className="inline-flex items-center gap-1.5 rounded border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
-          <Github className="h-3.5 w-3.5" />
-          GitHub PR only
-        </span>
-        <span className="rounded border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
-          Action: diff
-        </span>
-      </div>
-      <div className="grid gap-3 lg:grid-cols-[1fr_1fr_auto_auto]">
-        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Task name" />
-        <div>
-          <Input
-            value={repo}
-            onChange={(e) => {
-              setRepo(e.target.value);
-              if (repoError) setRepoError(null);
-            }}
-            placeholder="owner/repo or https://github.com/owner/repo"
-            aria-invalid={!!repoError}
-          />
-          {repoError ? (
-            <p className="mt-1 text-xs text-destructive">{repoError}</p>
-          ) : null}
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">New AutoTask Rule</h2>
+          <p className="mt-0.5 text-xs text-muted-foreground">
+            Create a GitHub PR diff review rule.
+          </p>
         </div>
-        <label className="inline-flex h-10 items-center gap-2 rounded border px-3 text-xs font-medium text-muted-foreground">
-          <input
-            type="checkbox"
-            checked={enabled}
-            onChange={(e) => setEnabled(e.target.checked)}
-            className="h-3.5 w-3.5"
-          />
-          Enabled
-        </label>
-        <Button onClick={submit} disabled={!repo.trim() || submitting} className="gap-2">
-          {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-          Add
+        <Button variant="outline" size="sm" onClick={onCancel} disabled={submitting} className="gap-1.5">
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Back
         </Button>
       </div>
-      <div className="mt-4">
-        <ReviewConfig
-          depth={mode}
-          onDepthChange={setMode}
-          focus={focus}
-          onFocusChange={setFocus}
-          targetPaths={targetPaths}
-          onTargetPathsChange={setTargetPaths}
-        />
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1.5 rounded border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            <Github className="h-3.5 w-3.5" />
+            GitHub PR only
+          </span>
+          <span className="rounded border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            Action: diff
+          </span>
+        </div>
+        <div className="grid gap-3 xl:grid-cols-[1fr_1fr_auto_auto]">
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Task name" />
+          <div>
+            <Input
+              value={repo}
+              onChange={(e) => {
+                setRepo(e.target.value);
+                if (repoError) setRepoError(null);
+              }}
+              placeholder="owner/repo or https://github.com/owner/repo"
+              aria-invalid={!!repoError}
+            />
+            {repoError ? (
+              <p className="mt-1 text-xs text-destructive">{repoError}</p>
+            ) : null}
+          </div>
+          <label className="inline-flex h-10 items-center gap-2 rounded border px-3 text-xs font-medium text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            Enabled
+          </label>
+          <Button onClick={submit} disabled={!repo.trim() || submitting} className="gap-2">
+            {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Add
+          </Button>
+        </div>
+        <div className="mt-4">
+          <ReviewConfig
+            depth={mode}
+            onDepthChange={setMode}
+            focus={focus}
+            onFocusChange={setFocus}
+            targetPaths={targetPaths}
+            onTargetPathsChange={setTargetPaths}
+          />
+        </div>
       </div>
     </div>
   );
@@ -248,56 +265,77 @@ function TaskRow({
   );
 }
 
-export function AutoTasksView() {
+export function AutoTasksView({
+  onSessionsChanged,
+}: {
+  onSessionsChanged?: () => void | Promise<void>;
+}) {
   const { tasks, runsByTask, loading, error, actions } = useAutoTasks();
   const [submitting, setSubmitting] = useState(false);
+  const [view, setView] = useState<"list" | "new">("list");
   const sortedTasks = useMemo(() => tasks, [tasks]);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      <div className="border-b px-5 py-4">
-        <h1 className="text-lg font-semibold">GitHub Auto Tasks</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Automatically review GitHub pull request diffs from webhook events.
-        </p>
-      </div>
-      <TaskForm
-        submitting={submitting}
-        onSubmit={async (payload) => {
-          setSubmitting(true);
-          try {
-            await actions.create(payload);
-          } finally {
-            setSubmitting(false);
-          }
-        }}
-      />
-      <div className="flex-1 overflow-y-auto p-5">
-        {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        {loading ? (
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading auto tasks...
+      {view === "new" ? (
+        <TaskForm
+          submitting={submitting}
+          onCancel={() => setView("list")}
+          onSubmit={async (payload) => {
+            setSubmitting(true);
+            try {
+              await actions.create(payload);
+              setView("list");
+            } finally {
+              setSubmitting(false);
+            }
+          }}
+        />
+      ) : (
+        <>
+          <div className="flex shrink-0 items-center justify-between gap-3 border-b px-5 py-4">
+            <div className="min-w-0">
+              <h1 className="text-lg font-semibold">GitHub Auto Tasks</h1>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Automatically review GitHub pull request diffs from webhook events.
+              </p>
+            </div>
+            <Button onClick={() => setView("new")} className="shrink-0 gap-2">
+              <Plus className="h-4 w-4" />
+              Add
+            </Button>
           </div>
-        ) : sortedTasks.length === 0 ? (
-          <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
-            No auto tasks yet.
+          <div className="flex-1 overflow-y-auto p-5">
+            {error ? <p className="text-sm text-destructive">{error}</p> : null}
+            {loading ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Loading auto tasks...
+              </div>
+            ) : sortedTasks.length === 0 ? (
+              <div className="rounded border border-dashed p-8 text-center text-sm text-muted-foreground">
+                No auto tasks yet.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                {sortedTasks.map((task) => (
+                  <TaskRow
+                    key={task.id}
+                    task={task}
+                    runs={runsByTask[task.id] ?? []}
+                    onToggle={() => actions.update(task.id, { enabled: !task.enabled, repo: task.repo })}
+                    onDelete={() => actions.remove(task.id)}
+                    onRunNow={async (prNumber) => {
+                      await actions.runNow(task.id, prNumber);
+                      await onSessionsChanged?.();
+                    }}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        ) : (
-          <div className="flex flex-col gap-4">
-            {sortedTasks.map((task) => (
-              <TaskRow
-                key={task.id}
-                task={task}
-                runs={runsByTask[task.id] ?? []}
-                onToggle={() => actions.update(task.id, { enabled: !task.enabled, repo: task.repo })}
-                onDelete={() => actions.remove(task.id)}
-                onRunNow={(prNumber) => actions.runNow(task.id, prNumber)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }

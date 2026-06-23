@@ -148,7 +148,7 @@ def _build_summary(
 
 
 def _has_incomplete_checks(dims: list[ReviewDimensionResult]) -> bool:
-    return any(d.status in {"incomplete", "error"} or d.errors for d in dims)
+    return not dims or any(d.status in {"incomplete", "error"} or d.errors for d in dims)
 
 
 def _render_findings(findings: list[ReviewFindingCandidate], *, incomplete: bool = False) -> str:
@@ -183,6 +183,10 @@ def _render_findings(findings: list[ReviewFindingCandidate], *, incomplete: bool
 
 def _render_checks_performed(dims: list[ReviewDimensionResult]) -> str:
     lines = ["### Checks Performed\n"]
+    if not dims:
+        lines.append("- [ ] review - incomplete: no review dimension results were produced")
+        lines.append("")
+        return "\n".join(lines)
     for d in dims:
         if d.status == "validated":
             lines.append(f"- [x] {_escape_markdown_inline(d.dimension)}")

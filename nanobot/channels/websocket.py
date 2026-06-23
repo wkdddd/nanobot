@@ -825,6 +825,12 @@ class WebSocketChannel(BaseChannel):
         if m:
             return self._handle_session_delete(request, m.group(1))
 
+        # Session metadata update (pin, rename, etc.).  Same GET-only
+        # constraint as delete — the payload is sent as a query/body param.
+        m = re.match(r"^/api/sessions/([^/]+)/update$", got)
+        if m:
+            return self._handle_session_update(request, m.group(1))
+
         # Signed media fetch: ``<sig>`` is an HMAC over ``<payload>``; the
         # payload decodes to a path inside :func:`get_media_dir`. See
         # :meth:`_sign_media_path` for the inverse direction used to build
@@ -1783,6 +1789,37 @@ class WebSocketChannel(BaseChannel):
         delete_webui_thread(decoded_key)
         return _http_json_response({"deleted": bool(deleted)})
 
+    def _handle_session_update(self, request: WsRequest, key: str) -> Response:
+        if not self._check_api_token(request):
+            return _http_error(401, "Unauthorized")
+        if self._session_manager is None:
+            return _http_error(503, "session manager unavailable")
+        decoded_key = _decode_api_key(key)
+        if decoded_key is None:
+            return _http_error(400, "invalid session key")
+        if not self._is_websocket_channel_session_key(decoded_key):
+            return _http_error(404, "session not found")
+        # Read updates from query parameters (websockets HTTP only supports GET).
+        query = request.path.split("?", 1)[1] if "?" in request.path else ""
+        params = parse_qs(query)
+        updates: dict[str, Any] = {}
+        if "pinned" in params:
+            val = params["pinned"][0].lower()
+            if val not in ("true", "false"):
+                return _http_error(400, "pinned must be 'true' or 'false'")
+            updates["pinned"] = val == "true"
+        if "custom_title" in params:
+            title = params["custom_title"][0]
+            if len(title) > 200:
+                return _http_error(400, "custom_title too long")
+            updates["custom_title"] = title
+        if not updates:
+            return _http_error(400, "no valid fields to update")
+        updated = self._session_manager.update_session_metadata(decoded_key, updates)
+        if updated is None:
+            return _http_error(404, "session not found")
+        return _http_json_response({"updated": True, "metadata": updated})
+
     def _serve_static(self, request_path: str) -> Response | None:
         """Resolve *request_path* against the built SPA directory; SPA fallback to index.html."""
         assert self._static_dist_path is not None
@@ -1942,6 +1979,35 @@ class WebSocketChannel(BaseChannel):
         if deleted is None:
             return web.json_response({"error": "session not found"}, status=404)
         return web.json_response({"deleted": bool(deleted)})
+
+    async def _aiohttp_session_update(self, request: web.Request) -> web.Response:
+        if not self._check_aiohttp_api_token(request):
+            return web.json_response({"error": "Unauthorized"}, status=401)
+        if self._session_manager is None:
+            return web.json_response({"error": "session manager unavailable"}, status=503)
+        key = _decode_api_key(request.match_info["key"])
+        if key is None:
+            return web.json_response({"error": "invalid session key"}, status=400)
+        if not self._is_websocket_channel_session_key(key):
+            return web.json_response({"error": "session not found"}, status=404)
+        updates: dict[str, Any] = {}
+        pinned = request.query.get("pinned")
+        if pinned is not None:
+            val = pinned.lower()
+            if val not in ("true", "false"):
+                return web.json_response({"error": "pinned must be 'true' or 'false'"}, status=400)
+            updates["pinned"] = val == "true"
+        custom_title = request.query.get("custom_title")
+        if custom_title is not None:
+            if len(custom_title) > 200:
+                return web.json_response({"error": "custom_title too long"}, status=400)
+            updates["custom_title"] = custom_title
+        if not updates:
+            return web.json_response({"error": "no valid fields to update"}, status=400)
+        updated = self._session_manager.update_session_metadata(key, updates)
+        if updated is None:
+            return web.json_response({"error": "session not found"}, status=404)
+        return web.json_response({"updated": True, "metadata": updated})
 
     async def _aiohttp_media_fetch(self, request: web.Request) -> web.Response:
         sig = request.match_info["sig"]
@@ -2209,6 +2275,7 @@ class WebSocketChannel(BaseChannel):
         app.router.add_get("/api/sessions/{key}/code-context", self._aiohttp_code_context)
         app.router.add_post("/api/sessions/{key}/delete", self._aiohttp_session_delete)
         app.router.add_get("/api/sessions/{key}/delete", self._aiohttp_session_delete)
+        app.router.add_get("/api/sessions/{key}/update", self._aiohttp_session_update)
         app.router.add_get("/api/auto-tasks", self._aiohttp_auto_tasks)
         app.router.add_post("/api/auto-tasks", self._aiohttp_auto_task_create)
         app.router.add_post("/api/auto-tasks/create", self._aiohttp_auto_task_create)
@@ -2767,18 +2834,24 @@ class WebSocketChannel(BaseChannel):
 
         # Snapshot the subscriber set so ConnectionClosed cleanups mid-iteration are safe.
         conns = list(self._subs.get(msg.chat_id, ()))
+        persist_without_subscribers = False
         if not conns and not auto_task_backed:
             if (
-                msg.metadata.get("_progress")
-                or msg.metadata.get("_turn_end")
+                msg.metadata.get("_turn_end")
                 or msg.metadata.get("_session_updated")
                 or msg.metadata.get("_goal_status")
                 or msg.metadata.get("_goal_state_sync")
             ):
                 self.logger.debug("no active subscribers for chat_id={}", msg.chat_id)
-            else:
-                self.logger.warning("no active subscribers for chat_id={}", msg.chat_id)
-            return
+                return
+            # Progress and regular message events fall through to persist transcript
+            # even without active connections (browser refresh gap).
+            persist_without_subscribers = True
+            if not msg.metadata.get("_progress") and not msg.metadata.get("_tool_hint"):
+                self.logger.warning(
+                    "no active subscribers for chat_id={}, persisting transcript only",
+                    msg.chat_id,
+                )
         if msg.metadata.get("_goal_state_sync"):
             blob = msg.metadata.get("goal_state")
             await self.send_goal_state(msg.chat_id, blob if isinstance(blob, dict) else {"active": False})
@@ -2845,6 +2918,8 @@ class WebSocketChannel(BaseChannel):
         elif msg.metadata.get("_progress"):
             payload["kind"] = "progress"
         self._try_append_webui_transcript(msg.chat_id, payload)
+        if persist_without_subscribers:
+            return
         raw = json.dumps(payload, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" ")
@@ -2860,9 +2935,7 @@ class WebSocketChannel(BaseChannel):
         rendered above the active assistant bubble with a shimmer header
         until the matching ``reasoning_end`` arrives.
         """
-        conns = list(self._subs.get(chat_id, ()))
-        auto_task_backed = self._is_auto_task_chat(chat_id)
-        if (not conns and not auto_task_backed) or not delta:
+        if not delta:
             return
         meta = metadata or {}
         body: dict[str, Any] = {
@@ -2874,6 +2947,10 @@ class WebSocketChannel(BaseChannel):
         if stream_id is not None:
             body["stream_id"] = stream_id
         self._try_append_webui_transcript(chat_id, body)
+        conns = list(self._subs.get(chat_id, ()))
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
+            return
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" reasoning ")
@@ -2884,10 +2961,6 @@ class WebSocketChannel(BaseChannel):
         metadata: dict[str, Any] | None = None,
     ) -> None:
         """Close the current reasoning stream segment for in-place renderers."""
-        conns = list(self._subs.get(chat_id, ()))
-        auto_task_backed = self._is_auto_task_chat(chat_id)
-        if not conns and not auto_task_backed:
-            return
         meta = metadata or {}
         body: dict[str, Any] = {
             "event": "reasoning_end",
@@ -2897,6 +2970,10 @@ class WebSocketChannel(BaseChannel):
         if stream_id is not None:
             body["stream_id"] = stream_id
         self._try_append_webui_transcript(chat_id, body)
+        conns = list(self._subs.get(chat_id, ()))
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
+            return
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" reasoning_end ")
@@ -2909,8 +2986,6 @@ class WebSocketChannel(BaseChannel):
     ) -> None:
         conns = list(self._subs.get(chat_id, ()))
         auto_task_backed = self._is_auto_task_chat(chat_id)
-        if not conns and not auto_task_backed:
-            return
         meta = metadata or {}
         if meta.get("_stream_end"):
             body: dict[str, Any] = {"event": "stream_end", "chat_id": chat_id}
@@ -2925,6 +3000,8 @@ class WebSocketChannel(BaseChannel):
         if meta.get("_stream_kind") is not None:
             body["kind"] = str(meta["_stream_kind"])
         self._try_append_webui_transcript(chat_id, body)
+        if not conns and not auto_task_backed:
+            return
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" stream ")
@@ -2938,10 +3015,6 @@ class WebSocketChannel(BaseChannel):
         turn_trace: list[dict[str, Any]] | None = None,
     ) -> None:
         """Signal that the agent has fully finished processing the current turn."""
-        conns = list(self._subs.get(chat_id, ()))
-        auto_task_backed = self._is_auto_task_chat(chat_id)
-        if not conns and not auto_task_backed:
-            return
         body: dict[str, Any] = {"event": "turn_end", "chat_id": chat_id}
         if latency_ms is not None:
             body["latency_ms"] = int(latency_ms)
@@ -2950,6 +3023,10 @@ class WebSocketChannel(BaseChannel):
         if turn_trace is not None:
             body["turn_trace"] = turn_trace
         self._try_append_webui_transcript(chat_id, body)
+        conns = list(self._subs.get(chat_id, ()))
+        auto_task_backed = self._is_auto_task_chat(chat_id)
+        if not conns and not auto_task_backed:
+            return
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" turn_end ")

@@ -111,6 +111,8 @@ export interface ChatSummary {
   reviewTargetType?: ReviewTargetType;
   reviewAction?: ReviewAction;
   reviewMode?: ReviewDepth;
+  pinned?: boolean;
+  customTitle?: string;
 }
 
 export interface AutoTask {

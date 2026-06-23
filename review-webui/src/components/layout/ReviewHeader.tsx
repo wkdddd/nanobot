@@ -1,4 +1,4 @@
-import { Shield, Settings, LogOut } from "lucide-react";
+import { Settings, LogOut } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,14 +58,11 @@ export function ReviewHeader({
       >
         {/* Left: Logo + brand */}
         <div className="flex items-center gap-2">
-          <div
-            className={cn(
-              "flex h-7 w-7 items-center justify-center rounded-md",
-              "bg-primary/10 text-primary",
-            )}
-          >
-            <Shield className="h-4 w-4" strokeWidth={2.2} />
-          </div>
+          <img
+            src="/logo.png"
+            alt="Review Agent"
+            className="h-7 w-7 rounded-md object-cover"
+          />
           <span className="text-sm font-semibold tracking-tight text-foreground">
             Review Agent
           </span>

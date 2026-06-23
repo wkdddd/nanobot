@@ -225,6 +225,10 @@ function reviewFromMetadata(metadata: unknown): UIMessage["review"] | undefined 
   };
 }
 
+function stringFromUnknown(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
 export function sessionMessageToUIMessage(
   message: Record<string, unknown>,
   index: number,
@@ -232,7 +236,13 @@ export function sessionMessageToUIMessage(
   const role = message.role;
   if (role !== "user" && role !== "assistant") return null;
   const content = extractContent(message.content);
-  if (!content.trim()) return null;
+  const reasoning = stringFromUnknown(
+    message.reasoning
+      ?? message.reasoning_content
+      ?? message.thinking
+      ?? message.thinking_content,
+  );
+  if (!content.trim() && !(role === "assistant" && reasoning?.trim())) return null;
   const createdAt = numberFromTimestamp(
     message.createdAt ?? message.created_at ?? message.timestamp,
     Date.now() + index,
@@ -245,6 +255,7 @@ export function sessionMessageToUIMessage(
     kind: "message",
     createdAt,
     review,
+    ...(role === "assistant" && reasoning ? { reasoning } : {}),
   };
 }
 
@@ -257,7 +268,7 @@ function appendThinking(message: ChatMessage, text: string, streaming = true): C
   return {
     ...message,
     thinking: nextThinking,
-    streaming: message.type === "report" ? message.streaming : streaming,
+    streaming: message.streaming || streaming,
   };
 }
 
@@ -338,6 +349,37 @@ function markLastStreamingComplete(messages: ChatMessage[]): ChatMessage[] {
   return updated;
 }
 
+function markStreamingCompleteById(messages: ChatMessage[], id: string | null): ChatMessage[] {
+  if (!id) return messages;
+  let changed = false;
+  const updated = messages.map((message) => {
+    if (message.id !== id || !message.streaming) return message;
+    changed = true;
+    return { ...message, streaming: false };
+  });
+  return changed ? updated : messages;
+}
+
+function findAssistantCarrierId(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.role === "user") break;
+    if (message.role !== "agent") continue;
+    if (message.type === "finding") continue;
+    return message.id;
+  }
+  return null;
+}
+
+function hasMessage(messages: ChatMessage[], id: string | null): id is string {
+  return !!id && messages.some((message) => message.id === id);
+}
+
+function isStopAckEvent(ev: InboundEvent): boolean {
+  if (ev.event !== "message" || ev.kind || typeof ev.text !== "string") return false;
+  return /^Stopped \d+ task\(s\)\.$/.test(ev.text) || ev.text === "No active task to stop.";
+}
+
 function markAllStreamingComplete(messages: ChatMessage[]): ChatMessage[] {
   return messages.map((message) =>
     message.streaming ? { ...message, streaming: false } : message
@@ -374,14 +416,22 @@ function isBusyPhase(phase: ReviewPhase): boolean {
 export function useReviewSession(client: NanobotClient, chatId: string | null) {
   const [state, setState] = useState<ReviewSessionState>(INITIAL_STATE);
   const reportBufferRef = useRef("");
-  const currentAgentMessageRef = useRef<string | null>(null);
+  const assistantCarrierRef = useRef<string | null>(null);
+  const reportMessageRef = useRef<string | null>(null);
+  const textMessageRef = useRef<string | null>(null);
   const thinkingBufferRef = useRef("");
+  const cancellingRef = useRef(false);
+  const reviewInProgressRef = useRef(false);
 
   const reset = useCallback(() => {
     setState(INITIAL_STATE);
     reportBufferRef.current = "";
-    currentAgentMessageRef.current = null;
+    assistantCarrierRef.current = null;
+    reportMessageRef.current = null;
+    textMessageRef.current = null;
     thinkingBufferRef.current = "";
+    cancellingRef.current = false;
+    reviewInProgressRef.current = false;
   }, []);
 
   const loadHistory = useCallback((
@@ -390,24 +440,53 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
     error: string | null = null,
     preConverted?: ChatMessage[],
   ) => {
-    const chatMessages = preConverted ?? messages
+    let chatMessages = preConverted ?? messages
       .map(uiMessageToChatMessage)
       .filter((message): message is ChatMessage => message !== null);
+
+    // If a review is in progress and there's no agent message, add a placeholder
+    // so the user sees a streaming indicator after page refresh. The
+    // "Preparing review context" text is a transient progress event that is
+    // not replayable from the transcript, so we show a generic placeholder.
+    let placeholderId: string | null = null;
+    if (reviewInProgressRef.current && !error) {
+      const hasAgent = chatMessages.some(
+        (m) => m.role === "agent" && (m.content.trim() || m.thinking?.trim()),
+      );
+      if (!hasAgent) {
+        placeholderId = generateId();
+        chatMessages = [...chatMessages, {
+          id: placeholderId,
+          role: "agent",
+          type: "text",
+          content: "",
+          timestamp: Date.now(),
+          thinking: "Review in progress...\n",
+          streaming: true,
+        }];
+      }
+    }
+
     const reportMarkdown = [...chatMessages].reverse().find((message) => message.type === "report")?.content ?? "";
+    const inferredPhase = error ? "error" : completedOrStoppedPhase(chatMessages);
+    const phase = reviewInProgressRef.current && !error ? "reviewing" : inferredPhase;
     setState({
       ...INITIAL_STATE,
-      phase: error ? "error" : completedOrStoppedPhase(chatMessages),
+      phase,
       task,
       error,
       reportMarkdown,
       messages: chatMessages,
     });
     reportBufferRef.current = "";
-    currentAgentMessageRef.current = null;
+    assistantCarrierRef.current = placeholderId;
+    reportMessageRef.current = null;
+    textMessageRef.current = null;
     thinkingBufferRef.current = "";
   }, []);
 
   const startReview = useCallback((task: ReviewTask) => {
+    cancellingRef.current = false;
     setState((prev) => ({
       ...prev,
       phase: "submitting",
@@ -428,13 +507,16 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
       ],
     }));
     reportBufferRef.current = "";
-    currentAgentMessageRef.current = null;
+    assistantCarrierRef.current = null;
+    reportMessageRef.current = null;
+    textMessageRef.current = null;
     thinkingBufferRef.current = "";
   }, []);
 
   const sendFollowUp = useCallback(
     (text: string) => {
       if (!chatId) return;
+      cancellingRef.current = false;
       const userMsg: ChatMessage = {
         id: generateId(),
         role: "user",
@@ -447,32 +529,67 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         messages: [...prev.messages, userMsg],
       }));
       client.sendMessage(chatId, text);
-      currentAgentMessageRef.current = null;
+      assistantCarrierRef.current = null;
+      reportMessageRef.current = null;
+      textMessageRef.current = null;
       reportBufferRef.current = "";
       thinkingBufferRef.current = "";
     },
     [client, chatId]
   );
 
+  const cancelTurn = useCallback(() => {
+    if (!chatId) return;
+    cancellingRef.current = true;
+    client.sendMessage(chatId, "/stop");
+    setState((prev) => ({
+      ...prev,
+      phase: "stopped",
+      messages: markAllStreamingComplete(prev.messages),
+    }));
+    assistantCarrierRef.current = null;
+    reportMessageRef.current = null;
+    textMessageRef.current = null;
+  }, [client, chatId]);
+
+  // Reset review-in-progress flag when chatId changes to avoid carrying
+  // over state from a previous session (e.g. switching tasks in the sidebar).
+  useEffect(() => {
+    reviewInProgressRef.current = false;
+  }, [chatId]);
+
   useEffect(() => {
     if (!chatId || !client) return;
 
     const unsub = client.onChat(chatId, (ev: InboundEvent) => {
+      if (cancellingRef.current) {
+        if (
+          ev.event === "turn_end"
+          || (ev.event === "goal_status" && ev.status === "idle")
+          || isStopAckEvent(ev)
+        ) {
+          cancellingRef.current = false;
+        }
+        return;
+      }
       setState((prev) => {
         if (ev.event === "delta") {
           const text = ev.text || "";
           const kind = ev.kind;
           if (kind === "review_thinking") {
             thinkingBufferRef.current += text;
-            const existingId = currentAgentMessageRef.current;
+            const existingId = hasMessage(prev.messages, assistantCarrierRef.current)
+              ? assistantCarrierRef.current
+              : findAssistantCarrierId(prev.messages);
             if (existingId) {
+              assistantCarrierRef.current = existingId;
               const updated = prev.messages.map((message) =>
                 message.id === existingId ? appendThinking(message, text, true) : message
               );
               return { ...prev, messages: updated, phase: "reviewing" };
             }
             const id = generateId();
-            currentAgentMessageRef.current = id;
+            assistantCarrierRef.current = id;
             return {
               ...prev,
               phase: "reviewing",
@@ -494,8 +611,14 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           const isReport = kind === "review_report" || reportBufferRef.current.length > 0;
           if (isReport) {
             reportBufferRef.current += text;
-            const existingId = currentAgentMessageRef.current;
+            const existingId = hasMessage(prev.messages, reportMessageRef.current)
+              ? reportMessageRef.current
+              : hasMessage(prev.messages, assistantCarrierRef.current)
+                ? assistantCarrierRef.current
+                : findAssistantCarrierId(prev.messages);
             if (existingId) {
+              reportMessageRef.current = existingId;
+              assistantCarrierRef.current = existingId;
               const updated = prev.messages.map((message) =>
                 message.id === existingId
                   ? {
@@ -515,7 +638,8 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
               };
             }
             const id = generateId();
-            currentAgentMessageRef.current = id;
+            reportMessageRef.current = id;
+            assistantCarrierRef.current = id;
             return {
               ...prev,
               phase: "finalizing",
@@ -535,7 +659,9 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
             };
           }
 
-          const existingId = currentAgentMessageRef.current;
+          const existingId = hasMessage(prev.messages, textMessageRef.current)
+            ? textMessageRef.current
+            : null;
           if (existingId) {
             const updated = prev.messages.map((message) =>
               message.id === existingId && message.type === "text"
@@ -546,7 +672,8 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           }
 
           const id = generateId();
-          currentAgentMessageRef.current = id;
+          textMessageRef.current = id;
+          assistantCarrierRef.current = id;
           return {
             ...prev,
             messages: [
@@ -566,15 +693,18 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         if (ev.event === "reasoning_delta") {
           const text = ev.text || "";
           thinkingBufferRef.current += text;
-          const existingId = currentAgentMessageRef.current;
+          const existingId = hasMessage(prev.messages, assistantCarrierRef.current)
+            ? assistantCarrierRef.current
+            : findAssistantCarrierId(prev.messages);
           if (existingId) {
+            assistantCarrierRef.current = existingId;
             const updated = prev.messages.map((message) =>
               message.id === existingId ? appendThinking(message, text, true) : message
             );
             return { ...prev, phase: "reviewing", messages: updated };
           }
           const id = generateId();
-          currentAgentMessageRef.current = id;
+          assistantCarrierRef.current = id;
           return {
             ...prev,
             phase: "reviewing",
@@ -594,15 +724,26 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         }
 
         if (ev.event === "reasoning_end") {
-          return { ...prev, messages: markLastStreamingComplete(prev.messages) };
+          return prev;
         }
 
         if (ev.event === "stream_end") {
           if (ev.kind === "review_thinking") {
+            return prev;
+          }
+          if (ev.kind === "review_report") {
+            const reportId = reportMessageRef.current;
+            reportMessageRef.current = null;
+            textMessageRef.current = null;
+            return { ...prev, messages: markStreamingCompleteById(prev.messages, reportId) };
+          }
+          const textId = textMessageRef.current;
+          textMessageRef.current = null;
+          if (textId) {
+            return { ...prev, messages: markStreamingCompleteById(prev.messages, textId) };
+          } else {
             return { ...prev, messages: markLastStreamingComplete(prev.messages) };
           }
-          currentAgentMessageRef.current = null;
-          return { ...prev, messages: markLastStreamingComplete(prev.messages) };
         }
 
         if (ev.event === "message") {
@@ -685,15 +826,18 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           }
 
           if (ev.kind === "progress" && progressLines.length > 0) {
-            const existingId = currentAgentMessageRef.current;
+            const existingId = hasMessage(prev.messages, assistantCarrierRef.current)
+              ? assistantCarrierRef.current
+              : findAssistantCarrierId(prev.messages);
             if (existingId) {
+              assistantCarrierRef.current = existingId;
               const updated = prev.messages.map((message) =>
                 message.id === existingId ? appendProgressLines(message, progressLines) : message
               );
               return { ...prev, logs: newLogs, phase: "prefetching", messages: updated };
             }
             const id = generateId();
-            currentAgentMessageRef.current = id;
+            assistantCarrierRef.current = id;
             const thinking = progressLines.map((line) => line.trim()).filter(Boolean).join("\n");
             return {
               ...prev,
@@ -717,6 +861,32 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           if (!ev.kind && ev.text?.trim()) {
             const content = ev.text;
             const isReport = isLikelyReviewReport(content);
+            const existingId = hasMessage(prev.messages, assistantCarrierRef.current)
+              ? assistantCarrierRef.current
+              : findAssistantCarrierId(prev.messages);
+            const logs = isReport
+              ? [...newLogs, "Review report arrived outside review_report stream"]
+              : newLogs;
+            if (existingId) {
+              const updated = markAllStreamingComplete(prev.messages).map((message) =>
+                message.id === existingId
+                  ? {
+                      ...message,
+                      type: isReport ? "report" as const : message.type,
+                      content,
+                      streaming: false,
+                    }
+                  : message
+              );
+              if (isReport) reportMessageRef.current = existingId;
+              return {
+                ...prev,
+                logs,
+                phase: isReport ? "completed" : prev.phase,
+                reportMarkdown: isReport ? content : prev.reportMarkdown,
+                messages: updated,
+              };
+            }
             const ordinaryMessage: ChatMessage = {
               id: generateId(),
               role: "agent",
@@ -725,9 +895,6 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
               timestamp: Date.now(),
               streaming: false,
             };
-            const logs = isReport
-              ? [...newLogs, "Review report arrived outside review_report stream"]
-              : newLogs;
             return {
               ...prev,
               logs,
@@ -741,8 +908,11 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         }
 
         if (ev.event === "turn_end") {
-          currentAgentMessageRef.current = null;
-          const messages = markLastStreamingComplete(prev.messages);
+          reviewInProgressRef.current = false;
+          assistantCarrierRef.current = null;
+          reportMessageRef.current = null;
+          textMessageRef.current = null;
+          const messages = markAllStreamingComplete(prev.messages);
           const phase = completedOrStoppedPhase(messages);
           return {
             ...prev,
@@ -752,10 +922,43 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         }
 
         if (ev.event === "goal_status") {
+          if (ev.status === "running") {
+            reviewInProgressRef.current = true;
+            if (isBusyPhase(prev.phase)) return prev;
+            // If there's no agent message, create a placeholder so the user
+            // sees a streaming indicator after page refresh.
+            const hasAgent = prev.messages.some(
+              (m) => m.role === "agent" && (m.content.trim() || m.thinking?.trim()),
+            );
+            if (!hasAgent) {
+              const id = generateId();
+              assistantCarrierRef.current = id;
+              return {
+                ...prev,
+                phase: "reviewing",
+                messages: [
+                  ...prev.messages,
+                  {
+                    id,
+                    role: "agent",
+                    type: "text",
+                    content: "",
+                    timestamp: Date.now(),
+                    thinking: "Review in progress...\n",
+                    streaming: true,
+                  },
+                ],
+              };
+            }
+            return { ...prev, phase: "reviewing" };
+          }
           if (ev.status !== "idle" || !isBusyPhase(prev.phase)) {
             return prev;
           }
-          currentAgentMessageRef.current = null;
+          reviewInProgressRef.current = false;
+          assistantCarrierRef.current = null;
+          reportMessageRef.current = null;
+          textMessageRef.current = null;
           return {
             ...prev,
             phase: "stopped",
@@ -764,7 +967,9 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
         }
 
         if (ev.event === "error") {
-          currentAgentMessageRef.current = null;
+          assistantCarrierRef.current = null;
+          reportMessageRef.current = null;
+          textMessageRef.current = null;
           return {
             ...prev,
             phase: "error",
@@ -793,5 +998,5 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
     return unsub;
   }, [client, chatId]);
 
-  return { state, reset, loadHistory, startReview, sendFollowUp };
+  return { state, reset, loadHistory, startReview, sendFollowUp, cancelTurn };
 }
