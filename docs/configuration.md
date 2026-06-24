@@ -965,10 +965,14 @@ nanobot agent -m "/pairing approve ABCD-EFGH"
 
 
 ## Subagent Concurrency
- When the limit is
-reached, the `spawn` tool returns an error so the agent can decide to wait or
-rearrange its work. This protects local LLM servers from loading multiple KV caches
-at once. If your provider can handle more parallel work, raise the limit:
+
+Review subagents run concurrently, but their results are still part of the
+coordinator's current turn. As each subagent finishes, the result is injected back
+into the main agent for validation; the coordinator does not finalize the review
+until all same-session subagents have completed. When the concurrency limit is
+reached, the `spawn` tool returns an error so the agent can rearrange its work.
+This protects local LLM servers from loading multiple KV caches at once. If your
+provider can handle more parallel work, raise the limit:
 
 ```json
 {
@@ -982,7 +986,7 @@ at once. If your provider can handle more parallel work, raise the limit:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `agents.defaults.maxConcurrentSubagents` | `1` | Maximum number of spawned subagents that may run at the same time. Attempts to spawn beyond this limit return an error. |
+| `agents.defaults.maxConcurrentSubagents` | `1` | Maximum number of spawned subagents that may run at the same time. Attempts to spawn beyond this limit return an error; completed results are incrementally injected and validated before the main agent finalizes. |
 
 
 ## Code Review
@@ -994,6 +998,14 @@ Code review mode uses programmatic policies for depth:
 | `quick` | High-risk review only. It keeps security, bug-risk, and tests where relevant, caps subagents at 2, keeps only critical/high candidates, and skips AI judge. |
 | `full` | Complete review. It covers the standard dimensions and runs hard validation plus AI judge on subagent findings. |
 | `deep` | Strengthened review. It adds optional dimensions, allows more subagents, retrieves more evidence, and runs stricter AI judge cross-checks. |
+
+Local review scope is derived from the requested `target`, not from the
+Nanobot workspace and not from broad prompt text. A file target reviews that
+file relative to its git root when available, otherwise relative to the file's
+parent directory. A directory target reviews that directory. `targetPaths`
+narrows the resolved review root and is rejected if it escapes that root.
+Repository-wide prefetch happens only when the target itself resolves to that
+repository/root scope.
 
 AI judge can use the active chat model or an independent `modelPresets` entry:
 
@@ -1026,6 +1038,7 @@ AI judge can use the active chat model or an independent `modelPresets` entry:
 | `review.judge.maxCandidates` | `40` | Maximum candidates sent to AI judge per report. |
 | `review.judge.timeoutSeconds` | `60` | AI judge timeout. Failures are logged and fall back to hard validation. |
 | `review.judge.maxTokens` | `2048` | Maximum judge response tokens. |
+| `review.prefetchDenseBackfillLimit` | `256` | Maximum dense vectors to backfill during one interactive review prefetch. Lexical retrieval remains active when the dense backfill is capped or the embedding provider is unavailable. |
 
 
 ## Auto Compact

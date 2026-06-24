@@ -32,7 +32,7 @@ from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
 from nanobot.agent.review import normalize_review_action, normalize_review_target_type
-from nanobot.agent.review.planner import parse_repo_target
+from nanobot.agent.review.beforeplan import parse_repo_target
 from nanobot.auto_tasks.github import parse_pull_request_event, verify_github_signature
 from nanobot.auto_tasks.service import AutoTaskService
 from nanobot.auto_tasks.store import AutoTaskStore

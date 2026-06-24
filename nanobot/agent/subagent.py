@@ -1,16 +1,15 @@
-"""Subagent manager for background task execution."""
+"""Subagent manager for concurrent review task execution."""
 
 import asyncio
 import json
 import time
 import uuid
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from loguru import logger
 
-from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
+from nanobot.agent.hooks.subagent import SubagentHook, SubagentStatus
 from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.file_state import FileStates
@@ -22,51 +21,8 @@ from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.prompt_templates import render_template
 
-
-@dataclass(slots=True)
-class SubagentStatus:
-    """Real-time status of a running subagent."""
-
-    task_id: str
-    label: str
-    task_description: str
-    started_at: float          # time.monotonic()
-    phase: str = "initializing"  # initializing | awaiting_tools | tools_completed | final_response | done | error
-    iteration: int = 0
-    tool_events: list = field(default_factory=list)   # [{name, status, detail}, ...]
-    usage: dict = field(default_factory=dict)          # token usage
-    stop_reason: str | None = None
-    error: str | None = None
-
-
-class _SubagentHook(AgentHook):
-    """Hook for subagent execution — logs tool calls and updates status."""
-
-    def __init__(self, task_id: str, status: SubagentStatus | None = None) -> None:
-        super().__init__()
-        self._task_id = task_id
-        self._status = status
-
-    async def before_execute_tools(self, context: AgentHookContext) -> None:
-        for tool_call in context.tool_calls:
-            args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
-            logger.debug(
-                "Subagent [{}] executing: {} with arguments: {}",
-                self._task_id, tool_call.name, args_str,
-            )
-
-    async def after_iteration(self, context: AgentHookContext) -> None:
-        if self._status is None:
-            return
-        self._status.iteration = context.iteration
-        self._status.tool_events = list(context.tool_events)
-        self._status.usage = dict(context.usage)
-        if context.error:
-            self._status.error = str(context.error)
-
-
 class SubagentManager:
-    """Manages background subagent execution."""
+    """Manages concurrent subagent execution and result injection."""
 
     def __init__(
         self,
@@ -110,12 +66,29 @@ class SubagentManager:
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._session_results: dict[str, asyncio.Queue[InboundMessage]] = {}
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
         return ToolsConfig(
             exec=self.tools_config.exec,
             restrict_to_workspace=self.restrict_to_workspace,
+            github_repo=self.tools_config.github_repo,
+        )
+
+    def _build_tool_context(
+        self,
+        workspace: Path | None = None,
+        tools_config: ToolsConfig | None = None,
+    ) -> ToolContext:
+        root = self.workspace if workspace is None else workspace
+        cfg = tools_config if tools_config is not None else self._subagent_tools_config()
+        return ToolContext(
+            config=cfg,
+            workspace=str(root.resolve()),
+            embedding_config=self.embedding_config,
+            rerank_config=self.rerank_config,
+            file_state_store=FileStates(),
         )
 
     def _build_tools(
@@ -124,17 +97,12 @@ class SubagentManager:
         tools_config: ToolsConfig | None = None,
     ) -> ToolRegistry:
         """Build an isolated subagent tool registry via ToolLoader."""
-        root = self.workspace if workspace is None else workspace
         registry = ToolRegistry()
-        cfg = tools_config if tools_config is not None else self._subagent_tools_config()
-        ctx = ToolContext(
-            config=cfg,
-            workspace=str(root.resolve()),
-            embedding_config=self.embedding_config,
-            rerank_config=self.rerank_config,
-            file_state_store=FileStates(),
+        ToolLoader().load(
+            self._build_tool_context(workspace=workspace, tools_config=tools_config),
+            registry,
+            scope="subagent",
         )
-        ToolLoader().load(ctx, registry, scope="subagent")
         return registry
 
     def set_provider(self, provider: LLMProvider, model: str) -> None:
@@ -145,27 +113,25 @@ class SubagentManager:
     async def spawn(
         self,
         task: str,
-        label: str | None = None,
+        label: str,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
         origin_message_id: str | None = None,
     ) -> str:
-        """Spawn a subagent to execute a task in the background."""
+        """Start a dedicated review subagent for same-turn result integration."""
         task_id = str(uuid.uuid4())[:8]
-        display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
-
         status = SubagentStatus(
             task_id=task_id,
-            label=display_label,
+            label=label,
             task_description=task,
             started_at=time.monotonic(),
         )
         self._task_statuses[task_id] = status
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin, status, origin_message_id)
+            self._run_subagent(task_id, task, label, origin, status, origin_message_id)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -180,9 +146,11 @@ class SubagentManager:
                     del self._session_tasks[session_key]
 
         bg_task.add_done_callback(_cleanup)
-
-        logger.info("Spawned subagent [{}]: {}", task_id, display_label)
-        return f"Subagent [{display_label}] started (id: {task_id}). I'll notify you when it completes."
+        logger.info("Spawned review subagent [{}]: {}", task_id, label)
+        return (
+            f"Review subagent [{label}] started (id: {task_id}). "
+            "The coordinator will wait for and integrate its result before finalizing."
+        )
 
     async def _run_subagent(
         self,
@@ -193,8 +161,8 @@ class SubagentManager:
         status: SubagentStatus,
         origin_message_id: str | None = None,
     ) -> None:
-        """Execute the subagent task and announce the result."""
-        logger.info("Subagent [{}] starting task: {}", task_id, label)
+        """Execute a dedicated review subagent and announce structured findings."""
+        logger.info("Review subagent [{}] starting task: {}", task_id, label)
 
         async def _on_checkpoint(payload: dict) -> None:
             status.phase = payload.get("phase", status.phase)
@@ -207,7 +175,6 @@ class SubagentManager:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
             ]
-
             sess_key = origin.get("session_key")
             llm_timeout = (
                 self._llm_wall_timeout_for_session(sess_key)
@@ -220,8 +187,10 @@ class SubagentManager:
                 model=self.model,
                 max_iterations=self.max_iterations,
                 max_tool_result_chars=self.max_tool_result_chars,
-                hook=_SubagentHook(task_id, status),
-                max_iterations_message="Task completed but no final response was generated.",
+                hook=SubagentHook(task_id, status),
+                max_iterations_message=(
+                    "Review task completed but no structured findings were submitted."
+                ),
                 error_message=None,
                 fail_on_tool_error=True,
                 checkpoint_callback=_on_checkpoint,
@@ -233,26 +202,35 @@ class SubagentManager:
 
             if result.stop_reason == "tool_error":
                 status.tool_events = list(result.tool_events)
+                final_result = self._format_partial_progress(result)
                 await self._announce_result(
-                    task_id, label, task,
-                    self._format_partial_progress(result),
-                    origin, "error", origin_message_id,
+                    task_id, label, task, final_result, origin, "error", origin_message_id
                 )
-            elif result.stop_reason == "error":
+                return
+            if result.stop_reason == "error":
                 await self._announce_result(
-                    task_id, label, task,
-                    result.error or "Error: subagent execution failed.",
-                    origin, "error", origin_message_id,
+                    task_id,
+                    label,
+                    task,
+                    result.error or "Error: review subagent execution failed.",
+                    origin,
+                    "error",
+                    origin_message_id,
                 )
-            else:
-                final_result = result.final_content or "Task completed but no final response was generated."
-                logger.info("Subagent [{}] completed successfully", task_id)
-                await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
+                return
+
+            final_result = self._extract_review_submit_result(result.messages, result.tool_events)
+            if final_result is None:
+                final_result = result.final_content or (
+                    "Review task completed but no structured findings were submitted."
+                )
+            logger.info("Review subagent [{}] completed successfully", task_id)
+            await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
 
         except Exception as e:
             status.phase = "error"
             status.error = str(e)
-            logger.exception("Subagent [{}] failed", task_id)
+            logger.exception("Review subagent [{}] failed", task_id)
             await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
 
     async def _announce_result(
@@ -301,7 +279,44 @@ class SubagentManager:
         )
 
         await self.bus.publish_inbound(msg)
+        self._publish_session_result(override, msg)
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+
+    def _publish_session_result(self, session_key: str, msg: InboundMessage) -> None:
+        self._session_results.setdefault(session_key, asyncio.Queue()).put_nowait(msg)
+
+    async def wait_for_session_result(
+        self,
+        session_key: str,
+        *,
+        timeout: float = 0.1,
+    ) -> InboundMessage | None:
+        """Wait briefly for the next completed subagent result for a session."""
+        queue = self._session_results.setdefault(session_key, asyncio.Queue())
+        try:
+            msg = await asyncio.wait_for(queue.get(), timeout=timeout)
+            self._cleanup_session_result_queue(session_key)
+            return msg
+        except asyncio.TimeoutError:
+            self._cleanup_session_result_queue(session_key)
+            return None
+
+    def drain_session_results(self, session_key: str, *, limit: int) -> list[InboundMessage]:
+        """Return already completed subagent results for a session."""
+        queue = self._session_results.setdefault(session_key, asyncio.Queue())
+        items: list[InboundMessage] = []
+        while len(items) < limit:
+            try:
+                items.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        self._cleanup_session_result_queue(session_key)
+        return items
+
+    def _cleanup_session_result_queue(self, session_key: str) -> None:
+        queue = self._session_results.get(session_key)
+        if queue is not None and queue.empty() and session_key not in self._session_tasks:
+            self._session_results.pop(session_key, None)
 
     @staticmethod
     def _format_partial_progress(result) -> str:
@@ -325,7 +340,7 @@ class SubagentManager:
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
     def _build_subagent_prompt(self) -> str:
-        """Build a focused system prompt for the subagent."""
+        """Build the system prompt for dedicated review subagents."""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
@@ -335,11 +350,53 @@ class SubagentManager:
             disabled_skills=self.disabled_skills,
         ).build_skills_summary()
         return render_template(
-            "agent/subagent_system.md",
+            "agent/review_subagent_system.md",
             time_ctx=time_ctx,
             workspace=str(self.workspace),
             skills_summary=skills_summary or "",
         )
+
+    @staticmethod
+    def _extract_review_submit_result(
+        messages: list[dict[str, Any]],
+        tool_events: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        """Extract the last canonical review_submit tool result."""
+        for event in reversed(tool_events or []):
+            if (
+                event.get("name") == "review_submit"
+                and event.get("status") == "ok"
+                and isinstance(event.get("raw_result"), str)
+            ):
+                result = SubagentManager._canonical_review_submit_json(event["raw_result"])
+                if result is not None:
+                    return result
+
+        for message in reversed(messages):
+            if message.get("role") != "tool" or message.get("name") != "review_submit":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            result = SubagentManager._canonical_review_submit_json(content)
+            if result is not None:
+                return result
+        return None
+
+    @staticmethod
+    def _canonical_review_submit_json(content: str) -> str | None:
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return None
+        if (
+            not isinstance(data, dict)
+            or data.get("submitted") is not True
+            or not isinstance(data.get("findings"), list)
+            or not isinstance(data.get("errors"), list)
+        ):
+            return None
+        return json.dumps(data, ensure_ascii=False)
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""

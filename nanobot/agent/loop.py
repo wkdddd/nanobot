@@ -17,14 +17,14 @@ from loguru import logger
 from nanobot.agent import model_presets as preset_helpers
 from nanobot.agent.autocompact import AutoCompact
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.lifecycle_hook import AgentHook, CompositeHook
+from nanobot.agent.hooks.lifecycle import AgentHook, CompositeHook
+from nanobot.agent.hooks.progress import AgentProgressHook
+from nanobot.agent.hooks.review_finalizer import ReviewFinalizerHook
 from nanobot.agent.memory import Consolidator
-from nanobot.agent.progress_hook import AgentProgressHook
 from nanobot.agent.review import (
     apply_review_metadata_from_message,
     resolve_code_review_context,
 )
-from nanobot.agent.review.finalizer import ReviewFinalizerHook
 from nanobot.agent.review.judge import ReviewJudge, ReviewJudgeConfig
 from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
@@ -487,6 +487,7 @@ class AgentLoop:
             provider=self.provider,
             model=self.model,
             rag_config=self.rag_config,
+            review_config=self.review_config,
             embedding_config=self.embedding_config,
             rerank_config=self.rerank_config,
             qdrant_config=self.qdrant_config,
@@ -740,6 +741,43 @@ class AgentLoop:
         """
         self._sync_subagent_runtime_limits()
 
+        active_session_key = session.key if session else session_key
+        buffered_pending: list[InboundMessage] = []
+        injected_subagent_task_ids: set[str] = set()
+        saw_running_subagents = False
+        subagent_barrier_sent = False
+
+        def _running_subagents() -> int:
+            if not active_session_key:
+                return 0
+            getter = getattr(self.subagents, "get_running_count_by_session", None)
+            if not callable(getter):
+                return 0
+            return int(getter(active_session_key))
+
+        def _is_subagent_result(msg: InboundMessage) -> bool:
+            return (
+                msg.sender_id == "subagent"
+                or (msg.metadata or {}).get("injected_event") == "subagent_result"
+            )
+
+        def _drain_subagent_results(limit: int) -> list[InboundMessage]:
+            if not active_session_key:
+                return []
+            drain = getattr(self.subagents, "drain_session_results", None)
+            if not callable(drain):
+                return []
+            return list(drain(active_session_key, limit=limit))
+
+        async def _wait_subagent_result() -> InboundMessage | None:
+            if not active_session_key:
+                return None
+            wait = getattr(self.subagents, "wait_for_session_result", None)
+            if not callable(wait):
+                return None
+            return await wait(active_session_key, timeout=0.1)
+
+        is_review_session = session is not None and bool(session.metadata.get(ReviewMetaKey.TARGET))
         loop_hook = AgentProgressHook(
             on_progress=on_progress,
             on_stream=on_stream,
@@ -752,9 +790,10 @@ class AgentLoop:
             tool_hint_max_length=self.tool_hint_max_length,
             set_tool_context=self._set_tool_context,
             on_iteration=lambda iteration: setattr(self, "_current_iteration", iteration),
+            suppress_content_progress=is_review_session,
         )
         review_hook: AgentHook | None = None
-        if session is not None and session.metadata.get(ReviewMetaKey.TARGET):
+        if is_review_session and session is not None:
             review_depth = str(session.metadata.get(ReviewMetaKey.MODE_VARIANT) or "full").lower()
             if review_depth not in ("quick", "full", "deep"):
                 review_depth = "full"
@@ -765,6 +804,7 @@ class AgentLoop:
                 depth=review_depth,  # type: ignore[arg-type]
                 judge=self._build_review_judge(),
                 allowed_dimensions=session.metadata.get(ReviewMetaKey.ALLOWED_DIMENSIONS),
+                can_finalize=lambda: _running_subagents() == 0,
             )
             on_stream = None
             on_stream_end = None
@@ -784,13 +824,14 @@ class AgentLoop:
         async def _drain_pending(*, limit: int = _MAX_INJECTIONS_PER_TURN) -> list[dict[str, Any]]:
             """Drain follow-up messages from the pending queue.
 
-            Only messages that have already reached the pending queue are
-            injected into the current runner iteration. Sub-agent completions
-            that arrive later are routed through the normal session queue
-            instead of blocking this turn while waiting for them.
+            Subagent results are a hard dependency for review turns. While
+            same-session subagents are running, wait for each completed result
+            and inject it immediately so validation can run incrementally.
+            Non-subagent messages are buffered until subagents have finished.
             """
             if pending_queue is None:
                 return []
+            nonlocal saw_running_subagents, subagent_barrier_sent
 
             def _to_user_message(pending_msg: InboundMessage) -> dict[str, Any]:
                 content = pending_msg.content
@@ -805,15 +846,73 @@ class AgentLoop:
                 return message
 
             items: list[dict[str, Any]] = []
+            running_at_start = _running_subagents() > 0
+            saw_running_subagents = saw_running_subagents or running_at_start
+
+            def _accept_pending(pending_msg: InboundMessage) -> bool:
+                if _is_subagent_result(pending_msg):
+                    task_id = (pending_msg.metadata or {}).get("subagent_task_id")
+                    if isinstance(task_id, str) and task_id:
+                        if task_id in injected_subagent_task_ids:
+                            return False
+                        injected_subagent_task_ids.add(task_id)
+                    items.append(_to_user_message(pending_msg))
+                    return True
+                buffered_pending.append(pending_msg)
+                return False
+
+            def _subagent_barrier_message() -> dict[str, Any]:
+                return {
+                    "role": "user",
+                    "content": (
+                        "[System] All same-session review subagents have completed. "
+                        "Continue integrating the injected subagent results and finalize "
+                        "only if validation is complete."
+                    ),
+                    "_metadata": {"injected_event": "subagent_barrier"},
+                }
+
+            while buffered_pending and len(items) < limit and _running_subagents() == 0:
+                items.append(_to_user_message(buffered_pending.pop(0)))
+
+            for result_msg in _drain_subagent_results(limit - len(items)):
+                _accept_pending(result_msg)
+
             while len(items) < limit:
                 try:
-                    items.append(_to_user_message(pending_queue.get_nowait()))
+                    pending_msg = pending_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                _accept_pending(pending_msg)
+
+            while len(items) < limit and _running_subagents() > 0 and not items:
+                pending_msg = await _wait_subagent_result()
+                if pending_msg is None and not callable(
+                    getattr(self.subagents, "wait_for_session_result", None)
+                ):
+                    try:
+                        pending_msg = await asyncio.wait_for(pending_queue.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        pending_msg = None
+                if pending_msg is None:
+                    continue
+                _accept_pending(pending_msg)
+
+            while buffered_pending and len(items) < limit and _running_subagents() == 0:
+                items.append(_to_user_message(buffered_pending.pop(0)))
+
+            if (
+                not items
+                and saw_running_subagents
+                and not subagent_barrier_sent
+                and _running_subagents() == 0
+                and is_review_session
+            ):
+                subagent_barrier_sent = True
+                items.append(_subagent_barrier_message())
 
             return items
 
-        active_session_key = session.key if session else session_key
         file_state_token = bind_file_states(self._file_state_store.for_session(active_session_key))
         try:
             from nanobot.agent.tools.permissions import resolve_policy
@@ -833,12 +932,30 @@ class AgentLoop:
                 review_meta,
                 progress_callback=on_progress,
             )
+            review_meta_keys_to_sync = (
+                ReviewMetaKey.ALLOWED_DIMENSIONS,
+                ReviewMetaKey.GITHUB_PREFETCH_READY,
+                ReviewMetaKey.TARGET_PATHS,
+                ReviewMetaKey.LOCAL_ROOT,
+                ReviewMetaKey.LOCAL_TARGET,
+                ReviewMetaKey.LOCAL_SCOPE_KIND,
+            )
+            for key in review_meta_keys_to_sync:
+                if key in review_meta:
+                    _session_meta[key] = review_meta[key]
+                elif key in (ReviewMetaKey.LOCAL_ROOT, ReviewMetaKey.LOCAL_TARGET, ReviewMetaKey.LOCAL_SCOPE_KIND):
+                    _session_meta.pop(key, None)
             if ReviewMetaKey.ALLOWED_DIMENSIONS in review_meta:
-                _session_meta[ReviewMetaKey.ALLOWED_DIMENSIONS] = review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS]
                 if review_hook is not None and hasattr(review_hook, "set_allowed_dimensions"):
                     review_hook.set_allowed_dimensions(review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS])
-            if ReviewMetaKey.GITHUB_PREFETCH_READY in review_meta:
-                _session_meta[ReviewMetaKey.GITHUB_PREFETCH_READY] = review_meta[ReviewMetaKey.GITHUB_PREFETCH_READY]
+            if review_hook is not None and hasattr(review_hook, "set_validation_context"):
+                validation_workspace = str(review_meta.get(ReviewMetaKey.LOCAL_ROOT) or self.workspace)
+                local_target = review_meta.get(ReviewMetaKey.LOCAL_TARGET)
+                review_hook.set_validation_context(
+                    workspace=validation_workspace,
+                    changed_files=review_meta.get(ReviewMetaKey.TARGET_PATHS) or [],
+                    local_target=local_target if isinstance(local_target, str) else None,
+                )
             if review_meta:
                 updated_tool_meta = {
                     **dict(metadata or {}),
@@ -848,6 +965,7 @@ class AgentLoop:
                         if key != ReviewMetaKey.EVIDENCE_PROVIDER
                     },
                 }
+                loop_hook.update_metadata(updated_tool_meta)
                 self._set_tool_context(
                     channel,
                     chat_id,

@@ -7,9 +7,11 @@ import pytest
 
 from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
+from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import Config, _resolve_tool_config_refs
-from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.config.schema import ToolsConfig
+from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.manager import Session
 
 
@@ -39,6 +41,32 @@ class CapturingRunner:
         return AgentRunResult(final_content="ok", messages=spec.initial_messages)
 
 
+class SpawnExecutingRunner:
+    def __init__(self) -> None:
+        self.result: Any | None = None
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        from nanobot.agent.hooks import AgentHookContext
+
+        call = ToolCallRequest(
+            id="call_spawn",
+            name="spawn",
+            arguments={"task": "review performance", "label": "Performance Reviewer"},
+        )
+        context = AgentHookContext(
+            iteration=0,
+            messages=list(spec.initial_messages),
+            response=LLMResponse(content="spawning reviewer", tool_calls=[call]),
+            tool_calls=[call],
+        )
+        assert spec.hook is not None
+        await spec.hook.before_execute_tools(context)
+        tool = spec.tools.get("spawn")
+        assert tool is not None
+        self.result = await tool.execute(**call.arguments)
+        return AgentRunResult(final_content="ok", messages=spec.initial_messages, tools_used=["spawn"])
+
+
 class InjectionRunner:
     def __init__(self) -> None:
         self.injected: list[dict[str, Any]] | None = None
@@ -54,8 +82,120 @@ class InjectionRunner:
 
 
 class RunningSubagents:
+    def __init__(self, running: int = 1) -> None:
+        self.running = running
+        self.results: asyncio.Queue = asyncio.Queue()
+
     def get_running_count_by_session(self, session_key: str) -> int:
-        return 1
+        return self.running
+
+    def publish(self, msg: Any) -> None:
+        self.results.put_nowait(msg)
+
+    def drain_session_results(self, session_key: str, *, limit: int) -> list[Any]:
+        items: list[Any] = []
+        while len(items) < limit:
+            try:
+                items.append(self.results.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        return items
+
+    async def wait_for_session_result(self, session_key: str, *, timeout: float = 0.1) -> Any:
+        try:
+            return await asyncio.wait_for(self.results.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
+
+class MultiDrainRunner:
+    def __init__(self, pending: asyncio.Queue, subagents: RunningSubagents) -> None:
+        self.pending = pending
+        self.subagents = subagents
+        self.injected_batches: list[list[dict[str, Any]]] = []
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        assert spec.injection_callback is not None
+
+        await self.pending.put(_inbound("user interjection", sender_id="user"))
+        first_wait = asyncio.create_task(spec.injection_callback(limit=3))
+        await asyncio.sleep(0)
+        assert not first_wait.done()
+
+        self.subagents.publish(_subagent_result("first", "security"))
+        first = await asyncio.wait_for(first_wait, timeout=0.5)
+        self.injected_batches.append(first)
+        assert len(first) == 1
+        assert first[0]["_metadata"]["subagent_task_id"] == "first"
+
+        second_wait = asyncio.create_task(spec.injection_callback(limit=3))
+        await asyncio.sleep(0)
+        assert not second_wait.done()
+
+        self.subagents.running = 0
+        self.subagents.publish(_subagent_result("second", "tests"))
+        second = await asyncio.wait_for(second_wait, timeout=0.5)
+        self.injected_batches.append(second)
+        task_ids = [item.get("_metadata", {}).get("subagent_task_id") for item in second]
+        assert "second" in task_ids
+        assert any(item.get("content") == "user interjection" for item in second)
+
+        messages = list(spec.initial_messages)
+        for batch in self.injected_batches:
+            messages.extend(batch)
+        return AgentRunResult(final_content="ok", messages=messages, had_injections=True)
+
+
+class ManagerQueueDrainRunner:
+    def __init__(self, subagents: RunningSubagents) -> None:
+        self.subagents = subagents
+        self.injected: list[dict[str, Any]] = []
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        assert spec.injection_callback is not None
+        wait = asyncio.create_task(spec.injection_callback(limit=3))
+        await asyncio.sleep(0)
+        assert not wait.done()
+
+        self.subagents.running = 0
+        self.subagents.publish(_subagent_result("direct", "security"))
+        self.injected = await asyncio.wait_for(wait, timeout=0.5)
+        return AgentRunResult(
+            final_content="ok",
+            messages=list(spec.initial_messages) + list(self.injected),
+            had_injections=bool(self.injected),
+        )
+
+
+def _inbound(
+    content: str,
+    *,
+    sender_id: str = "subagent",
+    metadata: dict[str, Any] | None = None,
+) -> Any:
+    from nanobot.bus.events import InboundMessage
+
+    return InboundMessage(
+        channel="system" if sender_id == "subagent" else "websocket",
+        sender_id=sender_id,
+        chat_id="test:pending",
+        content=content,
+        session_key_override="test:pending",
+        metadata=metadata or {},
+    )
+
+
+def _subagent_result(task_id: str, label: str) -> Any:
+    return _inbound(
+        f"subagent {task_id} result",
+        metadata={
+            "injected_event": "subagent_result",
+            "subagent_task_id": task_id,
+            "subagent_label": label,
+            "subagent_status": "ok",
+            "subagent_result": '{"submitted": true, "findings": [], "errors": []}',
+        },
+    )
 
 
 def _config(data: dict[str, Any]) -> Config:
@@ -149,25 +289,47 @@ async def test_agent_loop_ignores_legacy_math_qa_mode_metadata(tmp_path) -> None
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_pending_drain_does_not_wait_for_running_subagents(tmp_path) -> None:
+async def test_agent_loop_pending_drain_waits_for_running_subagent_results(tmp_path) -> None:
     loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
-    runner = InjectionRunner()
-    loop.runner = runner
-    loop.subagents = RunningSubagents()
+    subagents = RunningSubagents(running=1)
+    loop.subagents = subagents
     session = Session(key="test:pending")
     pending: asyncio.Queue = asyncio.Queue()
+    runner = MultiDrainRunner(pending, subagents)
+    loop.runner = runner
 
-    await asyncio.wait_for(
-        loop._run_agent_loop(
-            [{"role": "user", "content": "hello"}],
-            session=session,
-            session_key=session.key,
-            pending_queue=pending,
-        ),
-        timeout=0.1,
+    await loop._run_agent_loop(
+        [{"role": "user", "content": "hello"}],
+        session=session,
+        session_key=session.key,
+        pending_queue=pending,
     )
 
-    assert runner.injected == []
+    assert [batch[0]["_metadata"]["subagent_task_id"] for batch in runner.injected_batches] == [
+        "first",
+        "second",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_drain_waits_on_subagent_manager_result_queue(tmp_path) -> None:
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    subagents = RunningSubagents(running=1)
+    loop.subagents = subagents
+    session = Session(key="test:pending")
+    pending: asyncio.Queue = asyncio.Queue()
+    runner = ManagerQueueDrainRunner(subagents)
+    loop.runner = runner
+
+    await loop._run_agent_loop(
+        [{"role": "user", "content": "hello"}],
+        session=session,
+        session_key=session.key,
+        pending_queue=pending,
+    )
+
+    assert len(runner.injected) == 1
+    assert runner.injected[0]["_metadata"]["subagent_task_id"] == "direct"
 
 
 def test_invalid_max_concurrent_requests_falls_back_to_default(monkeypatch) -> None:
@@ -209,6 +371,7 @@ def test_sanitize_persisted_blocks_converts_non_dict_blocks() -> None:
 
 
 def test_session_history_preserves_subagent_result_metadata() -> None:
+    raw_result = '{"submitted":true,"findings":[],"errors":[]}'
     session = Session(key="test:review")
     session.add_message(
         "assistant",
@@ -217,7 +380,7 @@ def test_session_history_preserves_subagent_result_metadata() -> None:
         subagent_task_id="task",
         subagent_label="security",
         subagent_status="ok",
-        subagent_result="[]",
+        subagent_result=raw_result,
     )
 
     history = session.get_history()
@@ -230,9 +393,113 @@ def test_session_history_preserves_subagent_result_metadata() -> None:
             "subagent_task_id": "task",
             "subagent_label": "security",
             "subagent_status": "ok",
-            "subagent_result": "[]",
+            "subagent_result": raw_result,
         },
     }]
+
+
+def test_review_subagent_tools_include_structured_submitter(tmp_path) -> None:
+    manager = SubagentManager(
+        DummyProvider(),
+        tmp_path,
+        MessageBus(),
+        max_tool_result_chars=1000,
+    )
+
+    tools = manager._build_tools()
+
+    assert tools.has("review_submit")
+    assert not tools.has("spawn")
+    assert not tools.has("message")
+
+
+def test_review_subagent_inherits_subagent_tool_config(tmp_path) -> None:
+    tools_config = ToolsConfig()
+    tools_config.exec.timeout = 123
+    tools_config.restrict_to_workspace = False
+    tools_config.github_repo.token = "gh-test-token"
+    manager = SubagentManager(
+        DummyProvider(),
+        tmp_path,
+        MessageBus(),
+        max_tool_result_chars=1000,
+        tools_config=tools_config,
+        restrict_to_workspace=True,
+    )
+
+    ctx = manager._build_tool_context()
+
+    assert ctx.config.exec.timeout == 123
+    assert ctx.config.restrict_to_workspace is True
+    assert ctx.config.github_repo.token == "gh-test-token"
+
+
+def test_review_subagent_extracts_review_submit_tool_result() -> None:
+    messages = [{
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "review_submit",
+        "content": (
+            '{"submitted":true,"findings":[{"severity":"high","file":"src/app.py",'
+            '"line":1,"title":"Issue","evidence":"line1",'
+            '"impact":"bad","recommendation":"fix"}],"errors":[]}'
+        ),
+    }]
+
+    result = SubagentManager._extract_review_submit_result(messages)
+
+    assert result is not None
+    assert '"Issue"' in result
+    assert result.startswith("{")
+    assert '"submitted": true' in result
+
+
+def test_review_subagent_extracts_untruncated_review_submit_event() -> None:
+    raw_result = (
+        '{"submitted":true,"findings":[{"severity":"high","file":"src/app.py",'
+        '"line":1,"title":"Issue","evidence":"line1",'
+        '"impact":"bad","recommendation":"fix"}],"errors":[]}'
+    )
+    messages = [{
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "review_submit",
+        "content": raw_result[:60] + "\n... (truncated)",
+    }]
+    tool_events = [{
+        "name": "review_submit",
+        "status": "ok",
+        "detail": raw_result[:120] + "...",
+        "raw_result": raw_result,
+    }]
+
+    result = SubagentManager._extract_review_submit_result(messages, tool_events)
+
+    assert result is not None
+    assert '"Issue"' in result
+    assert result.startswith("{")
+    assert '"submitted": true' in result
+
+
+def test_review_subagent_ignores_unprocessed_review_submit_arguments() -> None:
+    messages = [{
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "review_submit",
+                "arguments": (
+                    '{"findings":[{"severity":"high","file":"src/app.py",'
+                    '"line":1,"title":"Issue","evidence":"line1",'
+                    '"impact":"bad","recommendation":"fix"}]}'
+                ),
+            },
+        }],
+    }]
+
+    assert SubagentManager._extract_review_submit_result(messages) is None
 
 
 @pytest.mark.asyncio
@@ -295,6 +562,53 @@ async def test_agent_loop_review_message_metadata_is_visible_same_turn(tmp_path)
     assert session.metadata["allowed_review_dimensions"] == ["dependency"]
     assert "Dependency Reviewer" in runner.initial_messages[0]["content"]
     assert "Security Reviewer" not in runner.initial_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_review_spawn_sees_same_turn_allowed_dimensions(tmp_path, monkeypatch) -> None:
+    from nanobot.bus.events import InboundMessage
+
+    loop = AgentLoop(MessageBus(), DummyProvider(), tmp_path)
+    runner = SpawnExecutingRunner()
+    loop.runner = runner
+    spawn_calls: list[dict[str, Any]] = []
+
+    async def fake_spawn(**kwargs: Any) -> str:
+        spawn_calls.append(kwargs)
+        return "Review subagent [performance] started (id: test)."
+
+    monkeypatch.setattr(loop.subagents, "spawn", fake_spawn)
+    session = Session(key="websocket:review")
+    msg = InboundMessage(
+        channel="websocket",
+        sender_id="user",
+        chat_id="review",
+        content="审查",
+        metadata={
+            "review_target": "https://github.com/test/repo/blob/main/index.html",
+            "review_target_type": "github",
+            "review_focus": ["performance"],
+            "review_mode_variant": "full",
+            "review_action": "repo",
+        },
+    )
+    ctx = TurnContext(
+        msg=msg,
+        session_key=session.key,
+        state=TurnState.RESTORE,
+        turn_id="turn",
+        session=session,
+    )
+
+    await loop._state_restore(ctx)
+    await loop._state_compact(ctx)
+    await loop._state_build(ctx)
+    await loop._state_run(ctx)
+
+    assert runner.result is not None
+    assert "review mode is not active" not in str(runner.result)
+    assert str(runner.result).startswith("Review subagent [performance] started")
+    assert spawn_calls[0]["label"] == "performance"
 
 
 @pytest.mark.asyncio

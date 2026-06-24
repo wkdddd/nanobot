@@ -8,6 +8,8 @@ import hashlib
 import json
 import sqlite3
 import struct
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Iterable
@@ -85,12 +87,17 @@ class RAGIndex:
         max_file_chars: int,
         prune_missing: bool = True,
         skip_embed_filter: Callable[[str, str], bool] | None = None,
+        cancel_event: threading.Event | None = None,
+        dense_limit: int | None = None,
     ) -> None:
         self._ensure_schema()
         seen: set[str] = set()
         with self._connect() as conn:
             current_mtimes = self._current_file_mtimes(conn, source_type)
             for path in files:
+                if cancel_event is not None and cancel_event.is_set():
+                    logger.info("rag.index.sync.cancelled source_type={} phase=files", source_type)
+                    return
                 rel = path.relative_to(self.workspace).as_posix()
                 seen.add(rel)
                 mtime = self._mtime(path)
@@ -120,7 +127,11 @@ class RAGIndex:
 
             if prune_missing:
                 self._prune_missing(conn, source_type, seen)
-        self._sync_vector_store_from_sqlite(source_type)
+        self._sync_vector_store_from_sqlite(
+            source_type,
+            cancel_event=cancel_event,
+            dense_limit=dense_limit,
+        )
 
     def count(self, source_type: str) -> int:
         self._ensure_schema()
@@ -414,8 +425,17 @@ class RAGIndex:
         hits.sort(key=lambda hit: -hit.score)
         return hits
 
-    def _sync_vector_store_from_sqlite(self, source_type: str) -> None:
+    def _sync_vector_store_from_sqlite(
+        self,
+        source_type: str,
+        *,
+        cancel_event: threading.Event | None = None,
+        dense_limit: int | None = None,
+    ) -> None:
         if not self.embedding_client or not self.vector_store:
+            return
+        if cancel_event is not None and cancel_event.is_set():
+            logger.info("Qdrant dense sync cancelled source_type={} phase=start", source_type)
             return
         if getattr(self.embedding_client, "unavailable", False):
             logger.warning(
@@ -458,8 +478,19 @@ class RAGIndex:
             return
 
         chunks_to_sync = self._qdrant_chunks_needing_sync(source_type, embeddable)
+        dense_bounded = False
+        if dense_limit is not None and dense_limit >= 0 and len(chunks_to_sync) > dense_limit:
+            logger.info(
+                "Qdrant dense sync bounded source_type={} chunks={} limit={} lexical_fallback_active=true",
+                source_type,
+                len(chunks_to_sync),
+                dense_limit,
+            )
+            dense_bounded = True
+            chunks_to_sync = chunks_to_sync[:dense_limit]
         if not chunks_to_sync:
-            self._meta_set(meta_key, fingerprint)
+            if not dense_bounded:
+                self._meta_set(meta_key, fingerprint)
             return
 
         if self._sync_vector_store(
@@ -467,7 +498,8 @@ class RAGIndex:
             chunks_to_sync,
             embedding_model=embedding_model,
             dimensions=dimensions,
-        ):
+            cancel_event=cancel_event,
+        ) and not dense_bounded:
             self._meta_set(meta_key, fingerprint)
 
     def _list_embeddable_chunks(self, source_type: str) -> list[IndexedChunk]:
@@ -587,6 +619,7 @@ class RAGIndex:
         *,
         embedding_model: str,
         dimensions: int,
+        cancel_event: threading.Event | None = None,
     ) -> bool:
         """Best-effort dense index sync for newly replaced chunks."""
         if not self.embedding_client or not self.vector_store or not chunks:
@@ -601,6 +634,8 @@ class RAGIndex:
                 embeddable,
                 embedding_model=embedding_model,
                 dimensions=dimensions,
+                source_type=source_type,
+                cancel_event=cancel_event,
             )
             if len(vectors) != len(embeddable) or any(vector is None for vector in vectors):
                 logger.warning(
@@ -644,6 +679,8 @@ class RAGIndex:
         *,
         embedding_model: str,
         dimensions: int,
+        source_type: str = "",
+        cancel_event: threading.Event | None = None,
     ) -> list[list[float] | None]:
         vectors: list[list[float] | None] = [None] * len(chunks)
         missing: list[tuple[int, IndexedChunk, str]] = []
@@ -660,13 +697,51 @@ class RAGIndex:
                 else:
                     missing.append((index, chunk, cache_key))
         if missing:
-            texts = [chunk.text for _, chunk, _ in missing]
-            embedded = self._run_async_blocking(self.embedding_client.embed_texts(texts))
+            batch_size = int(getattr(self.embedding_client, "batch_size", 10) or 10)
+            batch_size = max(1, batch_size)
+            total_batches = (len(missing) + batch_size - 1) // batch_size
+            embedded_total = 0
+            started = time.perf_counter()
             with self._connect() as conn:
-                for (index, _chunk, cache_key), vector in zip(missing, embedded):
-                    vectors[index] = vector
-                    if vector is not None:
-                        self._embedding_cache_set(conn, cache_key, vector)
+                for batch_index in range(total_batches):
+                    if cancel_event is not None and cancel_event.is_set():
+                        logger.info(
+                            "rag.embedding.cancelled source_type={} batch={}/{} embedded={}/{} elapsed_ms={:.1f}",
+                            source_type,
+                            batch_index,
+                            total_batches,
+                            embedded_total,
+                            len(missing),
+                            (time.perf_counter() - started) * 1000,
+                        )
+                        break
+                    start = batch_index * batch_size
+                    batch = missing[start:start + batch_size]
+                    texts = [chunk.text for _, chunk, _ in batch]
+                    logger.info(
+                        "rag.embedding.progress source_type={} batch={}/{} inputs={}/{} batch_size={} elapsed_ms={:.1f}",
+                        source_type,
+                        batch_index + 1,
+                        total_batches,
+                        start,
+                        len(missing),
+                        len(batch),
+                        (time.perf_counter() - started) * 1000,
+                    )
+                    try:
+                        embedded = self._run_async_blocking(self.embedding_client.embed_texts(texts))
+                    except Exception:
+                        if hasattr(self.embedding_client, "unavailable"):
+                            try:
+                                setattr(self.embedding_client, "unavailable", True)
+                            except Exception:
+                                pass
+                        raise
+                    for (index, _chunk, cache_key), vector in zip(batch, embedded):
+                        vectors[index] = vector
+                        if vector is not None:
+                            self._embedding_cache_set(conn, cache_key, vector)
+                    embedded_total += len(batch)
         return vectors
 
     @staticmethod

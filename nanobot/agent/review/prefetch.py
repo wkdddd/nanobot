@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from loguru import logger
 
-from nanobot.agent.review.policy import policy_for_depth
+from nanobot.agent.review.beforeplan import policy_for_depth
 from nanobot.agent.review.types import (
     ReviewAction,
     ReviewEvidenceProvider,
@@ -45,6 +45,7 @@ async def _emit_prefetch_progress(
     elapsed_ms: float | None = None,
     raw_chars: int | None = None,
     summary_chars: int | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> None:
     if progress_callback is None:
         return
@@ -65,6 +66,7 @@ async def _emit_prefetch_progress(
             "elapsed_ms": round(elapsed_ms, 1) if elapsed_ms is not None else None,
             "raw_chars": raw_chars,
             "summary_chars": summary_chars,
+            **(metadata or {}),
         },
     }
     try:
@@ -135,12 +137,14 @@ async def maybe_prefetch_review_context(
     policy = policy_for_depth(plan.depth, requested_max_subagents=plan.max_subagents)
     query = plan.user_requirements or "code review security architecture tests performance entry points config"
     logger.info(
-        "review.prefetch.start trace_id={} action={} target_type={} target={} target_repo={} paths_count={} query_chars={} max_results={}",
+        "review.prefetch.start trace_id={} action={} target_type={} target={} target_repo={} scope_kind={} review_root={} paths_count={} query_chars={} max_results={}",
         trace_id,
         plan.action.value,
         plan.target_type,
         plan.target,
         plan.target_repo,
+        plan.local_scope.kind if plan.local_scope else "",
+        plan.local_scope.review_root if plan.local_scope else "",
         len(plan.target_paths),
         len(query),
         policy.evidence_max_results,
@@ -152,6 +156,11 @@ async def maybe_prefetch_review_context(
         action=plan.action,
         target_type=plan.target_type,
         status="start",
+        metadata={
+            "scope_kind": plan.local_scope.kind if plan.local_scope else None,
+            "review_root": plan.local_scope.review_root if plan.local_scope else None,
+            "scope_paths_count": len(plan.local_scope.scope_paths) if plan.local_scope else len(plan.target_paths),
+        },
     )
     try:
         target_type = plan.target_type if plan.target_type != "auto" else "local"
@@ -165,6 +174,7 @@ async def maybe_prefetch_review_context(
             review_query=query,
             max_results=policy.evidence_max_results,
             include_tests=True,
+            local_scope=plan.local_scope,
             trace_id=trace_id,
         )
     except Exception as exc:

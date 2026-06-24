@@ -159,7 +159,7 @@ Agent: I've used ~53k tokens total so far. I'll keep my remaining replies concis
 ### "Subagent monitoring"
 
 ```text
-Agent: Let me check on the background tasks.
+Agent: Let me check on the running subagent work.
 → my(action="check", key="subagents")
 # → 2 subagent(s):
 #   [task-1] 'Code review'

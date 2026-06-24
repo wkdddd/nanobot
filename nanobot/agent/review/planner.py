@@ -1,149 +1,125 @@
 """Build structured code review plans from metadata and user text."""
 from __future__ import annotations
 
-import re
 import time
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
 
 from nanobot.agent.context import ContextBuilder
-from nanobot.agent.review.policy import apply_policy_to_roles, policy_for_depth
+from nanobot.agent.review.beforeplan import (
+    apply_policy_to_roles,
+    extract_review_target,
+    normalize_focus,
+    normalize_mode,
+    normalize_review_action,
+    normalize_review_target_type,
+    parse_repo_target,
+    parse_target_paths,
+    policy_for_depth,
+)
 from nanobot.agent.review.types import (
-    ALL_REVIEW_ROLES,
-    DEFAULT_REVIEW_ROLES,
+    LocalReviewScope,
     ReviewAction,
-    ReviewDepth,
     ReviewMetaKey,
     ReviewPlan,
-    ReviewRole,
     ReviewTargetType,
-    review_action_values,
 )
 from nanobot.agent.review.utils import (
-    GITHUB_PR_URL_RE,
-    GITHUB_SCOPED_URL_RE,
-    GITHUB_URL_RE,
     parse_github_scoped_target,
     parse_pr_target,
-    parse_repo,
 )
 from nanobot.session.manager import Session
 
-_LOCAL_CHANGED_HINT_RE = re.compile(
-    r"(?i)\b(changed|changes|diff|local\s+diff|working\s+tree|unstaged|staged|untracked|当前改动|本地改动|变更)\b"
-)
 
-
-def normalize_focus(raw: str | list[str] | None) -> tuple[list[ReviewRole], bool]:
-    forced = True
-    if not raw:
-        forced = False
-        return list(DEFAULT_REVIEW_ROLES.values()), forced
-
-    selected: list[ReviewRole] = []
-    items = raw if isinstance(raw, list) else raw.split(",")
-    for item in items:
-        key = item.strip().lower()
-        if not key:
-            continue
-        role = ALL_REVIEW_ROLES.get(key)
-        if role is None:
-            allowed = ", ".join(sorted(ALL_REVIEW_ROLES))
-            raise ValueError(f"Unknown review focus '{key}'. Available focus values: {allowed}")
-        if role not in selected:
-            selected.append(role)
-    return selected or list(DEFAULT_REVIEW_ROLES.values()), forced
-
-
-def infer_review_target_type(target: str | None) -> str | None:
-    if not target:
-        return None
-    if GITHUB_URL_RE.search(target):
-        return "github"
-    return "local"
-
-
-def normalize_review_target_type(raw: str | None, target: str | None = None) -> str | None:
-    value = (raw or "").strip().lower()
-    if value in {"auto", "local", "github"}:
-        return value
-    return infer_review_target_type(target)
-
-
-def normalize_review_action(raw: str | None) -> ReviewAction:
-    value = (raw or ReviewAction.REPO.value).strip().lower()
-    try:
-        return ReviewAction(value)
-    except ValueError:
-        pass
-    allowed = ", ".join(review_action_values())
-    raise ValueError(f"Unknown review action '{value}'. Available action values: {allowed}")
-
-
-def normalize_mode(raw: Any) -> ReviewDepth:
-    value = str(raw or "full").strip().lower()
-    if value in {"quick", "full", "deep"}:
-        return value  # type: ignore[return-value]
-    return "full"
-
-
-def parse_target_paths(raw: Any) -> list[str]:
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        values = [str(item).strip() for item in raw]
-    else:
-        values = re.split(r"[\n,]+", str(raw))
-        values = [item.strip() for item in values]
-    return [item for item in dict.fromkeys(values) if item]
-
-
-def extract_review_target(text: str) -> tuple[str, str] | None:
-    scoped_match = GITHUB_SCOPED_URL_RE.search(text)
-    if scoped_match:
-        target = scoped_match.group(0).rstrip(".,;:!?)）】]")
-        repo = f"{scoped_match.group('owner')}/{scoped_match.group('repo').removesuffix('.git')}"
-        return target, repo
-
-    github_match = GITHUB_URL_RE.search(text)
-    if github_match:
-        owner, repo = github_match.group(1), github_match.group(2).removesuffix(".git")
-        target = f"https://github.com/{owner}/{repo}"
-        if pr_match := GITHUB_PR_URL_RE.search(text):
-            target = f"https://github.com/{pr_match.group(1)}/{pr_match.group(2)}/pull/{pr_match.group(3)}"
-        return target, f"{owner}/{repo}"
-
-    local_match = re.search(r"(?i)(?:review|code\s*review|审查|评审)\s+([^\s，。；;\r\n]+)", text)
-    if local_match:
-        target = local_match.group(1).strip(" `\"'")
-        if target:
-            return target, target
-    path_match = re.search(
-        r"(?P<path>(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|/)[^\s`\"'，。；;]+)",
-        text,
-    )
-    if path_match:
-        target = path_match.group("path").rstrip(".,;:!?)）】]")
-        if target:
-            return target, target
-    stripped = text.strip().strip(" `\"'")
-    if stripped and not re.search(r"\s", stripped):
-        if re.match(r"^[A-Za-z]:[\\/]", stripped) or stripped.startswith(("/", "./", "../", "~")):
-            return stripped, stripped
+def _find_git_root(path: Path) -> Path | None:
+    current = path if path.is_dir() else path.parent
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
     return None
 
 
-def parse_repo_target(target: str | None) -> str | None:
+def _relative_posix(path: Path, root: Path) -> str:
+    return path.resolve().relative_to(root.resolve()).as_posix()
+
+
+def _normalize_target_paths_for_scope(raw_paths: list[str], *, review_root: Path) -> tuple[list[str], str]:
+    normalized: list[str] = []
+    for raw in raw_paths:
+        try:
+            candidate = Path(raw).expanduser()
+            resolved = candidate.resolve() if candidate.is_absolute() else (review_root / candidate).resolve()
+            rel = _relative_posix(resolved, review_root)
+        except (OSError, ValueError) as exc:
+            return [], f"target_path_outside_review_root:{raw}:{exc}"
+        if rel.startswith("../") or rel == "..":
+            return [], f"target_path_outside_review_root:{raw}"
+        normalized.append(rel)
+    return list(dict.fromkeys(normalized)), ""
+
+
+def _resolve_local_scope(target: str | None, target_paths: list[str]) -> tuple[LocalReviewScope | None, list[str], str]:
     if not target:
-        return None
+        return None, target_paths, "missing_target"
     try:
-        owner, repo = parse_repo(target)
-    except ValueError:
-        return None
-    return f"{owner}/{repo}"
+        resolved_target = Path(target).expanduser().resolve()
+    except OSError as exc:
+        return None, target_paths, f"target_resolve_failed:{exc}"
+    if not resolved_target.exists():
+        return None, target_paths, "target_not_found"
+
+    if resolved_target.is_file():
+        git_root = _find_git_root(resolved_target)
+        review_root = git_root or resolved_target.parent
+        inferred_paths = [_relative_posix(resolved_target, review_root)]
+        if target_paths:
+            scoped_paths, reason = _normalize_target_paths_for_scope(target_paths, review_root=review_root)
+            if reason:
+                return None, [], reason
+            final_paths = scoped_paths
+        else:
+            final_paths = inferred_paths
+        return (
+            LocalReviewScope(
+                kind="file",
+                review_root=str(review_root),
+                scope_paths=final_paths,
+                target_path=_relative_posix(resolved_target, review_root),
+                reason="file_target",
+            ),
+            final_paths,
+            "file_target",
+        )
+
+    if resolved_target.is_dir():
+        review_root = resolved_target
+        if target_paths:
+            scoped_paths, reason = _normalize_target_paths_for_scope(target_paths, review_root=review_root)
+            if reason:
+                return None, [], reason
+            scope_paths = scoped_paths
+            kind = "directory"
+            reason = "directory_target_with_paths"
+        else:
+            scope_paths = []
+            kind = "directory"
+            reason = "directory_target"
+        return (
+            LocalReviewScope(
+                kind=kind,
+                review_root=str(review_root),
+                scope_paths=scope_paths,
+                target_path=".",
+                reason=reason,
+            ),
+            scope_paths,
+            reason,
+        )
+    return None, target_paths, "target_not_file_or_directory"
 
 
 def _resolve_action(
@@ -219,6 +195,11 @@ def build_review_plan(
     if target_repo is None and target_type_value == "github":
         target_repo = parse_repo_target(target)
 
+    local_scope: LocalReviewScope | None = None
+    scope_reason = ""
+    if target_type_value == "local":
+        local_scope, paths, scope_reason = _resolve_local_scope(target, paths)
+
     try:
         max_subagents_int = int(max_subagents)
     except (TypeError, ValueError):
@@ -244,13 +225,17 @@ def build_review_plan(
         pr_number=pr_number,
         target_paths=paths,
         target_ref=normalized_ref,
+        local_scope=local_scope,
         prefetch_summary=prefetch_summary,
     )
     logger.info(
-        "review.plan.done trace_id={} action={} target_type={} forced_focus={} requested_focus={} roles={} allowed_dimensions={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
+        "review.plan.done trace_id={} action={} target_type={} scope_kind={} scope_reason={} review_root={} forced_focus={} requested_focus={} roles={} allowed_dimensions={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
         trace_id,
         plan.action.value,
         plan.target_type,
+        plan.local_scope.kind if plan.local_scope else "",
+        scope_reason,
+        plan.local_scope.review_root if plan.local_scope else "",
         plan.forced_focus,
         focus,
         [role.name for role in plan.roles],
@@ -309,6 +294,21 @@ async def resolve_code_review_context(
     )
     if plan is None:
         return build_review_fallback_prompt()
+    session_meta[ReviewMetaKey.TARGET_PATHS] = list(plan.target_paths)
+    if plan.local_scope:
+        session_meta[ReviewMetaKey.LOCAL_ROOT] = plan.local_scope.review_root
+        local_root = Path(plan.local_scope.review_root)
+        local_target = (
+            local_root / plan.local_scope.target_path
+            if plan.local_scope.target_path and plan.local_scope.target_path != "."
+            else local_root
+        )
+        session_meta[ReviewMetaKey.LOCAL_TARGET] = str(local_target.resolve())
+        session_meta[ReviewMetaKey.LOCAL_SCOPE_KIND] = plan.local_scope.kind
+    else:
+        session_meta.pop(ReviewMetaKey.LOCAL_ROOT, None)
+        session_meta.pop(ReviewMetaKey.LOCAL_TARGET, None)
+        session_meta.pop(ReviewMetaKey.LOCAL_SCOPE_KIND, None)
     prefetch_summary = await maybe_prefetch_review_context(
         plan,
         session_meta,

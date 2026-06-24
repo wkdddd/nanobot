@@ -62,6 +62,44 @@ class TestValidatorAccepts:
         result = v.validate_candidates([c], "security")
         assert len(result.accepted) == 1
 
+    def test_local_file_target_accepts_equivalent_relative_and_absolute_paths(self, workspace):
+        target = Path(workspace) / "src" / "main.py"
+        v = ReviewValidator(ValidationContext(
+            workspace=workspace,
+            changed_files=["src/main.py"],
+            local_target=str(target),
+        ))
+
+        result = v.validate_candidates([
+            _make_candidate(title="relative path"),
+            _make_candidate(
+                file=str(target),
+                title="absolute path",
+                line=3,
+                evidence="line3",
+            ),
+        ], "security")
+
+        assert len(result.accepted) == 2
+        assert len(result.rejected) == 0
+
+    def test_local_directory_target_accepts_paths_inside_directory(self, tmp_path):
+        target_dir = tmp_path / "target"
+        target_dir.mkdir()
+        (target_dir / "app.py").write_text("line1\nline2\n", encoding="utf-8")
+        v = ReviewValidator(ValidationContext(
+            workspace=str(target_dir),
+            local_target=str(target_dir),
+        ))
+
+        result = v.validate_candidates([
+            _make_candidate(file="app.py", evidence="line1", title="relative", line=1),
+            _make_candidate(file=str(target_dir / "app.py"), evidence="line2", title="absolute", line=2),
+        ], "security")
+
+        assert len(result.accepted) == 2
+        assert len(result.rejected) == 0
+
 
 class TestValidatorRejects:
     def test_invalid_severity_rejected(self, workspace):
@@ -113,6 +151,37 @@ class TestValidatorRejects:
         assert len(result.accepted) == 1
         assert len(result.rejected) == 1
         assert "duplicate" in result.rejected[0][1].reason
+
+    def test_local_file_target_rejects_other_workspace_files(self, workspace):
+        target = Path(workspace) / "src" / "main.py"
+        v = ReviewValidator(ValidationContext(
+            workspace=workspace,
+            local_target=str(target),
+        ))
+
+        result = v.validate_candidates([
+            _make_candidate(file="README.md", evidence="Hello", title="wrong file", line=1),
+        ], "security")
+
+        assert len(result.rejected) == 1
+        assert "outside target" in result.rejected[0][1].reason
+
+    def test_local_directory_target_rejects_paths_outside_directory(self, tmp_path):
+        target_dir = tmp_path / "target"
+        target_dir.mkdir()
+        outside = tmp_path / "outside.py"
+        outside.write_text("line1\n", encoding="utf-8")
+        v = ReviewValidator(ValidationContext(
+            workspace=str(target_dir),
+            local_target=str(target_dir),
+        ))
+
+        result = v.validate_candidates([
+            _make_candidate(file=str(outside), evidence="line1", title="outside", line=1),
+        ], "security")
+
+        assert len(result.rejected) == 1
+        assert "outside target" in result.rejected[0][1].reason
 
 
 class TestValidatorUncertain:

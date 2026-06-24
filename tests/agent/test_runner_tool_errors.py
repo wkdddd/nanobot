@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
+from nanobot.agent.hooks.lifecycle import AgentHook, AgentHookContext
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -25,6 +26,12 @@ class DummyProvider(LLMProvider):
 
     def get_default_model(self) -> str:
         return "dummy"
+
+
+class ReplacingHook(AgentHook):
+    def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
+        context.content_replaced = True
+        return "REPORT"
 
 
 class FailingTool(Tool):
@@ -119,6 +126,27 @@ async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeyp
     }
     assert error is None
     assert log_calls == [("Tool 'fail_tool' execution failed for call_id=call_1", "call_1")]
+
+
+@pytest.mark.asyncio
+async def test_replaced_final_content_does_not_drain_injections() -> None:
+    calls = 0
+
+    async def injection_callback(**kwargs: Any) -> list[dict[str, str]]:
+        nonlocal calls
+        calls += 1
+        return [{"role": "user", "content": "late system summary request"}]
+
+    runner = AgentRunner(DummyProvider())
+    result = await runner.run(make_spec(
+        hook=ReplacingHook(),
+        injection_callback=injection_callback,
+        max_iterations=2,
+    ))
+
+    assert result.final_content == "REPORT"
+    assert result.content_replaced is True
+    assert calls == 0
 
 
 @pytest.mark.asyncio

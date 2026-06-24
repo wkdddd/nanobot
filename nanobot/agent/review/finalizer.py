@@ -1,21 +1,17 @@
 """Review finalizer: parse subagent results, validate, and render reports."""
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
+from nanobot.agent.review.beforeplan import policy_for_depth
 from nanobot.agent.review.judge import ReviewJudge
-from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.report import render_review_report
 from nanobot.agent.review.types import (
     FindingVerdict,
-    ReviewDepth,
     ReviewDimensionResult,
     ReviewFindingCandidate,
     ReviewFindingVerdict,
@@ -66,10 +62,15 @@ class ReviewFinalizer:
         *,
         policy: ReviewModePolicy | None = None,
         allowed_dimensions: list[str] | set[str] | None = None,
+        local_target: str | None = None,
     ) -> None:
+        self._workspace = workspace
+        self._changed_files = list(changed_files or [])
+        self._local_target = local_target
         self._ctx = ValidationContext(
             workspace=workspace,
-            changed_files=changed_files or [],
+            changed_files=self._changed_files,
+            local_target=local_target,
         )
         self._validator = ReviewValidator(self._ctx)
         self._dimensions: list[ReviewDimensionResult] = []
@@ -79,6 +80,26 @@ class ReviewFinalizer:
 
     def set_allowed_dimensions(self, allowed_dimensions: list[str] | set[str] | None) -> None:
         self._allowed_dimensions = self._normalize_allowed_dimensions(allowed_dimensions)
+
+    def set_validation_context(
+        self,
+        *,
+        workspace: str,
+        changed_files: list[str] | None = None,
+        local_target: str | None = None,
+    ) -> None:
+        if self._dimensions:
+            logger.warning("review.finalizer.validation_context_ignored reason=already_ingested")
+            return
+        self._workspace = workspace
+        self._changed_files = list(changed_files or [])
+        self._local_target = local_target
+        self._ctx = ValidationContext(
+            workspace=workspace,
+            changed_files=self._changed_files,
+            local_target=local_target,
+        )
+        self._validator = ReviewValidator(self._ctx)
 
     @property
     def dimensions(self) -> list[ReviewDimensionResult]:
@@ -226,15 +247,14 @@ class ReviewFinalizer:
     def _parse_candidates(
         self, dimension: str, raw: str
     ) -> list[ReviewFindingCandidate]:
-        """Try JSON array first, fall back to JSONL, then markdown table."""
-        candidates = self._try_parse_json_array(dimension, raw)
-        if candidates:
-            return candidates
-        candidates = self._try_parse_jsonl(dimension, raw)
-        if candidates:
-            return candidates
-        candidates = self._try_parse_markdown_table(dimension, raw)
-        return candidates
+        """Parse the canonical review_submit tool result."""
+        payload = self._review_submit_payload(raw)
+        if payload is None:
+            return []
+        findings = payload.get("findings")
+        if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+            return []
+        return [self._dict_to_candidate(item, dimension) for item in findings]
 
     @classmethod
     def _incomplete_reason(cls, raw: str) -> str:
@@ -256,17 +276,24 @@ class ReviewFinalizer:
 
     @classmethod
     def _looks_like_empty_or_structured_output(cls, text: str) -> bool:
-        stripped = text.strip()
-        if stripped in {"[]", "```json\n[]\n```", "```[]```"}:
-            return True
-        for candidate in cls._json_candidate_texts(stripped):
-            try:
-                data = json.loads(candidate)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(data, list):
-                return True
-        return False
+        payload = cls._review_submit_payload(text)
+        if payload is None:
+            return False
+        findings = payload.get("findings")
+        return isinstance(findings, list) and all(isinstance(item, dict) for item in findings)
+
+    @staticmethod
+    def _review_submit_payload(raw: str) -> dict[str, Any] | None:
+        try:
+            data = json.loads(raw.strip())
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict) or data.get("submitted") is not True:
+            return None
+        errors = data.get("errors")
+        if not isinstance(errors, list):
+            return None
+        return data
 
     @staticmethod
     def _normalize_allowed_dimensions(
@@ -280,70 +307,6 @@ class ReviewFinalizer:
             if (dimension := normalize_review_dimension(str(item)))
         }
         return normalized or None
-
-    def _try_parse_json_array(
-        self, dimension: str, raw: str
-    ) -> list[ReviewFindingCandidate]:
-        for candidate_text in self._json_candidate_texts(raw):
-            try:
-                data = json.loads(candidate_text)
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if isinstance(data, list):
-                return [self._dict_to_candidate(d, dimension) for d in data if isinstance(d, dict)]
-        return []
-
-    def _try_parse_jsonl(
-        self, dimension: str, raw: str
-    ) -> list[ReviewFindingCandidate]:
-        results: list[ReviewFindingCandidate] = []
-        for line in raw.splitlines():
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-                if isinstance(d, dict) and "title" in d:
-                    results.append(self._dict_to_candidate(d, dimension))
-            except (json.JSONDecodeError, TypeError, KeyError):
-                continue
-        return results
-
-    def _try_parse_markdown_table(
-        self, dimension: str, raw: str
-    ) -> list[ReviewFindingCandidate]:
-        """Parse markdown table rows with columns: severity | file | line | title | evidence | impact | recommendation."""
-        results: list[ReviewFindingCandidate] = []
-        table_row_re = re.compile(
-            r"^\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]*)\s*\|\s*([^|]+)\s*\|\s*([^|]*)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|$"
-        )
-        for line in raw.splitlines():
-            line = line.strip()
-            if line.startswith("|---") or line.startswith("| ---"):
-                continue
-            m = table_row_re.match(line)
-            if not m:
-                continue
-            sev, file, line_no, title, evidence, impact, rec = (
-                g.strip() for g in m.groups()
-            )
-            if sev.lower() in ("severity", "#", "no"):
-                continue
-            try:
-                ln = int(line_no) if line_no else None
-            except ValueError:
-                ln = None
-            results.append(ReviewFindingCandidate(
-                severity=sev.lower(),
-                dimension=dimension,
-                file=file,
-                line=ln,
-                title=title,
-                evidence=evidence,
-                impact=impact,
-                recommendation=rec,
-            ))
-        return results
 
     def _dict_to_candidate(self, d: dict, dimension: str) -> ReviewFindingCandidate:
         return ReviewFindingCandidate(
@@ -393,120 +356,4 @@ class ReviewFinalizer:
         content = message.get("content", "")
         if not isinstance(content, str):
             return str(content)
-        if "Result:" in content:
-            content = content.split("Result:", 1)[1]
-        if "Summarize this naturally" in content:
-            content = content.split("Summarize this naturally", 1)[0]
         return content.strip()
-
-    @classmethod
-    def _json_candidate_texts(cls, raw: str) -> list[str]:
-        texts: list[str] = []
-        for match in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", raw, re.IGNORECASE):
-            texts.append(match.group(1).strip())
-        body = raw.strip()
-        if "Result:" in body:
-            body = body.split("Result:", 1)[1].strip()
-        texts.append(body)
-        texts.extend(cls._balanced_json_arrays(body))
-        return [text for text in texts if text]
-
-    @staticmethod
-    def _balanced_json_arrays(raw: str) -> list[str]:
-        decoder = json.JSONDecoder()
-        arrays: list[str] = []
-        for idx, ch in enumerate(raw):
-            if ch != "[":
-                continue
-            try:
-                parsed, end = decoder.raw_decode(raw[idx:])
-            except json.JSONDecodeError:
-                continue
-            if isinstance(parsed, list):
-                arrays.append(raw[idx : idx + end])
-        return arrays
-
-
-class ReviewFinalizerHook(AgentHook):
-    """Runner hook that renders a fixed review report from subagent outputs."""
-
-    def __init__(
-        self,
-        *,
-        workspace: str,
-        target_name: str,
-        changed_files: list[str] | None = None,
-        depth: ReviewDepth = "full",
-        judge: ReviewJudge | None = None,
-        allowed_dimensions: list[str] | set[str] | None = None,
-    ) -> None:
-        super().__init__()
-        self._target_name = target_name
-        self._policy = policy_for_depth(depth)
-        self._finalizer = ReviewFinalizer(
-            workspace,
-            changed_files,
-            policy=self._policy,
-            allowed_dimensions=allowed_dimensions,
-        )
-        self._rendered = False
-        self._seen_subagent_results: set[str] = set()
-        self._judged = False
-        self._judge = judge
-
-    def set_allowed_dimensions(self, allowed_dimensions: list[str] | set[str] | None) -> None:
-        self._finalizer.set_allowed_dimensions(allowed_dimensions)
-
-    async def after_iteration(self, context: AgentHookContext) -> None:
-        if self._rendered:
-            return
-        ingested = self._ensure_ingested(context)
-        if ingested <= 0:
-            return
-        self._judged = False
-        await self._finalizer.apply_judge(self._judge)
-        self._judged = True
-
-    def _ensure_ingested(self, context: AgentHookContext) -> int:
-        messages: list[dict[str, Any]] = []
-        for message in context.messages:
-            meta = ReviewFinalizer._subagent_metadata(message)
-            if not meta:
-                continue
-            raw = ReviewFinalizer._subagent_raw_output(message, meta)
-            key = self._subagent_result_key(meta, raw)
-            if key in self._seen_subagent_results:
-                continue
-            self._seen_subagent_results.add(key)
-            messages.append(message)
-        if not messages:
-            return 0
-        return self._finalizer.ingest_messages(messages)
-
-    @staticmethod
-    def _subagent_result_key(meta: dict[str, Any], raw: str) -> str:
-        task_id = meta.get("subagent_task_id")
-        if isinstance(task_id, str) and task_id:
-            return task_id
-        label = str(meta.get("subagent_label") or meta.get("label") or "unknown")
-        digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
-        return f"{label}:{digest}"
-
-    def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
-        if self._rendered:
-            return content
-        ingested = self._ensure_ingested(context)
-        if ingested == 0 and not self._finalizer.dimensions:
-            logger.warning("review.finalizer.no_subagent_results target={}", self._target_name)
-            return content
-        result = self._finalizer.finalize(self._target_name)
-        self._rendered = True
-        context.content_replaced = True
-        logger.info(
-            "review.finalizer.rendered target={} dimensions={} needs_confirmation={} errors={}",
-            self._target_name,
-            len(result.dimensions),
-            len(result.needs_confirmation),
-            len(result.errors),
-        )
-        return result.report_markdown

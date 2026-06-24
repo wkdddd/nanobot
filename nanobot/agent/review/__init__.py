@@ -1,6 +1,14 @@
 """Public code review coordination API."""
 from __future__ import annotations
 
+from nanobot.agent.review.beforeplan import (
+    extract_review_target,
+    infer_review_target_type,
+    normalize_focus,
+    normalize_review_action,
+    normalize_review_target_type,
+    policy_for_depth,
+)
 from nanobot.agent.review.evidence import ReviewEvidenceService
 from nanobot.agent.review.github import GitHubRepoConfig, GitHubRepoReader
 from nanobot.agent.review.local import LocalRepoReader
@@ -8,15 +16,9 @@ from nanobot.agent.review.planner import (
     apply_review_metadata_from_message,
     build_code_review_context,
     build_review_plan,
-    extract_review_target,
-    infer_review_target_type,
     latest_user_text,
-    normalize_focus,
-    normalize_review_action,
-    normalize_review_target_type,
     resolve_code_review_context,
 )
-from nanobot.agent.review.policy import policy_for_depth
 from nanobot.agent.review.types import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,

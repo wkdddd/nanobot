@@ -16,11 +16,14 @@ class _EmbeddingClient:
 
     def __init__(self) -> None:
         self.embedded_texts: list[str] = []
+        self.embed_batches: list[list[str]] = []
+        self.batch_size = 10
 
     async def embed_query(self, query: str) -> list[float]:
         return [1.0, 0.0, 0.0]
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        self.embed_batches.append(list(texts))
         self.embedded_texts.extend(texts)
         return [[1.0, 0.0, 0.0] for _ in texts]
 
@@ -498,6 +501,71 @@ def test_sync_files_backfills_stale_qdrant_point_hash(tmp_path) -> None:
     )
 
     assert [chunk.path for chunk in vector_store.upserted] == ["src/app.py"]
+
+
+def test_sync_files_batches_embedding_backfill(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "one\ntwo\nthree\n")
+    embedding_client = _EmbeddingClient()
+    embedding_client.batch_size = 2
+    vector_store = _VectorStore(existing_point_ids=set())
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=embedding_client,
+        vector_store=vector_store,
+    )
+
+    def three_chunks(path: Path, text: str) -> list[IndexedChunk]:
+        return [
+            IndexedChunk(source_type="repo", path=path.as_posix(), start_line=1, end_line=2, kind="text", text="chunk one has enough useful review content\nand a second line"),
+            IndexedChunk(source_type="repo", path=path.as_posix(), start_line=3, end_line=4, kind="text", text="chunk two has enough useful review content\nand a second line"),
+            IndexedChunk(source_type="repo", path=path.as_posix(), start_line=5, end_line=6, kind="text", text="chunk three has enough useful review content\nand a second line"),
+        ]
+
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=three_chunks,
+        max_file_chars=1000,
+    )
+
+    assert embedding_client.embed_batches == [
+        [
+            "chunk one has enough useful review content\nand a second line",
+            "chunk two has enough useful review content\nand a second line",
+        ],
+        ["chunk three has enough useful review content\nand a second line"],
+    ]
+    assert len(vector_store.upserted) == 3
+
+
+def test_bounded_dense_backfill_does_not_mark_full_sync(tmp_path) -> None:
+    path = _write_repo_file(tmp_path, "one\ntwo\n")
+    embedding_client = _EmbeddingClient()
+    vector_store = _VectorStore(existing_point_ids=set())
+    index = RAGIndex(
+        tmp_path,
+        embedding_client=embedding_client,
+        vector_store=vector_store,
+    )
+
+    def two_chunks(path: Path, text: str) -> list[IndexedChunk]:
+        return [
+            IndexedChunk(source_type="repo", path=path.as_posix(), start_line=1, end_line=2, kind="text", text="chunk one has enough useful review content\nand a second line"),
+            IndexedChunk(source_type="repo", path=path.as_posix(), start_line=3, end_line=4, kind="text", text="chunk two has enough useful review content\nand a second line"),
+        ]
+
+    index.sync_files(
+        source_type="repo",
+        files=[path],
+        chunker=two_chunks,
+        max_file_chars=1000,
+        dense_limit=1,
+    )
+
+    assert len(vector_store.upserted) == 1
+    collection = getattr(vector_store, "collection", "")
+    meta_key = f"qdrant_sync:repo:{collection}:{embedding_client.dimensions}"
+    assert index._meta_get(meta_key) == ""
 
 
 def test_qdrant_existing_collection_ensures_source_type_payload_index() -> None:

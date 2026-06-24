@@ -4,7 +4,11 @@ import pytest
 
 from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.tools.context import RequestContext
+from nanobot.agent.tools.context import ToolContext
+from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.spawn import SpawnTool
+from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.config.schema import ToolsConfig
 
 
 class FakeSubagentManager:
@@ -17,12 +21,43 @@ class FakeSubagentManager:
         return 0
 
     async def spawn(self, **kwargs: object) -> str:
-        self.calls.append(kwargs)
-        return "started"
+        self.calls.append({"method": "spawn", **kwargs})
+        return (
+            "Review subagent [dependency] started (id: test). "
+            "The coordinator will wait for and integrate its result before finalizing."
+        )
+
+
+def test_core_tools_expose_spawn_not_review_submitter(tmp_path) -> None:
+    registry = ToolRegistry()
+    ctx = ToolContext(
+        config=ToolsConfig(),
+        workspace=str(tmp_path),
+        subagent_manager=FakeSubagentManager(),
+    )
+
+    ToolLoader().load(ctx, registry, scope="core")
+
+    assert registry.has("spawn")
+    assert not registry.has("spawn_review_subagent")
+    assert not registry.has("review_submit")
+    assert not registry.has("review_judge")
 
 
 @pytest.mark.asyncio
-async def test_spawn_allows_selected_review_dimension_label() -> None:
+async def test_spawn_requires_review_context() -> None:
+    manager = FakeSubagentManager()
+    tool = SpawnTool(manager)  # type: ignore[arg-type]
+    tool.set_context(RequestContext(channel="websocket", chat_id="chat", metadata={}))
+
+    result = await tool.execute(task="review dependencies", label="dependency")
+
+    assert "dimensions is missing" in result
+    assert manager.calls == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_normalizes_allowed_dimension_label() -> None:
     manager = FakeSubagentManager()
     tool = SpawnTool(manager)  # type: ignore[arg-type]
     tool.set_context(RequestContext(
@@ -33,12 +68,15 @@ async def test_spawn_allows_selected_review_dimension_label() -> None:
 
     result = await tool.execute(task="review dependencies", label="Dependency Reviewer")
 
-    assert result == "started"
+    assert "started" in result
+    assert "wait for and integrate" in result
+    assert "notify you when it completes" not in result
+    assert manager.calls[0]["method"] == "spawn"
     assert manager.calls[0]["label"] == "dependency"
 
 
 @pytest.mark.asyncio
-async def test_spawn_rejects_unselected_review_dimension() -> None:
+async def test_spawn_rejects_unselected_dimension() -> None:
     manager = FakeSubagentManager()
     tool = SpawnTool(manager)  # type: ignore[arg-type]
     tool.set_context(RequestContext(
@@ -51,20 +89,4 @@ async def test_spawn_rejects_unselected_review_dimension() -> None:
 
     assert "not allowed" in result
     assert "dependency" in result
-    assert manager.calls == []
-
-
-@pytest.mark.asyncio
-async def test_spawn_rejects_missing_label_when_review_dimensions_are_forced() -> None:
-    manager = FakeSubagentManager()
-    tool = SpawnTool(manager)  # type: ignore[arg-type]
-    tool.set_context(RequestContext(
-        channel="websocket",
-        chat_id="chat",
-        metadata={ReviewMetaKey.ALLOWED_DIMENSIONS: ["dependency"]},
-    ))
-
-    result = await tool.execute(task="review dependencies")
-
-    assert "requires label" in result
     assert manager.calls == []

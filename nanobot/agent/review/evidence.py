@@ -12,6 +12,7 @@ from pathlib import Path
 from loguru import logger
 
 from nanobot.agent.review.github import GitHubRepoReader
+from nanobot.agent.review.types import LocalReviewScope
 from nanobot.agent.review.utils import (
     changed_lines_from_patch,
     clean_scope_paths,
@@ -61,6 +62,7 @@ class ReviewEvidenceService:
         review_query: str | None = None,
         max_results: int = 5,
         include_tests: bool | None = None,
+        local_scope: LocalReviewScope | None = None,
         trace_id: str = "",
     ) -> str:
         """Unified entry point that routes to the appropriate evidence method."""
@@ -100,6 +102,7 @@ class ReviewEvidenceService:
                 target_paths=target_paths or [],
                 max_results=max_results,
                 include_tests=include_tests,
+                local_scope=local_scope,
             )
         if target_paths:
             return await self.local_targeted_context(
@@ -107,12 +110,51 @@ class ReviewEvidenceService:
                 target_paths=target_paths,
                 max_results=max_results,
                 include_tests=include_tests,
+                local_scope=local_scope,
             )
         return await self.local_context(
             review_query=review_query,
             max_results=max_results,
             include_tests=include_tests,
+            local_scope=local_scope,
         )
+
+    def _rag_for_scope(self, local_scope: LocalReviewScope | None) -> RepositoryRAGService:
+        if local_scope is None:
+            return self.repository_rag
+        review_root = Path(local_scope.review_root).expanduser().resolve()
+        if review_root == self.repository_rag.workspace:
+            return self.repository_rag
+        return RepositoryRAGService(
+            review_root,
+            runtime=self.repository_rag.runtime,
+            options=self.repository_rag.options,
+            source_type=SOURCE_TYPE,
+        )
+
+    def _scope_files(
+        self,
+        rag_service: RepositoryRAGService,
+        local_scope: LocalReviewScope | None,
+        target_paths: list[str] | None = None,
+    ) -> list[Path]:
+        scopes = clean_scope_paths(target_paths or [])
+        if not scopes and local_scope is not None:
+            scopes = clean_scope_paths(local_scope.scope_paths)
+        files: list[Path] = []
+        if scopes:
+            for rel in scopes:
+                candidate = (rag_service.workspace / rel).resolve()
+                try:
+                    candidate.relative_to(rag_service.workspace)
+                except ValueError:
+                    raise PermissionError(f"target path is outside review root: {rel}") from None
+                if candidate.is_file() and candidate.suffix.lower() in DEFAULT_TEXT_EXTS:
+                    files.append(candidate)
+                elif candidate.is_dir():
+                    files.extend(rag_service.iter_candidate_files(candidate))
+            return list(dict.fromkeys(files))
+        return list(rag_service.iter_candidate_files())
 
     async def local_context(
         self,
@@ -120,6 +162,7 @@ class ReviewEvidenceService:
         review_query: str | None,
         max_results: int,
         include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str:
         trace_id = "local"
         started = time.perf_counter()
@@ -135,11 +178,13 @@ class ReviewEvidenceService:
             )
             return "Error: review_query is required."
 
-        result = await self.repository_rag.retrieve(
+        rag_service = self._rag_for_scope(local_scope)
+        files = self._scope_files(rag_service, local_scope)
+        result = await rag_service.retrieve(
             RepositoryRAGRequest(
                 source_type=SOURCE_TYPE,
                 review_query=review_query.strip(),
-                files=list(self.repository_rag.iter_candidate_files()),
+                files=files,
                 max_results=max_results,
                 include_tests=include_tests,
                 related_tests=False,
@@ -152,7 +197,7 @@ class ReviewEvidenceService:
                 "review.evidence.local.done",
                 status="no_hits",
                 trace_id=trace_id,
-                files_count=0,
+                files_count=len(files),
                 hits_count=0,
                 context_chars=len(result.context),
                 elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
@@ -164,6 +209,7 @@ class ReviewEvidenceService:
             "review.evidence.local.done",
             status="success",
             trace_id=trace_id,
+            files_count=len(files),
             hits_count=len(result.hits),
             context_chars=len(result.context),
             elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
@@ -177,9 +223,11 @@ class ReviewEvidenceService:
         target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str:
         started = time.perf_counter()
-        summary = await asyncio.to_thread(self.local_changed_summary)
+        rag_service = self._rag_for_scope(local_scope)
+        summary = await asyncio.to_thread(self.local_changed_summary, rag_service.workspace)
         changed = summary.files
         touched_lines = summary.touched_lines
         scopes = clean_scope_paths(target_paths)
@@ -191,11 +239,12 @@ class ReviewEvidenceService:
         query = review_query or "code review local changed files regressions tests security"
         if changed:
             query = f"{query} {' '.join(changed[:40])}"
-        result = await self.repository_rag.retrieve(
+        files = self._scope_files(rag_service, local_scope, changed or target_paths)
+        result = await rag_service.retrieve(
             RepositoryRAGRequest(
                 source_type=SOURCE_TYPE,
                 review_query=query.strip(),
-                files=list(self.repository_rag.iter_candidate_files()),
+                files=files,
                 max_results=max_results,
                 include_tests=include_tests,
                 touched_lines=touched_lines,
@@ -242,22 +291,26 @@ class ReviewEvidenceService:
         )
         return result
 
-    def local_changed_summary(self) -> LocalChangedSummary:
+    def local_changed_summary(self, workspace: Path | None = None) -> LocalChangedSummary:
+        root = (workspace or self.workspace).expanduser().resolve()
         try:
             from git import Repo  # type: ignore
         except Exception as exc:
             logger.debug("repo_review GitPython unavailable reason={}", exc)
-            return self._local_changed_summary_cli()
+            return self._local_changed_summary_cli(root)
         try:
-            repo = Repo(self.workspace, search_parent_directories=True)
-            paths = set(repo.git.diff("--name-only").splitlines())
-            paths.update(repo.git.diff("--name-only", "--cached").splitlines())
-            paths.update(str(p) for p in repo.untracked_files)
-            text_paths = sorted(
-                path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS
-            )
+            repo = Repo(root, search_parent_directories=True)
+            worktree = Path(getattr(repo, "working_tree_dir", None) or root).resolve()
+            raw_paths = set(repo.git.diff("--name-only").splitlines())
+            raw_paths.update(repo.git.diff("--name-only", "--cached").splitlines())
+            raw_paths.update(str(p) for p in repo.untracked_files)
             touched: dict[str, list[int]] = {}
-            for path in text_paths:
+            text_paths: list[str] = []
+            for path in sorted(raw_paths):
+                rel_path = self._path_relative_to_root(path, worktree=worktree, root=root)
+                if rel_path is None or Path(rel_path).suffix.lower() not in DEFAULT_TEXT_EXTS:
+                    continue
+                text_paths.append(rel_path)
                 lines: set[int] = set()
                 lines.update(
                     changed_lines_from_patch(path, self._local_diff_patch(repo, path, cached=False))
@@ -268,7 +321,7 @@ class ReviewEvidenceService:
                 if path in repo.untracked_files:
                     lines.update(self._untracked_file_lines(repo, path))
                 if lines:
-                    touched[path] = sorted(lines)
+                    touched[rel_path] = sorted(lines)
             return LocalChangedSummary(files=text_paths, touched_lines=touched)
         except Exception as exc:
             logger.warning("repo_review local git diff unavailable reason={}", exc)
@@ -277,26 +330,35 @@ class ReviewEvidenceService:
     def local_changed_files(self) -> list[str]:
         return self.local_changed_summary().files
 
-    def _local_changed_summary_cli(self) -> LocalChangedSummary:
+    @staticmethod
+    def _path_relative_to_root(path: str, *, worktree: Path, root: Path) -> str | None:
         try:
-            paths = set(self._git_cli("diff", "--name-only").splitlines())
-            paths.update(self._git_cli("diff", "--name-only", "--cached").splitlines())
-            paths.update(self._git_cli("ls-files", "--others", "--exclude-standard").splitlines())
+            target = (worktree / path).resolve()
+            return target.relative_to(root).as_posix()
+        except ValueError:
+            return None
+
+    def _local_changed_summary_cli(self, workspace: Path | None = None) -> LocalChangedSummary:
+        root = (workspace or self.workspace).expanduser().resolve()
+        try:
+            paths = set(self._git_cli("diff", "--name-only", cwd=root).splitlines())
+            paths.update(self._git_cli("diff", "--name-only", "--cached", cwd=root).splitlines())
+            paths.update(self._git_cli("ls-files", "--others", "--exclude-standard", cwd=root).splitlines())
             text_paths = sorted(
                 path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS
             )
-            untracked = set(self._git_cli("ls-files", "--others", "--exclude-standard").splitlines())
+            untracked = set(self._git_cli("ls-files", "--others", "--exclude-standard", cwd=root).splitlines())
             touched: dict[str, list[int]] = {}
             for path in text_paths:
                 lines: set[int] = set()
                 lines.update(
-                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=False))
+                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=False, cwd=root))
                 )
                 lines.update(
-                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=True))
+                    changed_lines_from_patch(path, self._local_diff_patch_cli(path, cached=True, cwd=root))
                 )
                 if path in untracked:
-                    lines.update(self._untracked_workspace_file_lines(path))
+                    lines.update(self._untracked_workspace_file_lines(path, workspace=root))
                 if lines:
                     touched[path] = sorted(lines)
             return LocalChangedSummary(files=text_paths, touched_lines=touched)
@@ -304,10 +366,10 @@ class ReviewEvidenceService:
             logger.warning("repo_review local git cli diff unavailable reason={}", exc)
             return LocalChangedSummary()
 
-    def _git_cli(self, *args: str) -> str:
+    def _git_cli(self, *args: str, cwd: Path | None = None) -> str:
         result = subprocess.run(
             ["git", *args],
-            cwd=self.workspace,
+            cwd=cwd or self.workspace,
             check=True,
             capture_output=True,
             text=True,
@@ -322,12 +384,12 @@ class ReviewEvidenceService:
         patch = repo.git.diff(*args)
         return ReviewEvidenceService._diff_hunk_lines(patch)
 
-    def _local_diff_patch_cli(self, path: str, *, cached: bool) -> str:
+    def _local_diff_patch_cli(self, path: str, *, cached: bool, cwd: Path | None = None) -> str:
         args = ["diff"]
         if cached:
             args.append("--cached")
         args.extend(["--unified=0", "--", path])
-        return self._diff_hunk_lines(self._git_cli(*args))
+        return self._diff_hunk_lines(self._git_cli(*args, cwd=cwd))
 
     @staticmethod
     def _diff_hunk_lines(patch: str) -> str:
@@ -357,10 +419,11 @@ class ReviewEvidenceService:
             return []
         return list(range(1, len(text.replace("\r\n", "\n").replace("\r", "\n").splitlines()) + 1))
 
-    def _untracked_workspace_file_lines(self, path: str) -> list[int]:
-        target = (self.workspace / path).resolve()
+    def _untracked_workspace_file_lines(self, path: str, *, workspace: Path | None = None) -> list[int]:
+        root = (workspace or self.workspace).expanduser().resolve()
+        target = (root / path).resolve()
         try:
-            target.relative_to(self.workspace)
+            target.relative_to(root)
         except ValueError:
             return []
         if target.suffix.lower() not in DEFAULT_TEXT_EXTS:
@@ -378,6 +441,7 @@ class ReviewEvidenceService:
         target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str:
         started = time.perf_counter()
         cleaned = clean_scope_paths(target_paths)
@@ -394,11 +458,20 @@ class ReviewEvidenceService:
             return "Error: target_paths is required for limited repo review."
         query = review_query or "code review targeted files security tests architecture"
         query = f"{query} {' '.join(cleaned[:40])}"
-        block = await self.local_context(
-            review_query=query,
-            max_results=max_results,
-            include_tests=include_tests,
+        rag_service = self._rag_for_scope(local_scope)
+        files = self._scope_files(rag_service, local_scope, cleaned)
+        rag_result = await rag_service.retrieve(
+            RepositoryRAGRequest(
+                source_type=SOURCE_TYPE,
+                review_query=query.strip(),
+                files=files,
+                max_results=max_results,
+                include_tests=include_tests,
+                related_tests=False,
+                trace_id="local_targeted",
+            )
         )
+        block = rag_result.context if rag_result.hits else "No relevant repository review references found."
         header = "[Limited Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80])
         result = header + "\n\n" + block
         log_event(
@@ -408,6 +481,7 @@ class ReviewEvidenceService:
             status="success",
             trace_id="local_targeted",
             scopes_count=len(cleaned),
+            files_count=len(files),
             context_chars=len(result),
             elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
         )

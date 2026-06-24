@@ -23,6 +23,7 @@ class ValidationContext:
     workspace: str
     changed_files: list[str] = field(default_factory=list)
     max_line_lookup: bool = True
+    local_target: str | None = None
 
 
 class ReviewValidator:
@@ -31,6 +32,7 @@ class ReviewValidator:
     def __init__(self, ctx: ValidationContext) -> None:
         self._ctx = ctx
         self._workspace = Path(ctx.workspace).resolve()
+        self._local_target = self._resolve_local_target(ctx.local_target)
         self._changed_files = {self._normalize_rel_path(path) for path in ctx.changed_files}
         self._seen_fingerprints: set[str] = set()
         self.stats = {"accepted": 0, "rejected": 0, "needs_confirmation": 0}
@@ -80,9 +82,10 @@ class ReviewValidator:
 
         file_path = self._resolve_candidate_path(c.file)
         if file_path is None:
+            boundary = "target" if self._local_target is not None else "workspace"
             return ReviewFindingVerdict(
                 verdict=FindingVerdict.REJECTED,
-                reason=f"path outside workspace: {c.file}",
+                reason=f"path outside {boundary}: {c.file}",
             )
         if not file_path.is_file():
             return ReviewFindingVerdict(
@@ -130,19 +133,53 @@ class ReviewValidator:
         except OSError:
             return False
 
+    @staticmethod
+    def _resolve_local_target(raw: str | None) -> Path | None:
+        if not raw or not str(raw).strip():
+            return None
+        try:
+            return Path(str(raw)).expanduser().resolve()
+        except OSError:
+            return None
+
     def _resolve_candidate_path(self, raw: str) -> Path | None:
         value = raw.strip()
         if not value:
             return None
         candidate = Path(value)
         if candidate.is_absolute():
-            return None
+            if self._local_target is None:
+                return None
+            try:
+                resolved = candidate.expanduser().resolve()
+            except OSError:
+                return None
+            return resolved if self._is_under_allowed_target(resolved) else None
         try:
             resolved = (self._workspace / candidate).resolve()
-            resolved.relative_to(self._workspace)
         except (OSError, ValueError):
             return None
+        if not self._is_under_allowed_target(resolved):
+            return None
         return resolved
+
+    def _is_under_allowed_target(self, resolved: Path) -> bool:
+        if self._local_target is not None:
+            target = self._local_target
+            if not target.exists():
+                return False
+            if target.is_file():
+                return resolved == target
+            try:
+                resolved.relative_to(target)
+                return True
+            except ValueError:
+                return False
+        try:
+            resolved.relative_to(self._workspace)
+            return True
+        except ValueError:
+            return False
 
     @staticmethod
     def _normalize_rel_path(raw: str) -> str:

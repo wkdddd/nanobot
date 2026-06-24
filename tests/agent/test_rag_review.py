@@ -97,13 +97,19 @@ def test_rrf_merge_combines_ranked_lists() -> None:
 @pytest.mark.asyncio
 async def test_review_evidence_dispatches_local_targeted_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = ReviewEvidenceService(RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False)))
-    called: dict[str, object] = {}
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "auth.py").write_text("token = 'x'\n", encoding="utf-8")
+    captured: dict[str, object] = {}
 
-    async def fake_local(**kwargs: object) -> str:
-        called.update(kwargs)
-        return "context"
+    class _Result:
+        hits: list[object] = [object()]
+        context = "context"
 
-    monkeypatch.setattr(service, "local_context", fake_local)
+    async def fake_retrieve(request: RepositoryRAGRequest) -> _Result:
+        captured["request"] = request
+        return _Result()
+
+    monkeypatch.setattr(service.repository_rag, "retrieve", fake_retrieve)
 
     result = await service.local_targeted_context(
         review_query="auth",
@@ -114,7 +120,10 @@ async def test_review_evidence_dispatches_local_targeted_context(tmp_path: Path,
 
     assert result.startswith("[Limited Full Repo Review Context]")
     assert "src/auth.py" in result
-    assert called["review_query"] == "auth src/auth.py"
+    request = captured["request"]
+    assert isinstance(request, RepositoryRAGRequest)
+    assert request.review_query == "auth src/auth.py"
+    assert [path.relative_to(tmp_path).as_posix() for path in request.files or []] == ["src/auth.py"]
 
 
 @pytest.mark.asyncio
@@ -133,7 +142,7 @@ async def test_review_evidence_dispatches_local_changed_context(tmp_path: Path, 
     monkeypatch.setattr(
         service,
         "local_changed_summary",
-        lambda: LocalChangedSummary(
+        lambda _workspace=None: LocalChangedSummary(
             files=["src/auth.py", "docs/readme.md"],
             touched_lines={"src/auth.py": [2], "docs/readme.md": [1]},
         ),

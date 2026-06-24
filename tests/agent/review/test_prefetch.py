@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from nanobot.agent.review.planner import build_review_plan
 from nanobot.agent.review.prefetch import maybe_prefetch_review_context
-from nanobot.agent.review.types import ReviewAction, ReviewPlan
+from nanobot.agent.review.types import LocalReviewScope, ReviewAction, ReviewPlan
 
 
 class _EvidenceService:
@@ -50,6 +50,7 @@ async def test_prefetch_calls_review_evidence_service_and_compacts_evidence() ->
     assert evidence_service.calls
     assert evidence_service.calls[0]["review_query"] == "review auth"
     assert evidence_service.calls[0]["target_paths"] == ["src/auth.py"]
+    assert "local_scope" in evidence_service.calls[0]
     assert evidence_service.calls[0]["target_type"] == "local"
     assert evidence_service.calls[0]["action"] == "repo"
     assert summary.attempted is True
@@ -126,6 +127,26 @@ def test_github_blob_url_becomes_scoped_review_plan() -> None:
     assert plan.target_repo == "wkdddd/nanobot"
     assert plan.target_ref == "main"
     assert plan.target_paths == ["review-webui/index.html"]
+
+
+def test_local_file_target_becomes_file_scope(tmp_path) -> None:
+    target = tmp_path / "src" / "auth.py"
+    target.parent.mkdir()
+    target.write_text("print('ok')\n", encoding="utf-8")
+
+    plan = build_review_plan(
+        target=str(target),
+        user_content="审查",
+        target_type="local",
+        action="repo",
+    )
+
+    assert plan is not None
+    assert plan.local_scope is not None
+    assert isinstance(plan.local_scope, LocalReviewScope)
+    assert plan.local_scope.kind == "file"
+    assert plan.local_scope.review_root == str(target.parent)
+    assert plan.target_paths == ["auth.py"]
 
 
 async def test_prefetch_passes_github_blob_scope_and_ref() -> None:

@@ -1,7 +1,6 @@
 import pytest
 
-from nanobot.agent.lifecycle_hook import AgentHookContext
-from nanobot.agent.progress_hook import AgentProgressHook
+from nanobot.agent.hooks import AgentHookContext, AgentProgressHook
 from nanobot.utils.helpers import strip_think
 
 

@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from nanobot.agent.lifecycle_hook import AgentHookContext
-from nanobot.agent.review.finalizer import ReviewFinalizer, ReviewFinalizerHook
-from nanobot.agent.review.policy import policy_for_depth
+from nanobot.agent.hooks import AgentHookContext, ReviewFinalizerHook
+from nanobot.agent.review.beforeplan import policy_for_depth
+from nanobot.agent.review.finalizer import ReviewFinalizer
 from nanobot.agent.review.types import (
     ReviewJudgeDecision,
     ReviewJudgeVerdict,
@@ -32,12 +32,19 @@ def workspace(tmp_path):
     return str(tmp_path)
 
 
-class TestParsingJsonArray:
+def _submit(findings: list[dict[str, object]]) -> str:
+    return json.dumps(
+        {"submitted": True, "findings": findings, "errors": []},
+        ensure_ascii=False,
+    )
+
+
+class TestParsingReviewSubmit:
     def test_normalizes_review_label_suffix(self):
         assert normalize_review_dimension("Architecture Review") == "architecture"
 
-    def test_parse_json_array(self, workspace):
-        raw = json.dumps([{
+    def test_parse_review_submit_result(self, workspace):
+        raw = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 1,
@@ -51,15 +58,32 @@ class TestParsingJsonArray:
         assert len(result.accepted) == 1
         assert result.accepted[0].title == "Injection"
 
-    def test_parse_empty_array(self, workspace):
+    def test_parse_empty_review_submit_result(self, workspace):
         f = ReviewFinalizer(workspace)
-        result = f.ingest_subagent_output("security", "[]")
+        result = f.ingest_subagent_output("security", _submit([]))
         assert result.status == "no_findings"
 
 
-class TestParsingJsonl:
-    def test_parse_jsonl_lines(self, workspace):
-        lines = [
+class TestStrictProtocol:
+    def test_rejects_bare_json_array(self, workspace):
+        raw = json.dumps([{
+            "severity": "high",
+            "file": "src/app.py",
+            "line": 1,
+            "title": "Legacy array",
+            "evidence": "line1",
+            "impact": "bad",
+            "recommendation": "fix",
+        }])
+        f = ReviewFinalizer(workspace)
+        result = f.ingest_subagent_output("security", raw)
+
+        assert result.status == "incomplete"
+        assert result.accepted == []
+        assert result.errors == ["No structured findings were produced by this reviewer."]
+
+    def test_rejects_jsonl_lines(self, workspace):
+        raw = "\n".join([
             json.dumps({
                 "severity": "medium",
                 "file": "src/app.py",
@@ -69,7 +93,6 @@ class TestParsingJsonl:
                 "impact": "y",
                 "recommendation": "z",
             }),
-            "some non-json text",
             json.dumps({
                 "severity": "low",
                 "file": "src/app.py",
@@ -79,15 +102,29 @@ class TestParsingJsonl:
                 "impact": "b",
                 "recommendation": "c",
             }),
-        ]
+        ])
         f = ReviewFinalizer(workspace)
-        result = f.ingest_subagent_output("tests", "\n".join(lines))
-        assert len(result.accepted) == 2
+        result = f.ingest_subagent_output("tests", raw)
+
+        assert result.status == "incomplete"
+        assert result.accepted == []
+
+    def test_rejects_markdown_table(self, workspace):
+        raw = (
+            "| severity | file | line | title | evidence | impact | recommendation |\n"
+            "|---|---|---|---|---|---|---|\n"
+            "| high | src/app.py | 1 | Table issue | line1 | bad | fix |"
+        )
+        f = ReviewFinalizer(workspace)
+        result = f.ingest_subagent_output("tests", raw)
+
+        assert result.status == "incomplete"
+        assert result.accepted == []
 
 
 class TestSemanticVerdicts:
     def test_no_confirmation_needed_when_no_uncertain(self, workspace):
-        raw = json.dumps([{
+        raw = _submit([{
             "severity": "high", "file": "src/app.py", "line": 1,
             "title": "Clear bug", "evidence": "line1", "impact": "bad", "recommendation": "fix",
         }])
@@ -96,7 +133,7 @@ class TestSemanticVerdicts:
         assert f.get_needs_confirmation() == []
 
     def test_uncertain_items_remain_in_needs_confirmation(self, workspace):
-        raw = json.dumps([{
+        raw = _submit([{
             "severity": "high", "file": "src/app.py", "line": 1,
             "title": "Maybe", "evidence": "", "impact": "unknown", "recommendation": "check",
         }])
@@ -110,7 +147,7 @@ class TestSemanticVerdicts:
 
     @pytest.mark.asyncio
     async def test_ai_judge_can_reject_hard_accepted_candidate(self, workspace):
-        raw = json.dumps([{
+        raw = _submit([{
             "severity": "high", "file": "src/app.py", "line": 1,
             "title": "False positive", "evidence": "line1", "impact": "bad", "recommendation": "fix",
         }])
@@ -130,7 +167,7 @@ class TestSemanticVerdicts:
         assert "AI judge rejected: not actionable" in result.report_markdown
 
     def test_quick_policy_filters_medium_and_low_candidates(self, workspace):
-        raw = json.dumps([
+        raw = _submit([
             {
                 "severity": "medium", "file": "src/app.py", "line": 1,
                 "title": "Medium issue", "evidence": "line1", "impact": "bad", "recommendation": "fix",
@@ -156,7 +193,7 @@ class TestFinalize:
         assert "No actionable issues found" not in result.report_markdown
 
     def test_finalize_produces_report(self, workspace):
-        raw = json.dumps([{
+        raw = _submit([{
             "severity": "critical", "file": "src/app.py", "line": 1,
             "title": "RCE", "evidence": "line1", "impact": "Full compromise",
             "recommendation": "Remove exec",
@@ -183,7 +220,7 @@ class TestFinalize:
         assert "No actionable issues found" not in report
 
     def test_unstructured_subagent_output_renders_incomplete_not_clean(self, workspace):
-        raw = "I inspected the files but did not produce the required JSON array."
+        raw = "I inspected the files but did not call review_submit."
         f = ReviewFinalizer(workspace)
         result = f.ingest_subagent_output("architecture", raw)
         report = f.finalize("repo").report_markdown
@@ -194,7 +231,7 @@ class TestFinalize:
         assert "No actionable issues found" not in report
 
     def test_finalizer_skips_disallowed_dimensions(self, workspace):
-        dependency_raw = json.dumps([{
+        dependency_raw = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 1,
@@ -203,7 +240,7 @@ class TestFinalize:
             "impact": "Supply chain risk",
             "recommendation": "Pin versions",
         }])
-        security_raw = json.dumps([{
+        security_raw = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 2,
@@ -225,7 +262,7 @@ class TestFinalize:
         assert [dimension.dimension for dimension in result.dimensions] == ["dependency"]
 
     def test_finalizer_accepts_spawn_labels_with_task_suffix(self, workspace):
-        raw = json.dumps([{
+        raw = _submit([{
             "severity": "high",
             "file": "review-webui/index.html",
             "line": 1,
@@ -247,8 +284,28 @@ class TestFinalize:
         assert "Font loading blocks render" in result.report_markdown
         assert not result.errors
 
+    def test_finalizer_accepts_short_performance_spawn_label(self, workspace):
+        raw = _submit([{
+            "severity": "high",
+            "file": "review-webui/index.html",
+            "line": 1,
+            "title": "Blocking external stylesheet",
+            "evidence": "Google Fonts stylesheet",
+            "impact": "Slower first paint",
+            "recommendation": "Preconnect or self-host critical font assets",
+        }])
+        f = ReviewFinalizer(workspace, allowed_dimensions={"performance"})
+
+        accepted = f.ingest_subagent_output("perf-review-index.html", raw)
+        result = f.finalize("review-webui/index.html")
+
+        assert accepted.status != "skipped_disallowed"
+        assert accepted.dimension == "performance"
+        assert "Blocking external stylesheet" in result.report_markdown
+        assert not result.errors
+
     def test_ingest_runner_message_metadata_prefers_raw_result(self, workspace):
-        raw_result = json.dumps([{
+        raw_result = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 2,
@@ -272,7 +329,7 @@ class TestFinalize:
         assert "Wrapped finding" in result.report_markdown
 
     def test_ingest_persisted_subagent_message_top_level_metadata(self, workspace):
-        raw_result = json.dumps([{
+        raw_result = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 2,
@@ -295,8 +352,8 @@ class TestFinalize:
 
         assert "Persisted finding" in result.report_markdown
 
-    def test_ingest_runner_message_parses_wrapped_announce_content(self, workspace):
-        raw_result = json.dumps([{
+    def test_ingest_runner_message_requires_raw_submit_result_metadata(self, workspace):
+        raw_result = _submit([{
             "severity": "medium",
             "file": "src/app.py",
             "line": 3,
@@ -325,10 +382,11 @@ class TestFinalize:
         assert f.ingest_messages([message]) == 1
         result = f.finalize("myproject")
 
-        assert "Announced finding" in result.report_markdown
+        assert "Announced finding" not in result.report_markdown
+        assert "Review incomplete" in result.report_markdown
 
     def test_hook_finalizes_content_from_subagent_messages(self, workspace):
-        raw_result = json.dumps([{
+        raw_result = _submit([{
             "severity": "critical",
             "file": "src/app.py",
             "line": 1,
@@ -356,8 +414,41 @@ class TestFinalize:
         assert "## Code Review Report: myproject" in content
         assert "Hook finding" in content
 
+    def test_hook_replaces_prose_when_no_subagent_results(self, workspace):
+        context = AgentHookContext(
+            iteration=1,
+            messages=[{"role": "user", "content": "review this repo"}],
+        )
+        hook = ReviewFinalizerHook(workspace=workspace, target_name="myproject")
+
+        content = hook.finalize_content(context, "Looks fine from an architecture perspective.")
+
+        assert "## Code Review Report: myproject" in (content or "")
+        assert "Review incomplete" in (content or "")
+        assert "Looks fine from an architecture perspective" not in (content or "")
+        assert context.content_replaced is True
+
+    def test_hook_keeps_rendered_report_authoritative(self, workspace):
+        context = AgentHookContext(
+            iteration=1,
+            messages=[{"role": "user", "content": "review this repo"}],
+        )
+        hook = ReviewFinalizerHook(workspace=workspace, target_name="myproject")
+
+        first = hook.finalize_content(context, "raw assistant prose")
+        second_context = AgentHookContext(
+            iteration=2,
+            messages=context.messages,
+        )
+        second = hook.finalize_content(second_context, "later coordinator summary")
+
+        assert first == second
+        assert "## Code Review Report: myproject" in (second or "")
+        assert "later coordinator summary" not in (second or "")
+        assert second_context.content_replaced is True
+
     def test_hook_allowed_dimensions_can_be_set_after_construction(self, workspace):
-        raw_result = json.dumps([{
+        raw_result = _submit([{
             "severity": "critical",
             "file": "src/app.py",
             "line": 1,
@@ -389,7 +480,7 @@ class TestFinalize:
 
     @pytest.mark.asyncio
     async def test_hook_ingests_incremental_subagent_results(self, workspace):
-        first = json.dumps([{
+        first = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 1,
@@ -398,7 +489,7 @@ class TestFinalize:
             "impact": "bad",
             "recommendation": "fix",
         }])
-        second = json.dumps([{
+        second = _submit([{
             "severity": "high",
             "file": "src/app.py",
             "line": 2,

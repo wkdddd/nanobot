@@ -48,10 +48,12 @@ class ReviewToolBase(Tool):
         rag_config = getattr(ctx, "rag_config", None) or RAGConfig()
         runtime = create_rag_runtime(rag_config)
         tools_config = ctx.config if ctx.config else None
+        review_config = getattr(ctx, "review_config", None)
         return cls(
             workspace=Path(ctx.workspace),
             runtime=runtime,
             github_config=getattr(tools_config, "github_repo", None),
+            dense_backfill_limit=getattr(review_config, "prefetch_dense_backfill_limit", 256),
         )
 
     def __init__(
@@ -62,6 +64,7 @@ class ReviewToolBase(Tool):
         vector_store: Any | None = None,
         runtime: RAGRuntime | None = None,
         github_config: GitHubRepoConfig | None = None,
+        dense_backfill_limit: int = 256,
     ) -> None:
         self.workspace = workspace.expanduser().resolve()
         if runtime is None:
@@ -72,6 +75,7 @@ class ReviewToolBase(Tool):
             )
         self.runtime = runtime
         options = RepositoryRAGOptions.from_retrieval_config(runtime.retrieval)
+        options.dense_backfill_limit = max(0, int(dense_backfill_limit))
         self.repository_rag = RepositoryRAGService(
             workspace,
             runtime=runtime,

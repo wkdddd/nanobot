@@ -199,7 +199,7 @@ export function NewReviewForm({
                 <Button
                   type="button"
                   onClick={handleSubmit}
-                  disabled={!target.trim() || submitting}
+                  disabled={!target.trim() || focus.length === 0 || submitting}
                   className={cn(
                     "h-8 min-w-[100px] gap-1.5 font-medium text-xs",
                     "bg-primary text-primary-foreground",

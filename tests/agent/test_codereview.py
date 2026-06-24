@@ -93,10 +93,11 @@ def test_build_code_review_context_includes_subagent_candidate_schema() -> None:
         target="https://github.com/test/repo",
         max_subagents=4,
     )
-    assert "Subagent Output Format" in prompt
+    assert "Review Finding Schema" in prompt
+    assert "using `spawn`" in prompt
+    assert "review_submit" in prompt
     assert '"severity"' in prompt
     assert '"evidence"' in prompt
-    assert "JSON array" in prompt
 
 
 def test_build_code_review_context_matches_system_finalizer_boundary() -> None:
@@ -286,5 +287,6 @@ def test_code_review_is_not_registered_as_a_tool(tmp_path) -> None:
     assert "code_review" not in loop.tool_names
     assert "github_repo_read" not in loop.tool_names
     assert "repo_review" not in loop.tool_names
+    assert "review_judge" not in loop.tool_names
     assert "local_review" in loop.tool_names
     assert "github_review" in loop.tool_names

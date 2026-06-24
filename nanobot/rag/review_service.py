@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -155,6 +156,7 @@ class RepositoryRAGOptions:
     text_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_TEXT_EXTS))
     ignore_dirs: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_DIRS))
     ignore_globs: tuple[str, ...] = DEFAULT_IGNORE_GLOBS
+    dense_backfill_limit: int = 256
 
     @classmethod
     def from_retrieval_config(cls, config: RAGRetrievalConfig) -> "RepositoryRAGOptions":
@@ -279,12 +281,32 @@ class RepositoryRAGService:
             query_chars=len(request.review_query),
             max_results=request.max_results or self.options.max_results,
         )
-        await asyncio.to_thread(
-            self.sync_files,
-            source_type=request.source_type,
-            files=files,
-            trace_id=trace_id,
+        cancel_event = threading.Event()
+        sync_task = asyncio.create_task(
+            asyncio.to_thread(
+                self.sync_files,
+                source_type=request.source_type,
+                files=files,
+                trace_id=trace_id,
+                cancel_event=cancel_event,
+            )
         )
+        try:
+            await sync_task
+        except asyncio.CancelledError:
+            cancel_event.set()
+            log_event(
+                logger,
+                "info",
+                "rag.review.cancelled",
+                status="cancelled",
+                trace_id=trace_id,
+                source_type=request.source_type,
+                phase="sync",
+                files=len(files),
+                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
+            )
+            raise
         hits = await self.retrieve_hits(
             source_type=request.source_type,
             review_query=request.review_query,
@@ -316,7 +338,14 @@ class RepositoryRAGService:
         )
         return RepositoryRAGResult(hits=hits, context=context, cache_root=cache_root)
 
-    def sync_files(self, *, source_type: str, files: list[Path], trace_id: str) -> None:
+    def sync_files(
+        self,
+        *,
+        source_type: str,
+        files: list[Path],
+        trace_id: str,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
         start = time.perf_counter()
         self.index.sync_files(
             source_type=source_type,
@@ -324,6 +353,8 @@ class RepositoryRAGService:
             chunker=lambda path, text: self.chunk_file(path, text, source_type=source_type),
             max_file_chars=self.options.max_file_chars,
             skip_embed_filter=should_skip_file_embedding,
+            cancel_event=cancel_event,
+            dense_limit=self.options.dense_backfill_limit,
         )
         log_event(
             logger,

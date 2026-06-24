@@ -1,4 +1,4 @@
-"""Spawn tool for creating background subagents."""
+"""Spawn tool for dedicated review subagents."""
 
 from __future__ import annotations
 
@@ -16,25 +16,34 @@ if TYPE_CHECKING:
 
 @tool_parameters(
     tool_parameters_schema(
-        task=StringSchema("The task for the subagent to complete"),
-        label=StringSchema("Optional short label for the task (for display)"),
-        required=["task"],
+        task=StringSchema("The review task for the dedicated review subagent."),
+        label=StringSchema("Review dimension key or label, such as security or Security Reviewer."),
+        required=["task", "label"],
     )
 )
 class SpawnTool(Tool, ContextAware):
-    """Tool to spawn a subagent for background task execution."""
+    """Spawn a dedicated review subagent with structured finding submission."""
 
     def __init__(self, manager: "SubagentManager"):
         self._manager = manager
-        self._origin_channel: ContextVar[str] = ContextVar("spawn_origin_channel", default="cli")
-        self._origin_chat_id: ContextVar[str] = ContextVar("spawn_origin_chat_id", default="direct")
-        self._session_key: ContextVar[str] = ContextVar("spawn_session_key", default="cli:direct")
+        self._origin_channel: ContextVar[str] = ContextVar(
+            "review_spawn_origin_channel",
+            default="cli",
+        )
+        self._origin_chat_id: ContextVar[str] = ContextVar(
+            "review_spawn_origin_chat_id",
+            default="direct",
+        )
+        self._session_key: ContextVar[str] = ContextVar(
+            "review_spawn_session_key",
+            default="cli:direct",
+        )
         self._origin_message_id: ContextVar[str | None] = ContextVar(
-            "spawn_origin_message_id",
+            "review_spawn_origin_message_id",
             default=None,
         )
         self._metadata: ContextVar[dict[str, Any]] = ContextVar(
-            "spawn_metadata",
+            "review_spawn_metadata",
             default={},
         )
 
@@ -43,7 +52,6 @@ class SpawnTool(Tool, ContextAware):
         return cls(manager=ctx.subagent_manager)
 
     def set_context(self, ctx: RequestContext) -> None:
-        """Set the origin context for subagent announcements."""
         self._origin_channel.set(ctx.channel)
         self._origin_chat_id.set(ctx.chat_id)
         self._session_key.set(ctx.session_key or f"{ctx.channel}:{ctx.chat_id}")
@@ -57,49 +65,42 @@ class SpawnTool(Tool, ContextAware):
     @property
     def description(self) -> str:
         return (
-            "Spawn a subagent to handle a task in the background. "
-            "Use this for complex or time-consuming tasks that can run independently. "
-            "The subagent will complete the task and report back when done. "
-            "For deliverables or existing projects, inspect the workspace first "
-            "and use a dedicated subdirectory when helpful."
+            "Spawn a dedicated code-review subagent. Use only during review mode. "
+            "The subagent submits findings through review_submit."
         )
 
-    async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
-        """Spawn a subagent to execute the given task."""
-        allowed = self._allowed_review_dimensions()
-        if allowed is not None:
-            dimension = normalize_review_dimension(label)
-            if dimension is None:
-                return (
-                    "Cannot spawn subagent: review mode requires label to be one of "
-                    f"{', '.join(sorted(allowed))}."
-                )
-            if dimension not in allowed:
-                return (
-                    "Cannot spawn subagent: dimension "
-                    f"'{label}' is not allowed for this review. Allowed dimensions: "
-                    f"{', '.join(sorted(allowed))}."
-                )
-            label = dimension
+    async def execute(self, task: str, label: str, **kwargs: Any) -> str:
+        metadata = self._metadata.get()
+        allowed = self._normalize_allowed_review_dimensions(metadata)
+        if allowed is None:
+            return "Error: dimensions is missing"
+        dimension = normalize_review_dimension(label)
+        if dimension is None or dimension not in allowed:
+            return (
+                "Error: Cannot spawn review subagent: dimension "
+                f"'{label}' is not allowed. Allowed dimensions: "
+                f"{', '.join(sorted(allowed))}."
+            )
         running = self._manager.get_running_count()
         limit = self._manager.max_concurrent_subagents
         if running >= limit:
             return (
-                f"Cannot spawn subagent: concurrency limit reached "
+                f"Error: Cannot spawn review subagent: concurrency limit reached "
                 f"({running}/{limit} running). Wait for a running subagent "
                 f"to complete before spawning a new one."
             )
         return await self._manager.spawn(
             task=task,
-            label=label,
+            label=dimension,
             origin_channel=self._origin_channel.get(),
             origin_chat_id=self._origin_chat_id.get(),
             session_key=self._session_key.get(),
             origin_message_id=self._origin_message_id.get(),
         )
 
-    def _allowed_review_dimensions(self) -> set[str] | None:
-        raw = self._metadata.get().get(ReviewMetaKey.ALLOWED_DIMENSIONS)
+    @staticmethod
+    def _normalize_allowed_review_dimensions(metadata: dict[str, Any]) -> set[str] | None:
+        raw = metadata.get(ReviewMetaKey.ALLOWED_DIMENSIONS)
         if not isinstance(raw, list):
             return None
         allowed = {

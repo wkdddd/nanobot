@@ -19,6 +19,9 @@ class ReviewMetaKey:
     FOCUS = "review_focus"
     TARGET_PATHS = "review_target_paths"
     TARGET_REF = "review_target_ref"
+    LOCAL_ROOT = "review_local_root"
+    LOCAL_TARGET = "review_local_target"
+    LOCAL_SCOPE_KIND = "review_local_scope_kind"
     MAX_SUBAGENTS = "review_max_subagents"
     ALLOWED_DIMENSIONS = "allowed_review_dimensions"
     EVIDENCE_PROVIDER = "_review_evidence_service"
@@ -26,6 +29,7 @@ class ReviewMetaKey:
 
 ReviewTargetType = Literal["auto", "github", "local"]
 ReviewDepth = Literal["quick", "full", "deep"]
+ReviewScopeKind = Literal["file", "directory", "repo"]
 
 
 class ReviewAction(StrEnum):
@@ -138,6 +142,27 @@ OPTIONAL_REVIEW_ROLES: dict[str, ReviewRole] = {
 
 ALL_REVIEW_ROLES: dict[str, ReviewRole] = {**DEFAULT_REVIEW_ROLES, **OPTIONAL_REVIEW_ROLES}
 
+_DIMENSION_PREFIX_ALIASES: dict[str, str] = {
+    "arch": "architecture",
+    "architecture": "architecture",
+    "bug": "bug-risk",
+    "bug-risk": "bug-risk",
+    "bugrisk": "bug-risk",
+    "dep": "dependency",
+    "dependency": "dependency",
+    "dependencies": "dependency",
+    "deps": "dependency",
+    "maint": "maintainability",
+    "maintainability": "maintainability",
+    "perf": "performance",
+    "performance": "performance",
+    "sec": "security",
+    "security": "security",
+    "test": "tests",
+    "testing": "tests",
+    "tests": "tests",
+}
+
 
 def normalize_review_dimension(value: str | None) -> str | None:
     """Normalize a role name or display label to a review dimension key."""
@@ -147,9 +172,19 @@ def normalize_review_dimension(value: str | None) -> str | None:
     simplified = raw.replace("_", "-")
     if simplified in ALL_REVIEW_ROLES:
         return simplified
+    dashed = " ".join(simplified.split()).replace(" ", "-")
+    for alias, dimension in sorted(
+        _DIMENSION_PREFIX_ALIASES.items(),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    ):
+        if dashed == alias or dashed.startswith(f"{alias}-"):
+            return dimension
     for key, role in ALL_REVIEW_ROLES.items():
         label = role.label.strip().lower()
         short_label = label.removesuffix(" reviewer").strip()
+        dashed_label = " ".join(label.split()).replace(" ", "-")
+        dashed_short_label = " ".join(short_label.split()).replace(" ", "-")
         if (
             raw == label
             or raw == short_label
@@ -157,9 +192,25 @@ def normalize_review_dimension(value: str | None) -> str | None:
             or raw.startswith(label + " ")
             or raw.startswith(short_label + " review ")
             or raw.startswith(short_label + " reviewer ")
+            or dashed == dashed_label
+            or dashed == dashed_short_label
+            or dashed.startswith(dashed_label + "-")
+            or dashed.startswith(dashed_short_label + "-review-")
+            or dashed.startswith(dashed_short_label + "-reviewer-")
         ):
             return key
     return None
+
+
+@dataclass(frozen=True, slots=True)
+class LocalReviewScope:
+    """Resolved local review boundary derived from the requested target."""
+
+    kind: ReviewScopeKind
+    review_root: str
+    scope_paths: list[str] = field(default_factory=list)
+    target_path: str | None = None
+    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +228,7 @@ class ReviewPlan:
     pr_number: int | None = None
     target_paths: list[str] = field(default_factory=list)
     target_ref: str | None = None
+    local_scope: LocalReviewScope | None = None
     prefetch_summary: str | None = None
 
 
@@ -284,7 +336,12 @@ class ReviewEvidenceProvider(Protocol):
     """Structural protocol for evidence retrieval used by prefetch and loop."""
 
     async def local_context(
-        self, *, review_query: str | None, max_results: int, include_tests: bool | None
+        self,
+        *,
+        review_query: str | None,
+        max_results: int,
+        include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str: ...
 
     async def local_changed_context(
@@ -294,6 +351,7 @@ class ReviewEvidenceProvider(Protocol):
         target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str: ...
 
     async def local_targeted_context(
@@ -303,6 +361,7 @@ class ReviewEvidenceProvider(Protocol):
         target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
+        local_scope: LocalReviewScope | None = None,
     ) -> str: ...
 
     async def github_context(
@@ -342,5 +401,6 @@ class ReviewEvidenceProvider(Protocol):
         review_query: str | None = None,
         max_results: int = 5,
         include_tests: bool | None = None,
+        local_scope: LocalReviewScope | None = None,
         trace_id: str = "",
     ) -> str: ...

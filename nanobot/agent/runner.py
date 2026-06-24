@@ -12,7 +12,7 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.lifecycle_hook import AgentHook, AgentHookContext
+from nanobot.agent.hooks.lifecycle import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.violation_classifier import classify_violation
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -102,7 +102,7 @@ class AgentRunResult:
     usage: dict[str, int] = field(default_factory=dict)
     stop_reason: str = "completed"
     error: str | None = None
-    tool_events: list[dict[str, str]] = field(default_factory=list)
+    tool_events: list[dict[str, Any]] = field(default_factory=list)
     had_injections: bool = False
     content_replaced: bool = False
 
@@ -258,7 +258,7 @@ class AgentRunner:
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0}
         error: str | None = None
         stop_reason = "completed"
-        tool_events: list[dict[str, str]] = []
+        tool_events: list[dict[str, Any]] = []
         external_lookup_counts: dict[str, int] = {}
         # Per-turn throttle for repeated attempts against the same outside target.
         workspace_violation_counts: dict[str, int] = {}
@@ -466,15 +466,19 @@ class AgentRunner:
                 )
 
             # Check for mid-turn injections BEFORE signaling stream end.
-            # If injections are found we keep the stream alive (resuming=True)
-            # so streaming channels don't prematurely finalize the card.
-            should_continue, injection_cycles = await self._try_drain_injections(
-                spec, messages, assistant_message, injection_cycles,
-                phase="after final response",
-                iteration=iteration,
-            )
-            if should_continue:
-                had_injections = True
+            # If a hook replaced the content with a terminal system report,
+            # that report is authoritative for the turn and must not be
+            # overwritten by follow-up coordinator prose.
+            if context.content_replaced:
+                should_continue = False
+            else:
+                should_continue, injection_cycles = await self._try_drain_injections(
+                    spec, messages, assistant_message, injection_cycles,
+                    phase="after final response",
+                    iteration=iteration,
+                )
+                if should_continue:
+                    had_injections = True
 
             if hook.wants_streaming():
                 await hook.on_stream_end(context, resuming=should_continue)
@@ -905,12 +909,16 @@ class AgentRunner:
             return result + hint, event, None
 
         detail = "" if result is None else str(result)
+        raw_result = detail if tool_call.name == "review_submit" else None
         detail = detail.replace("\n", " ").strip()
         if not detail:
             detail = "(empty)"
         elif len(detail) > 120:
             detail = detail[:120] + "..."
-        return result, {"name": tool_call.name, "status": "ok", "detail": detail}, None
+        event: dict[str, Any] = {"name": tool_call.name, "status": "ok", "detail": detail}
+        if raw_result is not None:
+            event["raw_result"] = raw_result
+        return result, event, None
 
     async def _emit_checkpoint(
         self,

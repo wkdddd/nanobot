@@ -298,7 +298,23 @@ function formatReviewPrefetchEvent(event: ToolProgressEvent): string | null {
     ? event.metadata as Record<string, unknown>
     : {};
   if (event.phase === "start") {
-    return `Preparing review context: ${action} / ${targetType}`;
+    const scopeKind = typeof metadata.scope_kind === "string" && metadata.scope_kind
+      ? ` / ${metadata.scope_kind}`
+      : "";
+    return `Preparing review context: ${action} / ${targetType}${scopeKind}`;
+  }
+  if (event.phase === "progress") {
+    const current = typeof metadata.current === "number" ? metadata.current : null;
+    const total = typeof metadata.total === "number" ? metadata.total : null;
+    if (current !== null && total !== null && total > 0) {
+      return `Preparing review context: ${current}/${total}`;
+    }
+    const batch = typeof metadata.batch === "number" ? metadata.batch : null;
+    const batches = typeof metadata.batches === "number" ? metadata.batches : null;
+    if (batch !== null && batches !== null && batches > 0) {
+      return `Embedding review context: ${batch}/${batches}`;
+    }
+    return "Preparing review context...";
   }
   if (event.phase === "end") {
     const elapsed = formatElapsed(metadata.elapsed_ms);
@@ -913,6 +929,27 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
           reportMessageRef.current = null;
           textMessageRef.current = null;
           const messages = markAllStreamingComplete(prev.messages);
+          const missingReviewReport = !!prev.task
+            && isBusyPhase(prev.phase)
+            && !prev.reportMarkdown
+            && !messages.some((message) => message.type === "report" && message.content.trim());
+          if (missingReviewReport) {
+            return {
+              ...prev,
+              phase: "error",
+              error: "Review report was not received.",
+              messages: [
+                ...messages,
+                {
+                  id: generateId(),
+                  role: "agent",
+                  type: "text",
+                  content: "Error: review report was not received.",
+                  timestamp: Date.now(),
+                },
+              ],
+            };
+          }
           const phase = completedOrStoppedPhase(messages);
           return {
             ...prev,

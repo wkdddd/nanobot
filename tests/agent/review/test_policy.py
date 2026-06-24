@@ -1,4 +1,4 @@
-from nanobot.agent.review.policy import apply_policy_to_roles, policy_for_depth
+from nanobot.agent.review.beforeplan import apply_policy_to_roles, policy_for_depth
 from nanobot.agent.review.types import ALL_REVIEW_ROLES
 
 
