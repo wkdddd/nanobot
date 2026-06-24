@@ -39,7 +39,6 @@ async def test_prefetch_calls_review_evidence_service_and_compacts_evidence() ->
         forced_focus=False,
         max_subagents=1,
         user_requirements="review auth",
-        target_paths=["src/auth.py"],
     )
 
     summary = await maybe_prefetch_review_context(
@@ -49,7 +48,6 @@ async def test_prefetch_calls_review_evidence_service_and_compacts_evidence() ->
 
     assert evidence_service.calls
     assert evidence_service.calls[0]["review_query"] == "review auth"
-    assert evidence_service.calls[0]["target_paths"] == ["src/auth.py"]
     assert "local_scope" in evidence_service.calls[0]
     assert evidence_service.calls[0]["target_type"] == "local"
     assert evidence_service.calls[0]["action"] == "repo"
@@ -78,7 +76,6 @@ async def test_prefetch_emits_progress_events() -> None:
         forced_focus=False,
         max_subagents=1,
         user_requirements="review auth",
-        target_paths=["src/auth.py"],
     )
 
     await maybe_prefetch_review_context(
@@ -126,7 +123,8 @@ def test_github_blob_url_becomes_scoped_review_plan() -> None:
     assert plan is not None
     assert plan.target_repo == "wkdddd/nanobot"
     assert plan.target_ref == "main"
-    assert plan.target_paths == ["review-webui/index.html"]
+    assert plan.target_subpath == "review-webui/index.html"
+    assert plan.target_subpath_kind == "blob"
 
 
 def test_local_file_target_becomes_file_scope(tmp_path) -> None:
@@ -146,7 +144,7 @@ def test_local_file_target_becomes_file_scope(tmp_path) -> None:
     assert isinstance(plan.local_scope, LocalReviewScope)
     assert plan.local_scope.kind == "file"
     assert plan.local_scope.review_root == str(target.parent)
-    assert plan.target_paths == ["auth.py"]
+    assert plan.local_scope.scope_paths == ["auth.py"]
 
 
 async def test_prefetch_passes_github_blob_scope_and_ref() -> None:
@@ -170,4 +168,5 @@ async def test_prefetch_passes_github_blob_scope_and_ref() -> None:
     assert call["target_type"] == "github"
     assert call["repo"] == "wkdddd/nanobot"
     assert call["ref"] == "main"
-    assert call["target_paths"] == ["review-webui/index.html"]
+    assert call["target_subpath"] == "review-webui/index.html"
+    assert call["target_subpath_kind"] == "blob"

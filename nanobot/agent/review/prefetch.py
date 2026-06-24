@@ -137,7 +137,7 @@ async def maybe_prefetch_review_context(
     policy = policy_for_depth(plan.depth, requested_max_subagents=plan.max_subagents)
     query = plan.user_requirements or "code review security architecture tests performance entry points config"
     logger.info(
-        "review.prefetch.start trace_id={} action={} target_type={} target={} target_repo={} scope_kind={} review_root={} paths_count={} query_chars={} max_results={}",
+        "review.prefetch.start trace_id={} action={} target_type={} target={} target_repo={} scope_kind={} review_root={} target_subpath={} query_chars={} max_results={}",
         trace_id,
         plan.action.value,
         plan.target_type,
@@ -145,7 +145,7 @@ async def maybe_prefetch_review_context(
         plan.target_repo,
         plan.local_scope.kind if plan.local_scope else "",
         plan.local_scope.review_root if plan.local_scope else "",
-        len(plan.target_paths),
+        plan.target_subpath or "",
         len(query),
         policy.evidence_max_results,
     )
@@ -159,7 +159,8 @@ async def maybe_prefetch_review_context(
         metadata={
             "scope_kind": plan.local_scope.kind if plan.local_scope else None,
             "review_root": plan.local_scope.review_root if plan.local_scope else None,
-            "scope_paths_count": len(plan.local_scope.scope_paths) if plan.local_scope else len(plan.target_paths),
+            "scope_paths_count": len(plan.local_scope.scope_paths) if plan.local_scope else 0,
+            "target_subpath": plan.target_subpath,
         },
     )
     try:
@@ -170,7 +171,8 @@ async def maybe_prefetch_review_context(
             repo=(plan.target_repo or plan.target or "").strip(),
             ref=plan.target_ref,
             pr_number=plan.pr_number or 0,
-            target_paths=plan.target_paths or None,
+            target_subpath=plan.target_subpath,
+            target_subpath_kind=plan.target_subpath_kind,
             review_query=query,
             max_results=policy.evidence_max_results,
             include_tests=True,

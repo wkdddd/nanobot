@@ -94,9 +94,6 @@ class AutoTaskStore:
             focus=[str(item).strip() for item in payload.get("focus", []) if str(item).strip()]
             if isinstance(payload.get("focus"), list)
             else None,
-            target_paths=[str(item).strip() for item in payload.get("target_paths", []) if str(item).strip()]
-            if isinstance(payload.get("target_paths"), list)
-            else [],
             max_subagents=int(payload["max_subagents"]) if payload.get("max_subagents") is not None else None,
             created_at=now,
             updated_at=now,
@@ -126,7 +123,7 @@ class AutoTaskStore:
                 rows.append(item)
                 continue
             next_item = dict(item)
-            for key in ("name", "enabled", "mode", "focus", "target_paths", "max_subagents"):
+            for key in ("name", "enabled", "mode", "focus", "max_subagents"):
                 if key in payload:
                     next_item[key] = payload[key]
             if "repo" in payload:

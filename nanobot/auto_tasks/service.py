@@ -152,7 +152,6 @@ class AutoTaskService:
                     "action": "diff",
                     "mode": self._resolve_mode(task),
                     "focus": self._resolve_focus(task),
-                    "target_paths": list(task.target_paths),
                     "content": f"Auto review GitHub PR #{event.pr_number}: {event.pr_title}".strip(),
                     "metadata": {
                         "auto_task_id": task.id,

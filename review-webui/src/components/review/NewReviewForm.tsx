@@ -13,7 +13,6 @@ export interface NewReviewSubmit {
   action: ReviewAction;
   depth: ReviewDepth;
   focus: ReviewFocus[];
-  targetPaths: string;
 }
 
 export interface NewReviewFormProps {
@@ -21,7 +20,6 @@ export interface NewReviewFormProps {
   submitting: boolean;
   defaultDepth?: ReviewDepth;
   defaultFocus?: ReviewFocus[];
-  defaultTargetPaths?: string;
 }
 
 const ACTION_OPTIONS = [
@@ -83,13 +81,11 @@ export function NewReviewForm({
   submitting,
   defaultDepth = "full",
   defaultFocus = [],
-  defaultTargetPaths = "",
 }: NewReviewFormProps) {
   const [target, setTarget] = useState("");
   const [action, setAction] = useState<ReviewAction>("repo");
   const [depth, setDepth] = useState<ReviewDepth>(defaultDepth);
   const [focus, setFocus] = useState<ReviewFocus[]>(defaultFocus);
-  const [targetPaths, setTargetPaths] = useState(defaultTargetPaths);
   const [error, setError] = useState<string | null>(null);
   const trimmedTarget = target.trim();
   const isGithubTarget = GITHUB_URL_RE.test(trimmedTarget);
@@ -98,8 +94,7 @@ export function NewReviewForm({
   useEffect(() => {
     setDepth(defaultDepth);
     setFocus(defaultFocus);
-    setTargetPaths(defaultTargetPaths);
-  }, [defaultDepth, defaultFocus, defaultTargetPaths]);
+  }, [defaultDepth, defaultFocus]);
 
   useEffect(() => {
     if (isGithubPrTarget && action !== "diff") {
@@ -122,9 +117,8 @@ export function NewReviewForm({
       action: effectiveAction,
       depth,
       focus,
-      targetPaths: targetPaths.trim(),
     });
-  }, [trimmedTarget, submitting, isGithubPrTarget, action, isGithubTarget, depth, focus, targetPaths, onSubmit]);
+  }, [trimmedTarget, submitting, isGithubPrTarget, action, isGithubTarget, depth, focus, onSubmit]);
 
   const handleTargetChange = useCallback((value: string) => {
     setTarget(value);
@@ -188,8 +182,6 @@ export function NewReviewForm({
                 onDepthChange={setDepth}
                 focus={focus}
                 onFocusChange={setFocus}
-                targetPaths={targetPaths}
-                onTargetPathsChange={setTargetPaths}
               />
 
               <Separator className="bg-border/50" />

@@ -102,9 +102,6 @@ def _review_mode_payload(meta: dict[str, Any]) -> dict[str, Any]:
         payload["focus"] = focus
     elif isinstance(focus, str) and focus.strip():
         payload["focus"] = [item.strip() for item in focus.split(",") if item.strip()]
-    paths = meta.get("review_target_paths")
-    if isinstance(paths, list):
-        payload["target_paths"] = [str(item) for item in paths if str(item).strip()]
     return payload
 
 
@@ -114,7 +111,6 @@ def _clear_review_metadata(meta: dict[str, Any]) -> None:
         "review_target_type",
         "review_focus",
         "review_action",
-        "review_target_paths",
         "review_mode_variant",
         "review_mode_name",
         "review_max_subagents",
@@ -1484,8 +1480,6 @@ class WebSocketChannel(BaseChannel):
             mode = "full"
         focus_raw = payload.get("focus")
         focus = [str(item).strip() for item in focus_raw if str(item).strip()] if isinstance(focus_raw, list) else []
-        paths_raw = payload.get("target_paths")
-        target_paths = [str(item).strip() for item in paths_raw if str(item).strip()] if isinstance(paths_raw, list) else []
         extra_meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
 
         session = self._session_manager.get_or_create(session_key)
@@ -1501,8 +1495,6 @@ class WebSocketChannel(BaseChannel):
         )
         if focus:
             session.metadata["review_focus"] = focus
-        if target_paths:
-            session.metadata["review_target_paths"] = target_paths
         self._session_manager.save(session)
         if isinstance(extra_meta.get("auto_task_run_id"), str):
             log_event(
@@ -1529,8 +1521,6 @@ class WebSocketChannel(BaseChannel):
         }
         if focus:
             metadata["review_focus"] = focus
-        if target_paths:
-            metadata["review_target_paths"] = target_paths
 
         content = str(payload.get("content") or "Review").strip() or "Review"
         await self._handle_message(
@@ -1567,8 +1557,7 @@ class WebSocketChannel(BaseChannel):
                 review_mode_variant = str(dup.get("review_mode_variant") or "").strip()
                 review_action = str(dup.get("review_action") or "").strip()
                 review_focus = dup.get("review_focus")
-                review_target_paths = dup.get("review_target_paths")
-                if review_target or review_target_type or review_mode_variant or review_action or review_focus or review_target_paths:
+                if review_target or review_target_type or review_mode_variant or review_action or review_focus:
                     review: dict[str, Any] = {}
                     if review_target:
                         review["target"] = review_target
@@ -1580,8 +1569,6 @@ class WebSocketChannel(BaseChannel):
                         review["action"] = review_action
                     if isinstance(review_focus, list):
                         review["focus"] = review_focus
-                    if isinstance(review_target_paths, list):
-                        review["target_paths"] = review_target_paths
                     dup["review"] = review
             append_transcript_object(sk, dup)
         except (OSError, ValueError, TypeError) as e:
@@ -1634,8 +1621,6 @@ class WebSocketChannel(BaseChannel):
                 user_obj["review_action"] = review_action
             if isinstance(meta.get("review_focus"), list):
                 user_obj["review_focus"] = meta["review_focus"]
-            if isinstance(meta.get("review_target_paths"), list):
-                user_obj["review_target_paths"] = meta["review_target_paths"]
             self._try_append_webui_transcript(chat_id, user_obj)
         await super()._handle_message(
             sender_id,
@@ -2562,14 +2547,12 @@ class WebSocketChannel(BaseChannel):
             raw_review_mode_variant = envelope.get("review_mode_variant")
             raw_review_action = envelope.get("review_action")
             raw_review_focus = envelope.get("review_focus")
-            raw_review_target_paths = envelope.get("review_target_paths")
             has_review_payload = (
                 isinstance(raw_review_target, str)
                 or isinstance(raw_review_target_type, str)
                 or isinstance(raw_review_mode_variant, str)
                 or isinstance(raw_review_action, str)
                 or isinstance(raw_review_focus, list)
-                or isinstance(raw_review_target_paths, list)
             )
             normalized_review_action: str | None = None
             if isinstance(raw_review_action, str):
@@ -2614,12 +2597,6 @@ class WebSocketChannel(BaseChannel):
                         session.metadata["review_focus"] = focus
                     else:
                         session.metadata.pop("review_focus", None)
-                if isinstance(raw_review_target_paths, list):
-                    paths = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
-                    if paths:
-                        session.metadata["review_target_paths"] = paths
-                    else:
-                        session.metadata.pop("review_target_paths", None)
                 target_type = normalize_review_target_type(
                     raw_review_target_type if isinstance(raw_review_target_type, str) else None,
                     session.metadata.get("review_target"),
@@ -2642,18 +2619,15 @@ class WebSocketChannel(BaseChannel):
                 metadata["review_action"] = normalized_review_action
             if isinstance(raw_review_focus, list):
                 metadata["review_focus"] = [str(item).strip() for item in raw_review_focus if str(item).strip()]
-            if isinstance(raw_review_target_paths, list):
-                metadata["review_target_paths"] = [str(item).strip() for item in raw_review_target_paths if str(item).strip()]
             if has_review_payload:
                 logger.info(
-                    "ws.review.request cid={} webui={} target_type={} mode={} action={} focus_count={} paths_count={} content_chars={} media_count={}",
+                    "ws.review.request cid={} webui={} target_type={} mode={} action={} focus_count={} content_chars={} media_count={}",
                     cid,
                     envelope.get("webui") is True,
                     raw_review_target_type if isinstance(raw_review_target_type, str) else "",
                     raw_review_mode_variant if isinstance(raw_review_mode_variant, str) else "",
                     normalized_review_action or "",
                     len(metadata.get("review_focus", [])) if isinstance(metadata.get("review_focus"), list) else 0,
-                    len(metadata.get("review_target_paths", [])) if isinstance(metadata.get("review_target_paths"), list) else 0,
                     len(content),
                     len(media_paths),
                 )

@@ -27,7 +27,6 @@ import {
 } from "@/lib/bootstrap";
 import { fetchSessionMessages, fetchWebuiThread } from "@/lib/api";
 import { NanobotClient } from "@/lib/nanobot-client";
-import { parseTargetPathsText } from "@/lib/target-paths";
 import type {
   ChatSummary,
   ConnectionStatus,
@@ -53,7 +52,6 @@ type BootState =
 const DEFAULT_SETTINGS: ReviewSettings = {
   defaultDepth: "full",
   defaultFocus: [],
-  defaultTargetPaths: "",
 };
 
 function exportMarkdown(reportMarkdown: string, target: string) {
@@ -81,7 +79,6 @@ function reviewTaskFromSubmit(submit: NewReviewSubmit): ReviewTask {
     action: submit.action,
     depth: submit.depth,
     focus: submit.focus,
-    targetPaths: parseTargetPathsText(submit.targetPaths),
   };
 }
 
@@ -94,7 +91,6 @@ function taskFromHistory(session: ChatSummary | null, messages: UIMessage[]): Re
       action: review.action,
       depth: review.mode,
       focus: review.focus,
-      targetPaths: review.target_paths,
     };
   }
   const target = session?.title || session?.preview;
@@ -509,7 +505,6 @@ function ReviewAppShell({
           target_type: task.targetType,
           action: task.action ?? "repo",
           focus: task.focus,
-          target_paths: task.targetPaths,
         },
       });
       void refresh();
@@ -597,7 +592,6 @@ function ReviewAppShell({
               <NewReviewForm
                 defaultDepth={settings.defaultDepth}
                 defaultFocus={settings.defaultFocus}
-                defaultTargetPaths={settings.defaultTargetPaths}
                 onSubmit={handleSubmitReview}
                 submitting={state.phase === "submitting"}
               />

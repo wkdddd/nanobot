@@ -324,7 +324,6 @@ def replay_transcript_to_ui_messages(
                     "mode": rec.get("review_mode_variant"),
                     "action": rec.get("review_action"),
                     "focus": rec.get("review_focus"),
-                    "target_paths": rec.get("review_target_paths"),
                 }
             if isinstance(review, dict):
                 review_target = review.get("target")
@@ -332,7 +331,6 @@ def replay_transcript_to_ui_messages(
                 review_mode = review.get("mode")
                 review_action = review.get("action")
                 review_focus = review.get("focus")
-                review_target_paths = review.get("target_paths")
                 review_row: dict[str, Any] = {}
                 if isinstance(review_target, str) and review_target.strip():
                     review_row["target"] = review_target.strip()
@@ -346,10 +344,6 @@ def replay_transcript_to_ui_messages(
                     focus = [str(item).strip() for item in review_focus if str(item).strip()]
                     if focus:
                         review_row["focus"] = focus
-                if isinstance(review_target_paths, list):
-                    target_paths = [str(item).strip() for item in review_target_paths if str(item).strip()]
-                    if target_paths:
-                        review_row["target_paths"] = target_paths
                 if review_row:
                     row["review"] = review_row
             if media_att:

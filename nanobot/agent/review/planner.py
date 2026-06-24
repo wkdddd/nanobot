@@ -18,7 +18,6 @@ from nanobot.agent.review.beforeplan import (
     normalize_review_action,
     normalize_review_target_type,
     parse_repo_target,
-    parse_target_paths,
     policy_for_depth,
 )
 from nanobot.agent.review.types import (
@@ -34,6 +33,8 @@ from nanobot.agent.review.utils import (
 )
 from nanobot.session.manager import Session
 
+_LEGACY_REVIEW_SCOPE_KEY = "review_" "target_" "paths"
+
 
 def _find_git_root(path: Path) -> Path | None:
     current = path if path.is_dir() else path.parent
@@ -47,79 +48,44 @@ def _relative_posix(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
 
 
-def _normalize_target_paths_for_scope(raw_paths: list[str], *, review_root: Path) -> tuple[list[str], str]:
-    normalized: list[str] = []
-    for raw in raw_paths:
-        try:
-            candidate = Path(raw).expanduser()
-            resolved = candidate.resolve() if candidate.is_absolute() else (review_root / candidate).resolve()
-            rel = _relative_posix(resolved, review_root)
-        except (OSError, ValueError) as exc:
-            return [], f"target_path_outside_review_root:{raw}:{exc}"
-        if rel.startswith("../") or rel == "..":
-            return [], f"target_path_outside_review_root:{raw}"
-        normalized.append(rel)
-    return list(dict.fromkeys(normalized)), ""
-
-
-def _resolve_local_scope(target: str | None, target_paths: list[str]) -> tuple[LocalReviewScope | None, list[str], str]:
+def _resolve_local_scope(target: str | None) -> tuple[LocalReviewScope | None, str]:
     if not target:
-        return None, target_paths, "missing_target"
+        return None, "missing_target"
     try:
         resolved_target = Path(target).expanduser().resolve()
     except OSError as exc:
-        return None, target_paths, f"target_resolve_failed:{exc}"
+        return None, f"target_resolve_failed:{exc}"
     if not resolved_target.exists():
-        return None, target_paths, "target_not_found"
+        return None, "target_not_found"
 
     if resolved_target.is_file():
         git_root = _find_git_root(resolved_target)
         review_root = git_root or resolved_target.parent
         inferred_paths = [_relative_posix(resolved_target, review_root)]
-        if target_paths:
-            scoped_paths, reason = _normalize_target_paths_for_scope(target_paths, review_root=review_root)
-            if reason:
-                return None, [], reason
-            final_paths = scoped_paths
-        else:
-            final_paths = inferred_paths
         return (
             LocalReviewScope(
                 kind="file",
                 review_root=str(review_root),
-                scope_paths=final_paths,
+                scope_paths=inferred_paths,
                 target_path=_relative_posix(resolved_target, review_root),
                 reason="file_target",
             ),
-            final_paths,
             "file_target",
         )
 
     if resolved_target.is_dir():
         review_root = resolved_target
-        if target_paths:
-            scoped_paths, reason = _normalize_target_paths_for_scope(target_paths, review_root=review_root)
-            if reason:
-                return None, [], reason
-            scope_paths = scoped_paths
-            kind = "directory"
-            reason = "directory_target_with_paths"
-        else:
-            scope_paths = []
-            kind = "directory"
-            reason = "directory_target"
         return (
             LocalReviewScope(
-                kind=kind,
+                kind="directory",
                 review_root=str(review_root),
-                scope_paths=scope_paths,
+                scope_paths=[],
                 target_path=".",
-                reason=reason,
+                reason="directory_target",
             ),
-            scope_paths,
-            reason,
+            "directory_target",
         )
-    return None, target_paths, "target_not_file_or_directory"
+    return None, "target_not_file_or_directory"
 
 
 def _resolve_action(
@@ -127,7 +93,6 @@ def _resolve_action(
     requested: ReviewAction,
     target: str | None,
     target_type: ReviewTargetType,
-    target_paths: list[str],
     user_content: str,
 ) -> ReviewAction:
     pr_repo, _ = parse_pr_target(target)
@@ -145,7 +110,6 @@ def build_review_plan(
     max_subagents: Any = 4,
     target_type: str | None = None,
     action: str | None = None,
-    target_paths: Any = None,
     target_ref: str | None = None,
     prefetch_summary: str | None = None,
 ) -> ReviewPlan | None:
@@ -157,11 +121,6 @@ def build_review_plan(
         extracted = extract_review_target(user_content)
         if extracted:
             target, target_name = extracted
-
-    paths = parse_target_paths(target_paths)
-    if not target and paths:
-        target = paths[0]
-        target_name = target
 
     if not target:
         logger.info(
@@ -181,24 +140,25 @@ def build_review_plan(
         requested=requested_action,
         target=target,
         target_type=target_type_value,
-        target_paths=paths,
         user_content=user_content,
     )
     target_repo, pr_number = parse_pr_target(target)
     normalized_ref: str | None = target_ref.strip() if isinstance(target_ref, str) and target_ref.strip() else None
+    target_subpath: str | None = None
+    target_subpath_kind: str | None = None
     scoped_target = parse_github_scoped_target(target)
     if scoped_target is not None and target_type_value == "github":
         target_repo = scoped_target.repo
         normalized_ref = scoped_target.ref
-        if scoped_target.path and scoped_target.path not in paths:
-            paths.append(scoped_target.path)
+        target_subpath = scoped_target.path
+        target_subpath_kind = scoped_target.kind
     if target_repo is None and target_type_value == "github":
         target_repo = parse_repo_target(target)
 
     local_scope: LocalReviewScope | None = None
     scope_reason = ""
     if target_type_value == "local":
-        local_scope, paths, scope_reason = _resolve_local_scope(target, paths)
+        local_scope, scope_reason = _resolve_local_scope(target)
 
     try:
         max_subagents_int = int(max_subagents)
@@ -223,25 +183,26 @@ def build_review_plan(
         user_requirements=user_content.strip(),
         target_repo=target_repo,
         pr_number=pr_number,
-        target_paths=paths,
         target_ref=normalized_ref,
+        target_subpath=target_subpath,
+        target_subpath_kind=target_subpath_kind,
         local_scope=local_scope,
         prefetch_summary=prefetch_summary,
     )
     logger.info(
-        "review.plan.done trace_id={} action={} target_type={} scope_kind={} scope_reason={} review_root={} forced_focus={} requested_focus={} roles={} allowed_dimensions={} user_requirements={} paths_count={} elapsed_ms={:.1f}",
+        "review.plan.done trace_id={} action={} target_type={} scope_kind={} scope_reason={} review_root={} target_subpath={} forced_focus={} requested_focus={} roles={} allowed_dimensions={} user_requirements={} elapsed_ms={:.1f}",
         trace_id,
         plan.action.value,
         plan.target_type,
         plan.local_scope.kind if plan.local_scope else "",
         scope_reason,
         plan.local_scope.review_root if plan.local_scope else "",
+        plan.target_subpath or "",
         plan.forced_focus,
         focus,
         [role.name for role in plan.roles],
         [role.name for role in plan.roles],
         plan.user_requirements,
-        len(plan.target_paths),
         (time.perf_counter() - started) * 1000,
     )
     return plan
@@ -289,12 +250,11 @@ async def resolve_code_review_context(
         max_subagents=session_meta.get(ReviewMetaKey.MAX_SUBAGENTS) or 4,
         target_type=session_meta.get(ReviewMetaKey.TARGET_TYPE) if isinstance(session_meta.get(ReviewMetaKey.TARGET_TYPE), str) else None,
         action=session_meta.get(ReviewMetaKey.ACTION) if isinstance(session_meta.get(ReviewMetaKey.ACTION), str) else None,
-        target_paths=session_meta.get(ReviewMetaKey.TARGET_PATHS),
         target_ref=session_meta.get(ReviewMetaKey.TARGET_REF) if isinstance(session_meta.get(ReviewMetaKey.TARGET_REF), str) else None,
     )
     if plan is None:
         return build_review_fallback_prompt()
-    session_meta[ReviewMetaKey.TARGET_PATHS] = list(plan.target_paths)
+    session_meta.pop(_LEGACY_REVIEW_SCOPE_KEY, None)
     if plan.local_scope:
         session_meta[ReviewMetaKey.LOCAL_ROOT] = plan.local_scope.review_root
         local_root = Path(plan.local_scope.review_root)
@@ -346,7 +306,6 @@ def build_code_review_context(
     max_subagents: int = 4,
     target_type: str | None = None,
     action: str | None = None,
-    target_paths: Any = None,
     target_ref: str | None = None,
 ) -> str:
     from nanobot.agent.review.prompt import build_review_fallback_prompt, render_review_prompt
@@ -359,7 +318,6 @@ def build_code_review_context(
         max_subagents=max_subagents,
         target_type=target_type,
         action=action,
-        target_paths=target_paths,
         target_ref=target_ref,
     )
     if plan is None:
@@ -380,7 +338,6 @@ def apply_review_metadata_from_message(
         ReviewMetaKey.MODE_VARIANT,
         ReviewMetaKey.ACTION,
         ReviewMetaKey.FOCUS,
-        ReviewMetaKey.TARGET_PATHS,
         ReviewMetaKey.TARGET_REF,
     )
     if not any(key in metadata for key in keys):
@@ -429,11 +386,7 @@ def apply_review_metadata_from_message(
     if isinstance(raw_focus, (str, list)):
         _set_meta(ReviewMetaKey.FOCUS, raw_focus)
 
-    paths = parse_target_paths(metadata.get(ReviewMetaKey.TARGET_PATHS))
-    if paths:
-        _set_meta(ReviewMetaKey.TARGET_PATHS, paths)
-    elif ReviewMetaKey.TARGET_PATHS in metadata:
-        _pop_meta(ReviewMetaKey.TARGET_PATHS)
+    _pop_meta(_LEGACY_REVIEW_SCOPE_KEY)
 
     raw_ref = metadata.get(ReviewMetaKey.TARGET_REF)
     if isinstance(raw_ref, str) and raw_ref.strip():

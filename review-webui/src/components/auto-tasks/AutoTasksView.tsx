@@ -11,7 +11,6 @@ import {
   X,
 } from "lucide-react";
 import { autoTaskReportUrl } from "@/lib/api";
-import { parseTargetPathsText } from "@/lib/target-paths";
 import { cn } from "@/lib/utils";
 import type { AutoTask, AutoTaskPayload, AutoTaskRun, ReviewDepth, ReviewFocus } from "@/lib/types";
 import { useClient } from "@/providers/ClientProvider";
@@ -49,7 +48,6 @@ function TaskForm({
   const [repo, setRepo] = useState("");
   const [mode, setMode] = useState<ReviewDepth>("full");
   const [focus, setFocus] = useState<ReviewFocus[]>([]);
-  const [targetPaths, setTargetPaths] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [repoError, setRepoError] = useState<string | null>(null);
 
@@ -65,13 +63,11 @@ function TaskForm({
       enabled,
       mode,
       focus: focus.length ? focus : null,
-      target_paths: parseTargetPathsText(targetPaths),
     });
     setName("");
     setRepo("");
     setMode("full");
     setFocus([]);
-    setTargetPaths("");
     setEnabled(true);
     setRepoError(null);
   };
@@ -136,8 +132,6 @@ function TaskForm({
             onDepthChange={setMode}
             focus={focus}
             onFocusChange={setFocus}
-            targetPaths={targetPaths}
-            onTargetPathsChange={setTargetPaths}
           />
         </div>
       </div>

@@ -89,16 +89,15 @@ def _inspect_instruction(plan: ReviewPlan, tool_name: str) -> str:
     if plan.target_type == "github":
         return (
             "If the Prefetched Evidence Summary says there is no prefetched evidence, first call "
-            f"`{tool_name}` with the ReviewPlan action, target, target paths, and user requirements. "
+            f"`{tool_name}` with the ReviewPlan action, target, and user requirements. "
             "Only use GitHub evidence for GitHub targets; do not fall back to local files."
         )
     return (
-        f"If the Prefetched Evidence Summary says there is no prefetched evidence, first call `{tool_name}` with the ReviewPlan action, target, target paths, and user requirements. Only fall back to direct file reads when that retrieval has no useful result or errors."
+        f"If the Prefetched Evidence Summary says there is no prefetched evidence, first call `{tool_name}` with the ReviewPlan action, target, and user requirements. Only fall back to direct file reads when that retrieval has no useful result or errors."
     )
 
 
 def _action_instruction(plan: ReviewPlan) -> str:
-    scope_suffix = " Limit evidence collection to Target paths when provided." if plan.target_paths else ""
     tool_name = _review_tool_name(plan)
     evidence_ready = bool(plan.prefetch_summary)
     retry_suffix = (
@@ -110,20 +109,17 @@ def _action_instruction(plan: ReviewPlan) -> str:
             "Action repo: review the target repository, directory, file, or selected scope as complete content. "
             f"If there is no prefetched evidence summary, call {tool_name}(action='repo', ...) before spawning reviewers."
             + retry_suffix
-            + scope_suffix
         )
     if plan.action == ReviewAction.DIFF and plan.target_type == "github":
         return (
             "Action diff: review the GitHub pull request changes. Focus on changed files, changed lines, "
             "regressions, and related tests."
-            + scope_suffix
         )
     if plan.action == ReviewAction.DIFF:
         return (
             "Action diff: review current local git changes, including unstaged, staged, and untracked text files. "
             f"If there is no prefetched evidence summary, call {tool_name}(action='diff', ...) before spawning reviewers."
             + retry_suffix
-            + scope_suffix
         )
     return "Action repo: review the target scope as complete content."
 
@@ -155,6 +151,8 @@ def _target_lines(plan: ReviewPlan) -> str:
     ]
     if plan.target_repo:
         lines.append(f"- GitHub repo: {plan.target_repo}")
+    if plan.target_subpath:
+        lines.append(f"- GitHub target path: {plan.target_subpath}")
     if plan.pr_number:
         lines.append(f"- Pull request: {plan.pr_number}")
     if plan.local_scope:
@@ -162,9 +160,6 @@ def _target_lines(plan: ReviewPlan) -> str:
         lines.append(f"- Local review root: {plan.local_scope.review_root}")
         if plan.local_scope.target_path:
             lines.append(f"- Local target path: {plan.local_scope.target_path}")
-    if plan.target_paths:
-        lines.append("- Target paths:")
-        lines.extend(f"  - {path}" for path in plan.target_paths[:40])
     return "\n".join(lines)
 
 

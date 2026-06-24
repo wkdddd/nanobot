@@ -17,7 +17,6 @@ class ReviewMetaKey:
     MODE_VARIANT = "review_mode_variant"
     ACTION = "review_action"
     FOCUS = "review_focus"
-    TARGET_PATHS = "review_target_paths"
     TARGET_REF = "review_target_ref"
     LOCAL_ROOT = "review_local_root"
     LOCAL_TARGET = "review_local_target"
@@ -226,8 +225,9 @@ class ReviewPlan:
     user_requirements: str = ""
     target_repo: str | None = None
     pr_number: int | None = None
-    target_paths: list[str] = field(default_factory=list)
     target_ref: str | None = None
+    target_subpath: str | None = None
+    target_subpath_kind: str | None = None
     local_scope: LocalReviewScope | None = None
     prefetch_summary: str | None = None
 
@@ -348,17 +348,6 @@ class ReviewEvidenceProvider(Protocol):
         self,
         *,
         review_query: str | None,
-        target_paths: list[str],
-        max_results: int,
-        include_tests: bool | None,
-        local_scope: LocalReviewScope | None = None,
-    ) -> str: ...
-
-    async def local_targeted_context(
-        self,
-        *,
-        review_query: str | None,
-        target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
         local_scope: LocalReviewScope | None = None,
@@ -381,7 +370,6 @@ class ReviewEvidenceProvider(Protocol):
         *,
         repo: str,
         pr_number: int,
-        target_paths: list[str],
         review_query: str | None,
         max_results: int,
         include_tests: bool | None,
@@ -396,8 +384,9 @@ class ReviewEvidenceProvider(Protocol):
         repo: str = "",
         ref: str | None = None,
         pr_number: int = 0,
-        target_paths: list[str] | None = None,
         tree_pattern: str | None = None,
+        target_subpath: str | None = None,
+        target_subpath_kind: str | None = None,
         review_query: str | None = None,
         max_results: int = 5,
         include_tests: bool | None = None,

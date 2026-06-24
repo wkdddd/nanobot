@@ -999,13 +999,13 @@ Code review mode uses programmatic policies for depth:
 | `full` | Complete review. It covers the standard dimensions and runs hard validation plus AI judge on subagent findings. |
 | `deep` | Strengthened review. It adds optional dimensions, allows more subagents, retrieves more evidence, and runs stricter AI judge cross-checks. |
 
-Local review scope is derived from the requested `target`, not from the
+Local review scope is derived only from the requested `target`, not from the
 Nanobot workspace and not from broad prompt text. A file target reviews that
 file relative to its git root when available, otherwise relative to the file's
-parent directory. A directory target reviews that directory. `targetPaths`
-narrows the resolved review root and is rejected if it escapes that root.
-Repository-wide prefetch happens only when the target itself resolves to that
-repository/root scope.
+parent directory. A directory target reviews that directory. GitHub repository
+targets review the repository, GitHub pull request targets review the pull
+request diff, and GitHub blob/tree URLs are treated as a single target path
+inside the referenced repository/ref.
 
 AI judge can use the active chat model or an independent `modelPresets` entry:
 

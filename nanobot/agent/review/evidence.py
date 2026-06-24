@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -57,8 +56,9 @@ class ReviewEvidenceService:
         repo: str = "",
         ref: str | None = None,
         pr_number: int = 0,
-        target_paths: list[str] | None = None,
         tree_pattern: str | None = None,
+        target_subpath: str | None = None,
+        target_subpath_kind: str | None = None,
         review_query: str | None = None,
         max_results: int = 5,
         include_tests: bool | None = None,
@@ -71,17 +71,6 @@ class ReviewEvidenceService:
                 return await self.github_diff_context(
                     repo=repo,
                     pr_number=pr_number,
-                    target_paths=target_paths or [],
-                    review_query=review_query,
-                    max_results=max_results,
-                    include_tests=include_tests,
-                    trace_id=trace_id,
-                )
-            if target_paths:
-                return await self.github_targeted_context(
-                    repo=repo,
-                    ref=ref,
-                    target_paths=target_paths,
                     review_query=review_query,
                     max_results=max_results,
                     include_tests=include_tests,
@@ -91,6 +80,8 @@ class ReviewEvidenceService:
                 repo=repo,
                 ref=ref,
                 tree_pattern=tree_pattern,
+                target_subpath=target_subpath,
+                target_subpath_kind=target_subpath_kind,
                 review_query=review_query,
                 max_results=max_results,
                 include_tests=include_tests,
@@ -99,15 +90,6 @@ class ReviewEvidenceService:
         if action == "diff":
             return await self.local_changed_context(
                 review_query=review_query,
-                target_paths=target_paths or [],
-                max_results=max_results,
-                include_tests=include_tests,
-                local_scope=local_scope,
-            )
-        if target_paths:
-            return await self.local_targeted_context(
-                review_query=review_query,
-                target_paths=target_paths,
                 max_results=max_results,
                 include_tests=include_tests,
                 local_scope=local_scope,
@@ -136,9 +118,9 @@ class ReviewEvidenceService:
         self,
         rag_service: RepositoryRAGService,
         local_scope: LocalReviewScope | None,
-        target_paths: list[str] | None = None,
+        candidate_paths: list[str] | None = None,
     ) -> list[Path]:
-        scopes = clean_scope_paths(target_paths or [])
+        scopes = clean_scope_paths(candidate_paths or [])
         if not scopes and local_scope is not None:
             scopes = clean_scope_paths(local_scope.scope_paths)
         files: list[Path] = []
@@ -220,7 +202,6 @@ class ReviewEvidenceService:
         self,
         *,
         review_query: str | None,
-        target_paths: list[str],
         max_results: int,
         include_tests: bool | None,
         local_scope: LocalReviewScope | None = None,
@@ -230,7 +211,7 @@ class ReviewEvidenceService:
         summary = await asyncio.to_thread(self.local_changed_summary, rag_service.workspace)
         changed = summary.files
         touched_lines = summary.touched_lines
-        scopes = clean_scope_paths(target_paths)
+        scopes = clean_scope_paths(local_scope.scope_paths if local_scope else [])
         if scopes:
             changed = [path for path in changed if path_matches_scope(path, scopes)]
             touched_lines = {
@@ -239,7 +220,7 @@ class ReviewEvidenceService:
         query = review_query or "code review local changed files regressions tests security"
         if changed:
             query = f"{query} {' '.join(changed[:40])}"
-        files = self._scope_files(rag_service, local_scope, changed or target_paths)
+        files = self._scope_files(rag_service, local_scope, changed or None)
         result = await rag_service.retrieve(
             RepositoryRAGRequest(
                 source_type=SOURCE_TYPE,
@@ -434,59 +415,6 @@ class ReviewEvidenceService:
             return []
         return list(range(1, len(text.replace("\r\n", "\n").replace("\r", "\n").splitlines()) + 1))
 
-    async def local_targeted_context(
-        self,
-        *,
-        review_query: str | None,
-        target_paths: list[str],
-        max_results: int,
-        include_tests: bool | None,
-        local_scope: LocalReviewScope | None = None,
-    ) -> str:
-        started = time.perf_counter()
-        cleaned = clean_scope_paths(target_paths)
-        if not cleaned:
-            log_event(
-                logger,
-                "info",
-                "review.evidence.local_targeted.done",
-                status="error",
-                trace_id="local_targeted",
-                reason="missing_target_paths",
-                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-            )
-            return "Error: target_paths is required for limited repo review."
-        query = review_query or "code review targeted files security tests architecture"
-        query = f"{query} {' '.join(cleaned[:40])}"
-        rag_service = self._rag_for_scope(local_scope)
-        files = self._scope_files(rag_service, local_scope, cleaned)
-        rag_result = await rag_service.retrieve(
-            RepositoryRAGRequest(
-                source_type=SOURCE_TYPE,
-                review_query=query.strip(),
-                files=files,
-                max_results=max_results,
-                include_tests=include_tests,
-                related_tests=False,
-                trace_id="local_targeted",
-            )
-        )
-        block = rag_result.context if rag_result.hits else "No relevant repository review references found."
-        header = "[Limited Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80])
-        result = header + "\n\n" + block
-        log_event(
-            logger,
-            "info",
-            "review.evidence.local_targeted.done",
-            status="success",
-            trace_id="local_targeted",
-            scopes_count=len(cleaned),
-            files_count=len(files),
-            context_chars=len(result),
-            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-        )
-        return result
-
     async def retrieve_snapshot_context(
         self,
         *,
@@ -534,6 +462,8 @@ class ReviewEvidenceService:
         repo: str,
         ref: str | None,
         tree_pattern: str | None,
+        target_subpath: str | None = None,
+        target_subpath_kind: str | None = None,
         review_query: str | None,
         max_results: int,
         include_tests: bool | None,
@@ -542,11 +472,19 @@ class ReviewEvidenceService:
         started = time.perf_counter()
         if not review_query or not review_query.strip():
             review_query = "code review security architecture tests performance entry points config"
+        scoped_path = (target_subpath or "").strip().strip("/")
+        effective_pattern = tree_pattern
+        if scoped_path:
+            if (target_subpath_kind or "").lower() == "tree":
+                effective_pattern = f"{scoped_path}/**"
+            else:
+                effective_pattern = scoped_path
+            review_query = f"{review_query} {scoped_path}"
         try:
             snapshot, files = await self.github.fetch_text_files(
                 repo,
                 ref=ref,
-                pattern=tree_pattern,
+                pattern=effective_pattern,
                 max_files=self.github.config.max_index_files,
                 trace_id=trace_id,
             )
@@ -586,6 +524,7 @@ class ReviewEvidenceService:
             status="done",
             trace_id=trace_id,
             snapshot=snapshot,
+            target_subpath=scoped_path,
             cache=cache_root,
             files=len(files),
             hits=hits_count,
@@ -620,119 +559,11 @@ class ReviewEvidenceService:
         )
         return context
 
-    async def github_targeted_context(
-        self,
-        *,
-        repo: str,
-        ref: str | None,
-        target_paths: list[str],
-        review_query: str | None,
-        max_results: int,
-        include_tests: bool | None,
-        trace_id: str,
-    ) -> str:
-        started = time.perf_counter()
-        cleaned = clean_scope_paths(target_paths, remote=True)
-        if not cleaned:
-            log_event(
-                logger,
-                "info",
-                "review.evidence.github_targeted.done",
-                status="error",
-                trace_id=trace_id,
-                reason="missing_target_paths",
-                repo=repo,
-                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-            )
-            return "Error: target_paths is required for limited repo review."
-        files: dict[str, str] = {}
-        snapshot_name = repo
-        owner, repo_name = parse_repo(repo)
-        for path in cleaned[:80]:
-            text = await self.github._fetch_file_text(owner, repo_name, path, ref, trace_id=trace_id)
-            if text is not None:
-                files[path] = text
-        if not files:
-            log_event(
-                logger,
-                "info",
-                "review.evidence.github_targeted.done",
-                status="empty_files",
-                trace_id=trace_id,
-                repo=repo,
-                ref=ref,
-                mode="targeted",
-                scopes_count=len(cleaned),
-                files_count=0,
-                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-            )
-            return "No text files found for targeted GitHub review retrieval."
-        query = review_query or "code review targeted files security tests architecture"
-        query = f"{query} {' '.join(cleaned[:40])}"
-        cache_root, context, hits_count = await self.retrieve_snapshot_context(
-            snapshot_name=f"{snapshot_name}:targeted:{hashlib.sha256('|'.join(cleaned).encode('utf-8')).hexdigest()[:8]}",
-            files=files,
-            review_query=query,
-            max_results=max_results,
-            include_tests=include_tests,
-            trace_id=trace_id,
-        )
-        log_event(
-            logger,
-            "info",
-            "review.evidence.github_targeted.cache",
-            status="done",
-            trace_id=trace_id,
-            repo=repo,
-            ref=ref,
-            mode="targeted",
-            cache=cache_root,
-            files=len(files),
-            hits=hits_count,
-        )
-        header = "[Limited GitHub Full Repo Review Context]\n" + "\n".join(f"- {path}" for path in cleaned[:80]) + "\n\n"
-        if hits_count <= 0:
-            result = header + "No relevant targeted GitHub repository review references found."
-            log_event(
-                logger,
-                "info",
-                "review.evidence.github_targeted.done",
-                status="no_hits",
-                trace_id=trace_id,
-                repo=repo,
-                ref=ref,
-                mode="targeted",
-                scopes_count=len(cleaned),
-                files_count=len(files),
-                hits_count=0,
-                context_chars=len(result),
-                elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-            )
-            return result
-        result = header + context
-        log_event(
-            logger,
-            "info",
-            "review.evidence.github_targeted.done",
-            status="success",
-            trace_id=trace_id,
-            repo=repo,
-            ref=ref,
-            mode="targeted",
-            scopes_count=len(cleaned),
-            files_count=len(files),
-            hits_count=hits_count,
-            context_chars=len(result),
-            elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
-        )
-        return result
-
     async def github_diff_context(
         self,
         *,
         repo: str,
         pr_number: int,
-        target_paths: list[str],
         review_query: str | None,
         max_results: int,
         include_tests: bool | None,
@@ -768,12 +599,6 @@ class ReviewEvidenceService:
                 )
             )
             return f"Error: failed to fetch GitHub PR diff context: {exc}"
-        scopes = clean_scope_paths(target_paths, remote=True)
-        if scopes:
-            files = {path: text for path, text in files.items() if path_matches_scope(path, scopes)}
-            touched_lines = {
-                path: lines for path, lines in touched_lines.items() if path_matches_scope(path, scopes)
-            }
         if not files:
             log_event(
                 logger,
@@ -783,7 +608,6 @@ class ReviewEvidenceService:
                 trace_id=trace_id,
                 repo=repo,
                 pr=pr_number,
-                scopes_count=len(scopes),
                 files_count=0,
                 elapsed_ms=f"{(time.perf_counter() - started) * 1000:.1f}",
             )
@@ -801,7 +625,6 @@ class ReviewEvidenceService:
         header = [
             "[GitHub PR Diff Review Context]",
             f"- repository/pr: {snapshot}",
-            *( [f"- scope paths: {', '.join(scopes[:20])}"] if scopes else [] ),
             f"- cached files: {len(files)}",
             f"- cache: {cache_root}",
             "",
@@ -817,7 +640,6 @@ class ReviewEvidenceService:
                 repo=repo,
                 pr=pr_number,
                 snapshot=snapshot,
-                scopes_count=len(scopes),
                 files_count=len(files),
                 hits_count=0,
                 context_chars=len(result),
@@ -834,7 +656,6 @@ class ReviewEvidenceService:
             repo=repo,
             pr=pr_number,
             snapshot=snapshot,
-            scopes_count=len(scopes),
             files_count=len(files),
             hits_count=hits_count,
             context_chars=len(result),

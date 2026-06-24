@@ -7,6 +7,7 @@ import pytest
 from loguru import logger
 
 from nanobot.agent.review.evidence import LocalChangedSummary, ReviewEvidenceService
+from nanobot.agent.review.types import LocalReviewScope
 from nanobot.agent.review.utils import (
     changed_lines_from_patch,
     parse_pr_target,
@@ -95,7 +96,7 @@ def test_rrf_merge_combines_ranked_lists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_review_evidence_dispatches_local_targeted_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_review_evidence_uses_local_file_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     service = ReviewEvidenceService(RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False)))
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "auth.py").write_text("token = 'x'\n", encoding="utf-8")
@@ -111,18 +112,23 @@ async def test_review_evidence_dispatches_local_targeted_context(tmp_path: Path,
 
     monkeypatch.setattr(service.repository_rag, "retrieve", fake_retrieve)
 
-    result = await service.local_targeted_context(
+    result = await service.local_context(
         review_query="auth",
-        target_paths=["src/auth.py"],
         max_results=5,
         include_tests=True,
+        local_scope=LocalReviewScope(
+            kind="file",
+            review_root=str(tmp_path),
+            scope_paths=["src/auth.py"],
+            target_path="src/auth.py",
+            reason="file_target",
+        ),
     )
 
-    assert result.startswith("[Limited Full Repo Review Context]")
-    assert "src/auth.py" in result
+    assert result == "context"
     request = captured["request"]
     assert isinstance(request, RepositoryRAGRequest)
-    assert request.review_query == "auth src/auth.py"
+    assert request.review_query == "auth"
     assert [path.relative_to(tmp_path).as_posix() for path in request.files or []] == ["src/auth.py"]
 
 
@@ -151,9 +157,15 @@ async def test_review_evidence_dispatches_local_changed_context(tmp_path: Path, 
 
     result = await service.local_changed_context(
         review_query="regression",
-        target_paths=["src"],
         max_results=5,
         include_tests=True,
+        local_scope=LocalReviewScope(
+            kind="directory",
+            review_root=str(tmp_path),
+            scope_paths=["src"],
+            target_path=".",
+            reason="directory_target",
+        ),
     )
 
     assert result.startswith("[Local Diff Review Context]")
@@ -360,7 +372,6 @@ async def test_review_evidence_github_diff_logs_no_hits(
         result = await service.github_diff_context(
             repo="test/repo",
             pr_number=42,
-            target_paths=[],
             review_query="auth",
             max_results=5,
             include_tests=True,

@@ -800,7 +800,7 @@ class AgentLoop:
             review_hook = ReviewFinalizerHook(
                 workspace=str(self.workspace),
                 target_name=str(session.metadata.get(ReviewMetaKey.TARGET) or "target"),
-                changed_files=session.metadata.get(ReviewMetaKey.TARGET_PATHS) or [],
+                changed_files=[],
                 depth=review_depth,  # type: ignore[arg-type]
                 judge=self._build_review_judge(),
                 allowed_dimensions=session.metadata.get(ReviewMetaKey.ALLOWED_DIMENSIONS),
@@ -935,7 +935,6 @@ class AgentLoop:
             review_meta_keys_to_sync = (
                 ReviewMetaKey.ALLOWED_DIMENSIONS,
                 ReviewMetaKey.GITHUB_PREFETCH_READY,
-                ReviewMetaKey.TARGET_PATHS,
                 ReviewMetaKey.LOCAL_ROOT,
                 ReviewMetaKey.LOCAL_TARGET,
                 ReviewMetaKey.LOCAL_SCOPE_KIND,
@@ -953,7 +952,7 @@ class AgentLoop:
                 local_target = review_meta.get(ReviewMetaKey.LOCAL_TARGET)
                 review_hook.set_validation_context(
                     workspace=validation_workspace,
-                    changed_files=review_meta.get(ReviewMetaKey.TARGET_PATHS) or [],
+                    changed_files=[],
                     local_target=local_target if isinstance(local_target, str) else None,
                 )
             if review_meta:

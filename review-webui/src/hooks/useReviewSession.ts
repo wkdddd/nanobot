@@ -31,7 +31,6 @@ export interface ReviewTask {
   action?: ReviewAction;
   depth?: ReviewDepth;
   focus?: ReviewFocus[];
-  targetPaths?: string[];
 }
 
 export interface DimensionResult {
@@ -96,13 +95,9 @@ function formatReviewFocus(focus: ReviewFocus[] | undefined): string {
   return focus && focus.length > 0 ? focus.join(", ") : "all";
 }
 
-function formatReviewPaths(paths: string[] | undefined): string {
-  return paths && paths.length > 0 ? paths.join(", ") : "all";
-}
-
 function isReviewTask(review: UIMessage["review"] | ReviewTask): review is ReviewTask {
   if (!review) return false;
-  return "targetType" in review || "depth" in review || "targetPaths" in review;
+  return "targetType" in review || "depth" in review;
 }
 
 function formatReviewRequestContent(
@@ -116,16 +111,14 @@ function formatReviewRequestContent(
   const mode = task ? review.depth : review.mode;
   const action = review.action;
   const focus = review.focus;
-  const targetPaths = task ? review.targetPaths : review.target_paths;
-  const title = content.trim() || "审查";
+  const title = content.trim() || "Review";
   const lines = [
     title,
-    `目标: ${labelValue(target, "(not set)")}`,
-    `类型: ${labelValue(targetType)}`,
-    `模式: ${labelValue(mode, "full")}`,
-    `动作: ${labelValue(action, "repo")}`,
-    `关注: ${formatReviewFocus(focus)}`,
-    `路径: ${formatReviewPaths(targetPaths)}`,
+    `Target: ${labelValue(target, "(not set)")}`,
+    `Type: ${labelValue(targetType)}`,
+    `Mode: ${labelValue(mode, "full")}`,
+    `Action: ${labelValue(action, "repo")}`,
+    `Focus: ${formatReviewFocus(focus)}`,
   ];
   return lines.join("\n");
 }
@@ -209,10 +202,7 @@ function reviewFromMetadata(metadata: unknown): UIMessage["review"] | undefined 
   const focus = Array.isArray(data.review_focus)
     ? data.review_focus.filter((item): item is ReviewFocus => typeof item === "string")
     : undefined;
-  const targetPaths = Array.isArray(data.review_target_paths)
-    ? data.review_target_paths.filter((item): item is string => typeof item === "string")
-    : undefined;
-  if (!target && !targetType && !mode && !action && !focus && !targetPaths) {
+  if (!target && !targetType && !mode && !action && !focus) {
     return undefined;
   }
   return {
@@ -221,7 +211,6 @@ function reviewFromMetadata(metadata: unknown): UIMessage["review"] | undefined 
     mode,
     action,
     focus,
-    target_paths: targetPaths,
   };
 }
 

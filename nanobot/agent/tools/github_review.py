@@ -18,7 +18,6 @@ from nanobot.agent.tools.review_base import (
     ReviewToolBase,
 )
 from nanobot.agent.tools.schema import (
-    ArraySchema,
     BooleanSchema,
     IntegerSchema,
     StringSchema,
@@ -49,12 +48,6 @@ from nanobot.agent.tools.schema import (
         ),
         repo_path=StringSchema(
             "File path within the GitHub repo for action='file'.",
-            nullable=True,
-        ),
-        target_paths=ArraySchema(
-            StringSchema("Repository-relative file or directory path"),
-            description="Optional files or directories that limit repo/diff review scope",
-            max_items=80,
             nullable=True,
         ),
         ref=StringSchema("GitHub branch, tag, or commit SHA", nullable=True),
@@ -120,7 +113,6 @@ class GitHubReviewTool(ReviewToolBase):
         target_repo: str | None = None,
         pr_number: int = 0,
         repo_path: str | None = None,
-        target_paths: list[str] | None = None,
         ref: str | None = None,
         tree_pattern: str | None = None,
         tree_limit: int = 500,
@@ -143,13 +135,12 @@ class GitHubReviewTool(ReviewToolBase):
                 action_value = ReviewAction.DIFF.value
         repo = (target_repo or target or "").strip()
         logger.info(
-            "github_review.start trace_id={} action={} target={} target_repo={} pr={} paths_count={} query_chars={} max_results={}",
+            "github_review.start trace_id={} action={} target={} target_repo={} pr={} query_chars={} max_results={}",
             trace_id,
             action_value,
             target,
             target_repo,
             pr_number,
-            len(target_paths or []),
             len(review_query or ""),
             max_results,
         )
@@ -210,7 +201,6 @@ class GitHubReviewTool(ReviewToolBase):
                 repo=repo,
                 ref=ref,
                 pr_number=int(pr_number or 0),
-                target_paths=target_paths or ([repo_path] if repo_path else []),
                 tree_pattern=tree_pattern,
                 review_query=review_query,
                 max_results=max_results,
@@ -222,12 +212,11 @@ class GitHubReviewTool(ReviewToolBase):
             status = "error"
             error = str(exc)
             logger.exception(
-                "github_review.failed trace_id={} action={} repo={} pr={} paths_count={}",
+                "github_review.failed trace_id={} action={} repo={} pr={}",
                 trace_id,
                 action_value,
                 repo,
                 pr_number,
-                len(target_paths or []),
             )
             raise
         finally:

@@ -308,9 +308,6 @@ export class NanobotClient {
       ...(options?.review?.target_type ? { review_target_type: options.review.target_type } : {}),
       ...(options?.review?.action ? { review_action: options.review.action } : {}),
       ...(options?.review?.focus && options.review.focus.length > 0 ? { review_focus: options.review.focus } : {}),
-      ...(options?.review?.target_paths && options.review.target_paths.length > 0
-        ? { review_target_paths: options.review.target_paths }
-        : {}),
       webui: true,
     };
     this.queueSend(frame);

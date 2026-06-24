@@ -16,7 +16,6 @@ from nanobot.agent.tools.review_base import (
     ReviewToolBase,
 )
 from nanobot.agent.tools.schema import (
-    ArraySchema,
     BooleanSchema,
     IntegerSchema,
     StringSchema,
@@ -37,12 +36,6 @@ from nanobot.agent.tools.schema import (
         ),
         repo_path=StringSchema(
             "Local repository-relative file or directory path for action='file'.",
-            nullable=True,
-        ),
-        target_paths=ArraySchema(
-            StringSchema("Repository-relative file or directory path"),
-            description="Optional files or directories that limit repo/diff review scope",
-            max_items=80,
             nullable=True,
         ),
         tree_pattern=StringSchema(
@@ -93,7 +86,6 @@ class LocalReviewTool(ReviewToolBase):
         action: str | None = None,
         target: str | None = None,
         repo_path: str | None = None,
-        target_paths: list[str] | None = None,
         tree_pattern: str | None = None,
         tree_limit: int = 500,
         max_results: int = 5,
@@ -106,11 +98,10 @@ class LocalReviewTool(ReviewToolBase):
         status = "ok"
         error = ""
         logger.info(
-            "local_review.start trace_id={} action={} target={} paths_count={} query_chars={} max_results={}",
+            "local_review.start trace_id={} action={} target={} query_chars={} max_results={}",
             trace_id,
             action_value,
             target or repo_path,
-            len(target_paths or []),
             len(review_query or ""),
             max_results,
         )
@@ -148,7 +139,6 @@ class LocalReviewTool(ReviewToolBase):
             result_text = await self.evidence_service.dispatch(
                 target_type="local",
                 action=action_value,
-                target_paths=target_paths or ([repo_path or target] if (repo_path or target) else []),
                 tree_pattern=tree_pattern,
                 review_query=review_query,
                 max_results=max_results,
@@ -160,11 +150,10 @@ class LocalReviewTool(ReviewToolBase):
             status = "error"
             error = str(exc)
             logger.exception(
-                "local_review.failed trace_id={} action={} target={} paths_count={}",
+                "local_review.failed trace_id={} action={} target={}",
                 trace_id,
                 action_value,
                 target or repo_path,
-                len(target_paths or []),
             )
             raise
         finally:

@@ -340,22 +340,6 @@ def test_rrf_merge_combines_ranked_lists() -> None:
 
 
 @pytest.mark.asyncio
-async def test_local_review_repo_limited_scope_requires_paths_for_targeted_helper(tmp_path: Path) -> None:
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src" / "auth.py").write_text("def login(token):\n    return token\n", encoding="utf-8")
-    tool = LocalReviewTool(workspace=tmp_path)
-
-    result = await tool.evidence_service.local_targeted_context(
-        review_query="login token",
-        target_paths=[],
-        max_results=5,
-        include_tests=True,
-    )
-
-    assert result == "Error: target_paths is required for limited repo review."
-
-
-@pytest.mark.asyncio
 async def test_github_api_success_logs_structured_event(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -36,7 +36,6 @@ class AutoTask:
     enabled: bool = True
     mode: str | None = None
     focus: list[str] | None = None
-    target_paths: list[str] = field(default_factory=list)
     max_subagents: int | None = None
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -51,7 +50,6 @@ class AutoTask:
             "enabled": self.enabled,
             "mode": self.mode,
             "focus": self.focus,
-            "target_paths": list(self.target_paths),
             "max_subagents": self.max_subagents,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -68,7 +66,6 @@ class AutoTask:
             enabled=bool(data.get("enabled", True)),
             mode=str(data["mode"]) if data.get("mode") else None,
             focus=[str(item) for item in data["focus"]] if isinstance(data.get("focus"), list) else None,
-            target_paths=[str(item) for item in data.get("target_paths", []) if str(item).strip()],
             max_subagents=int(data["max_subagents"]) if data.get("max_subagents") is not None else None,
             created_at=str(data.get("created_at") or now_iso()),
             updated_at=str(data.get("updated_at") or now_iso()),

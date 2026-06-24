@@ -864,7 +864,6 @@ def review(
     mode: str = typer.Option("full", "--mode", help="Review mode: quick, deep, or full"),
     target_type: str = typer.Option("auto", "--target-type", help="Review target type: auto, github, or local"),
     action: str = typer.Option("repo", "--action", help="Review action: repo or diff"),
-    paths: str | None = typer.Option(None, "--paths", help="Comma-separated files or paths that limit the review scope"),
     max_subagents: int | None = typer.Option(None, "--max-subagents", help="Maximum concurrent subagents"),
     fail_on: str | None = typer.Option(None, "--fail-on", help="Exit non-zero if findings at or above: critical|high|medium|low"),
     workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
@@ -925,10 +924,6 @@ def review(
             session.metadata["review_focus"] = focus
             session.metadata["review_mode_variant"] = mode
             session.metadata["review_action"] = normalized_action
-            if paths:
-                session.metadata["review_target_paths"] = [
-                    item.strip() for item in paths.split(",") if item.strip()
-                ]
             session.metadata["review_max_subagents"] = effective_max_subagents
             agent_loop.sessions.save(session)
 

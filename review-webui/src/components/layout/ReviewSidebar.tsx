@@ -97,13 +97,11 @@ function TaskItem({
 }) {
   const isReview = !!task.reviewTarget;
   const reviewFocus = reviewListField(task.metadata, "review_focus");
-  const reviewPaths = reviewListField(task.metadata, "review_target_paths");
   const reviewSource = [
     task.reviewAction,
     task.reviewMode,
     task.reviewTargetType,
     reviewFocusLabel(reviewFocus),
-    reviewPaths.length > 0 ? `${reviewPaths.length} path${reviewPaths.length === 1 ? "" : "s"}` : "",
   ].filter(Boolean).join(" · ");
   const displayTitle = getDisplayTitle(task, autoTask);
   const source = isReview

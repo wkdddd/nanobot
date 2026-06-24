@@ -1,7 +1,6 @@
 """Normalize review inputs before building a review plan."""
 from __future__ import annotations
 
-import re
 from typing import Any
 
 from nanobot.agent.review.beforeplan.targets import infer_review_target_type
@@ -59,13 +58,3 @@ def normalize_mode(raw: Any) -> ReviewDepth:
         return value  # type: ignore[return-value]
     return "full"
 
-
-def parse_target_paths(raw: Any) -> list[str]:
-    if raw is None:
-        return []
-    if isinstance(raw, list):
-        values = [str(item).strip() for item in raw]
-    else:
-        values = re.split(r"[\n,]+", str(raw))
-        values = [item.strip() for item in values]
-    return [item for item in dict.fromkeys(values) if item]

@@ -122,7 +122,6 @@ export interface AutoTask {
   enabled: boolean;
   mode?: ReviewDepth | null;
   focus?: ReviewFocus[] | null;
-  target_paths: string[];
   max_subagents?: number | null;
   created_at: string;
   updated_at: string;
@@ -155,7 +154,6 @@ export interface AutoTaskPayload {
   enabled?: boolean;
   mode?: ReviewDepth | null;
   focus?: ReviewFocus[] | null;
-  target_paths?: string[];
   max_subagents?: number | null;
 }
 
@@ -381,7 +379,6 @@ export interface OutboundReviewContext {
   target?: string;
   action?: ReviewAction;
   focus?: ReviewFocus[];
-  target_paths?: string[];
 }
 
 /** Response shape for ``GET .../webui-thread`` (server-built transcript replay). */
@@ -432,7 +429,6 @@ export type Outbound =
       review_target_type?: ReviewTargetType;
       review_action?: ReviewAction;
       review_focus?: ReviewFocus[];
-      review_target_paths?: string[];
       /** Marks messages sent by the embedded WebUI, without changing the
        * generic websocket protocol for other clients. */
       webui?: true;

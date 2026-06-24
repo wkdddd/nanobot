@@ -6,7 +6,6 @@ from nanobot.agent.review.beforeplan.normalizers import (
     normalize_mode,
     normalize_review_action,
     normalize_review_target_type,
-    parse_target_paths,
 )
 from nanobot.agent.review.beforeplan.policy import apply_policy_to_roles, policy_for_depth
 from nanobot.agent.review.beforeplan.targets import (
@@ -24,6 +23,5 @@ __all__ = [
     "normalize_review_action",
     "normalize_review_target_type",
     "parse_repo_target",
-    "parse_target_paths",
     "policy_for_depth",
 ]

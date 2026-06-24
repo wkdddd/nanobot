@@ -244,14 +244,6 @@ def test_review_plan_resolves_pr_url_to_diff() -> None:
     assert plan.pr_number == 42
 
 
-def test_review_plan_target_paths_keep_repo_scope() -> None:
-    plan = build_review_plan(target="./repo", target_paths=["src/auth.py"], action="repo")
-
-    assert plan is not None
-    assert plan.action == "repo"
-    assert plan.target_paths == ["src/auth.py"]
-
-
 @pytest.mark.parametrize("action", ["full_repo", "pr_diff", "local_changed"])
 def test_review_action_rejects_old_values(action: str) -> None:
     with pytest.raises(ValueError, match=f"Unknown review action '{action}'"):
