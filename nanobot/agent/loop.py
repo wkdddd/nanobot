@@ -113,6 +113,7 @@ class TurnContext:
     on_retry_wait: Callable[[str], Awaitable[None]] | None = None
 
     pending_queue: asyncio.Queue | None = None
+    consumed_subagent_task_ids: set[str] | None = None
     pending_summary: str | None = None
 
     turn_wall_started_at: float = field(default_factory=time.time)
@@ -124,6 +125,21 @@ class TurnContext:
 def _is_review_turn(metadata: dict[str, Any] | None) -> bool:
     meta = metadata or {}
     return bool(meta.get(ReviewMetaKey.TARGET) or meta.get("review_target"))
+
+
+def _is_consumed_subagent_result(
+    msg: InboundMessage,
+    consumed_task_ids: set[str] | None,
+) -> bool:
+    if not consumed_task_ids:
+        return False
+    meta = msg.metadata if isinstance(msg.metadata, dict) else {}
+    task_id = meta.get("subagent_task_id")
+    return (
+        meta.get("injected_event") == "subagent_result"
+        and isinstance(task_id, str)
+        and task_id in consumed_task_ids
+    )
 
 
 def _stream_chunks(text: str, *, chunk_size: int = 2048) -> list[str]:
@@ -511,7 +527,7 @@ class AgentLoop:
 
     def _build_review_judge(self) -> ReviewJudge | None:
         judge_settings = getattr(self.review_config, "judge", None)
-        if judge_settings is not None and not getattr(judge_settings, "enabled", True):
+        if judge_settings is not None and  getattr(judge_settings, "enabled", False):
             return None
         provider = self.provider
         model = self.model
@@ -531,10 +547,6 @@ class AgentLoop:
             max_tokens=int(getattr(judge_settings, "max_tokens", 2048)),
         )
         return ReviewJudge(provider=provider, model=model, config=config)
-
-    async def _connect_mcp(self) -> None:
-        """MCP removed — no-op for compatibility."""
-        return
 
     def _set_tool_context(
         self, channel: str, chat_id: str,
@@ -729,6 +741,7 @@ class AgentLoop:
         metadata: dict[str, Any] | None = None,
         session_key: str | None = None,
         pending_queue: asyncio.Queue | None = None,
+        consumed_subagent_task_ids: set[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict], str, bool]:
         """Run the agent iteration loop.
 
@@ -834,12 +847,7 @@ class AgentLoop:
             nonlocal saw_running_subagents, subagent_barrier_sent
 
             def _to_user_message(pending_msg: InboundMessage) -> dict[str, Any]:
-                content = pending_msg.content
-                media = pending_msg.media if pending_msg.media else None
-                if media:
-                    content, media = extract_documents(content, media)
-                    media = media or None
-                user_content = self.context._build_user_content(content, media)
+                user_content = pending_msg.content
                 message: dict[str, Any] = {"role": "user", "content": user_content}
                 if pending_msg.metadata:
                     message["_metadata"] = dict(pending_msg.metadata)
@@ -856,6 +864,8 @@ class AgentLoop:
                         if task_id in injected_subagent_task_ids:
                             return False
                         injected_subagent_task_ids.add(task_id)
+                        if consumed_subagent_task_ids is not None:
+                            consumed_subagent_task_ids.add(task_id)
                     items.append(_to_user_message(pending_msg))
                     return True
                 buffered_pending.append(pending_msg)
@@ -1074,8 +1084,6 @@ class AgentLoop:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
         
         self._running = True
-        await self._connect_mcp()
-        log_event(logger, "info", "agent.loop.started", status="start")
 
         while self._running:
             try:
@@ -1183,6 +1191,7 @@ class AgentLoop:
         lock = self._session_locks.setdefault(session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         pending = asyncio.Queue(maxsize=20)
+        consumed_subagent_task_ids: set[str] = set()
         self._pending_queues[session_key] = pending
         turn_end_sent = False
         stream_base_id = f"{msg.session_key}:{time.time_ns()}"
@@ -1259,6 +1268,7 @@ class AgentLoop:
                     response = await self._process_message(
                         msg, on_stream=on_stream, on_stream_end=on_stream_end,
                         pending_queue=pending,
+                        consumed_subagent_task_ids=consumed_subagent_task_ids,
                     )
                     
     
@@ -1344,7 +1354,7 @@ class AgentLoop:
                         await publish_forced_turn_end()
     
         finally:
-   
+
             queue = self._pending_queues.pop(session_key, None)
             if queue is not None:
                 leftover = 0
@@ -1353,6 +1363,8 @@ class AgentLoop:
                         item = queue.get_nowait()  # 非阻塞方式取
                     except asyncio.QueueEmpty:
                         break  # 队列空了
+                    if _is_consumed_subagent_result(item, consumed_subagent_task_ids):
+                        continue
                     # 重新发回总线，让 run() 循环再次处理
                     await self.bus.publish_inbound(item)
                     leftover += 1
@@ -1510,6 +1522,7 @@ class AgentLoop:
         on_stream: Callable[[str], Awaitable[None]] | None = None,
         on_stream_end: Callable[..., Awaitable[None]] | None = None,
         pending_queue: asyncio.Queue | None = None,
+        consumed_subagent_task_ids: set[str] | None = None,
     ) -> OutboundMessage | None:
         """Process a single inbound message and return the response.
         
@@ -1550,9 +1563,10 @@ class AgentLoop:
             on_stream=on_stream,
             on_stream_end=on_stream_end,
             pending_queue=pending_queue,
+            consumed_subagent_task_ids=consumed_subagent_task_ids,
         )
 
-        # 状态机主循环：每嬡执行一个状态处理器，转移到下一个状态，直到 DONE
+        # 状态机主循环
         while ctx.state is not TurnState.DONE:
             handler_name = f"_state_{ctx.state.name.lower()}"
             handler = getattr(self, handler_name, None)
@@ -1798,6 +1812,7 @@ class AgentLoop:
             metadata=ctx.msg.metadata,
             session_key=ctx.session_key,
             pending_queue=ctx.pending_queue,
+            consumed_subagent_task_ids=ctx.consumed_subagent_task_ids,
         )
         final_content, tools_used, all_msgs, stop_reason, had_injections, content_replaced = result
         ctx.final_content = final_content

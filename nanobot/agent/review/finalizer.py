@@ -286,12 +286,15 @@ class ReviewFinalizer:
     def _review_submit_payload(raw: str) -> dict[str, Any] | None:
         try:
             data = json.loads(raw.strip())
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.error("submit json error:{}",e)
             return None
-        if not isinstance(data, dict) or data.get("submitted") is not True:
+        if not isinstance(data, dict) or data.get("submitted") is not True :
+            logger.error("submit json not have 'submitted' or not isinstance")
             return None
         errors = data.get("errors")
         if not isinstance(errors, list):
+            logger.error("submit json not have 'errors' ")
             return None
         return data
 

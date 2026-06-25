@@ -6,6 +6,7 @@ import { AutoTasksView } from "@/components/auto-tasks/AutoTasksView";
 import { ReviewShell } from "@/components/layout/ReviewShell";
 import type { SessionInfo } from "@/components/layout/SessionInfoBar";
 import { NewReviewForm, type NewReviewSubmit } from "@/components/review/NewReviewForm";
+import { ReportView } from "@/components/report/ReportView";
 import { SettingsDialog, type ReviewSettings } from "@/components/settings/SettingsDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -550,10 +551,10 @@ function ReviewAppShell({
                 : "running",
         findingCounts: {
           total: state.findings.length,
-          critical: state.findings.filter((finding) => finding.severity === "critical").length,
-          high: state.findings.filter((finding) => finding.severity === "high").length,
-          medium: state.findings.filter((finding) => finding.severity === "medium").length,
-          low: state.findings.filter((finding) => finding.severity === "low").length,
+          critical: state.findings.filter((finding) => finding.severity.toLowerCase() === "critical").length,
+          high: state.findings.filter((finding) => finding.severity.toLowerCase() === "high").length,
+          medium: state.findings.filter((finding) => finding.severity.toLowerCase() === "medium").length,
+          low: state.findings.filter((finding) => finding.severity.toLowerCase() === "low").length,
         },
       }
     : null;
@@ -612,14 +613,21 @@ function ReviewAppShell({
               }
               onSelectFinding={setSelectedFinding}
               onPause={() => cancelTurn()}
+              findings={state.findings}
             />
           )
         }
         rightPanelContent={
           showReviewForm ? undefined : (
-            <div className="p-4 pt-2">
+            <div className="space-y-4 p-4 pt-2">
+              <CodePanel
+                finding={selectedFinding}
+                sessionKey={activeKey}
+                auth={apiAuth}
+                className={state.reportMarkdown ? "min-h-[280px]" : undefined}
+              />
               {state.reportMarkdown && (
-                <div className="mb-3">
+                <div>
                   <Button
                     variant="outline"
                     size="sm"
@@ -631,11 +639,14 @@ function ReviewAppShell({
                   </Button>
                 </div>
               )}
-              <CodePanel
-                finding={selectedFinding}
-                sessionKey={activeKey}
-                auth={apiAuth}
-              />
+              {state.reportMarkdown && (
+                <ReportView
+                  summary={state.reportSummary}
+                  findings={state.findings}
+                  needsConfirmationCount={state.needsConfirmationCount}
+                  rejectedCount={state.rejectedCount}
+                />
+              )}
             </div>
           )
         }

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -63,6 +64,7 @@ class ReviewValidator:
         return result
 
     def _validate_one(self, c: ReviewFindingCandidate) -> ReviewFindingVerdict:
+        '''assign a single candidate finding with accepted/rejected/uncertain'''
         if c.severity not in SEVERITY_ORDER:
             return ReviewFindingVerdict(
                 verdict=FindingVerdict.REJECTED,
@@ -111,7 +113,7 @@ class ReviewValidator:
                 reason="no evidence provided",
                 missing_evidence="candidate lacks supporting evidence snippet",
             )
-        if not self._evidence_matches(file_path, c.evidence):
+        if not self._evidence_matches(file_path, c.evidence, c.line):
             return ReviewFindingVerdict(
                 verdict=FindingVerdict.UNCERTAIN,
                 reason="evidence not found in file",
@@ -191,14 +193,42 @@ class ReviewValidator:
         except ValueError:
             return self._normalize_rel_path(str(path))
 
-    @staticmethod
-    def _evidence_matches(path: Path, evidence: str) -> bool:
-        snippet = " ".join(evidence.split())
-        if not snippet:
+    @classmethod
+    def _evidence_matches(cls, path: Path, evidence: str, line: int | None = None) -> bool:
+        snippets = cls._evidence_snippets(evidence)
+        if not snippets:
             return False
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
         normalized_text = " ".join(text.split())
-        return snippet in normalized_text
+        if any(snippet in normalized_text for snippet in snippets):
+            return True
+        if line is None:
+            return False
+        lines = text.splitlines()
+        start = max(line - 4, 0)
+        end = min(line + 3, len(lines))
+        nearby = " ".join(" ".join(item.split()) for item in lines[start:end])
+        return any(snippet in nearby for snippet in snippets)
+
+    @staticmethod
+    def _evidence_snippets(evidence: str) -> list[str]:
+        raw = evidence.strip()
+        if not raw:
+            return []
+        candidates: list[str] = []
+        candidates.extend(match.strip() for match in re.findall(r"`([^`\n]+)`", raw))
+        cleaned = re.sub(r"^\s*(?:line|lines)\s+\d+(?:\s*[-:]\s*\d+)?\s*[:：-]\s*", "", raw, flags=re.I)
+        cleaned = re.sub(r"^\s*[-*+>]\s*", "", cleaned)
+        candidates.append(cleaned)
+        snippets: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            snippet = " ".join(candidate.split()).strip()
+            if not snippet or snippet in seen:
+                continue
+            seen.add(snippet)
+            snippets.append(snippet)
+        return snippets

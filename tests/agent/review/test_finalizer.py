@@ -163,7 +163,7 @@ class TestSemanticVerdicts:
         await f.apply_judge(judge)
         result = f.finalize("test")
 
-        assert "No actionable issues found" in result.report_markdown
+        assert "No actionable issues found" not in result.report_markdown
         assert "AI judge rejected: not actionable" in result.report_markdown
 
     def test_quick_policy_filters_medium_and_low_candidates(self, workspace):

@@ -62,6 +62,29 @@ class TestValidatorAccepts:
         result = v.validate_candidates([c], "security")
         assert len(result.accepted) == 1
 
+    def test_line_prefixed_backtick_evidence_accepted(self, workspace):
+        v = ReviewValidator(ValidationContext(workspace=workspace))
+        c = _make_candidate(
+            line=2,
+            evidence="Line 2: `line2` appears in the reviewed file.",
+        )
+
+        result = v.validate_candidates([c], "security")
+
+        assert len(result.accepted) == 1
+        assert len(result.uncertain) == 0
+
+    def test_nearby_line_code_snippet_evidence_accepted(self, workspace):
+        v = ReviewValidator(ValidationContext(workspace=workspace))
+        c = _make_candidate(
+            line=3,
+            evidence="Lines 2-3: `line2 line3`",
+        )
+
+        result = v.validate_candidates([c], "security")
+
+        assert len(result.accepted) == 1
+
     def test_local_file_target_accepts_equivalent_relative_and_absolute_paths(self, workspace):
         target = Path(workspace) / "src" / "main.py"
         v = ReviewValidator(ValidationContext(

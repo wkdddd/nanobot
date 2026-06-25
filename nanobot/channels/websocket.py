@@ -1303,29 +1303,35 @@ class WebSocketChannel(BaseChannel):
     def _resolve_local_code_file(self, metadata: dict[str, Any], rel_path: str) -> Path:
         workspace = self._workspace_root()
         target_value = str(metadata.get("review_target") or "").strip()
-        roots: list[Path] = []
+
         if target_value:
             raw_target = Path(target_value).expanduser()
             target_root = raw_target if raw_target.is_absolute() else workspace / raw_target
             try:
-                resolved_target = target_root.resolve()
-                resolved_target.relative_to(workspace)
+                resolved_root = target_root.resolve()
+                if resolved_root.is_file():
+                    # review_target 是单个文件：检查 rel_path 是否指向它
+                    normalized = rel_path.replace("\\", "/")
+                    target_posix = resolved_root.as_posix()
+                    if target_posix.endswith("/" + normalized) or target_posix == normalized:
+                        return resolved_root
+                elif resolved_root.is_dir():
+                    candidate = (resolved_root / rel_path).resolve()
+                    candidate.relative_to(resolved_root)
+                    if candidate.is_file():
+                        return candidate
             except (OSError, ValueError) as exc:
-                raise CodeContextError(403, "review target is outside workspace") from exc
-            roots.append(resolved_target.parent if resolved_target.is_file() else resolved_target)
-        roots.append(workspace)
+                logger.debug("code_context.target_branch_failed rel_path={} target={} error={}", rel_path, target_value, exc)
 
-        for root in roots:
-            try:
-                root_resolved = root.resolve()
-                root_resolved.relative_to(workspace)
-                candidate = (root_resolved / rel_path).resolve()
-                candidate.relative_to(root_resolved)
-                candidate.relative_to(workspace)
-            except (OSError, ValueError):
-                continue
+        try:
+            root = workspace.resolve()
+            candidate = (root / rel_path).resolve()
+            candidate.relative_to(root)
             if candidate.is_file():
                 return candidate
+        except (OSError, ValueError) as exc:
+            logger.debug("code_context.workspace_branch_failed rel_path={} workspace={} error={}", rel_path, workspace, exc)
+
         raise CodeContextError(404, "file not found")
 
     def _resolve_github_snapshot_file(self, metadata: dict[str, Any], rel_path: str) -> Path:

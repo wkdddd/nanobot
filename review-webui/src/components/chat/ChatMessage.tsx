@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FindingDetail } from "@/components/findings/FindingDetail";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
 import type { Finding } from "@/hooks/useReviewSession";
 
 interface ChatMessageProps {
@@ -18,12 +18,16 @@ interface ChatMessageProps {
     streaming?: boolean;
   };
   onSelectFinding?: (finding: Finding) => void;
+  /** Parsed findings from the review report, used to look up correct
+   * severity / dimension when the user clicks a table row or inline
+   * code location in the rendered markdown. */
+  findings?: Finding[];
 }
 
 const LOCATION_RE = /^(.+\.(?:[A-Za-z0-9]+)):(\d+)$/;
 
 function findingFromLocation(value: string): Finding | null {
-  const match = value.trim().match(LOCATION_RE);
+  const match = value.trim().replace(/^`|`$/g, "").match(LOCATION_RE);
   if (!match) return null;
   return {
     severity: "medium",
@@ -36,7 +40,49 @@ function findingFromLocation(value: string): Finding | null {
   };
 }
 
-export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
+/**
+ * Look up a real parsed finding from the findings array by matching
+ * ``file`` and ``line``. Returns a copy with the correct severity /
+ * dimension / title / impact / recommendation, or ``null`` if no match.
+ */
+function lookupFinding(file: string, line: number | null, findings?: Finding[]): Finding | null {
+  if (!findings || findings.length === 0) return null;
+  return (
+    findings.find(
+      (f) => f.file === file && (line === null || f.line === line),
+    ) ?? null
+  );
+}
+
+function textFromNode(node: ReactNode): string {
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textFromNode).join("");
+  if (isValidElement<{ children?: ReactNode }>(node)) {
+    return textFromNode(node.props.children);
+  }
+  return "";
+}
+
+function tableRowFinding(children: ReactNode, findings?: Finding[]): Finding | null {
+  const cells = Children.toArray(children)
+    .map(textFromNode)
+    .map((cell) => cell.trim())
+    .filter(Boolean);
+  if (cells.length < 2 || !/^\d+$/.test(cells[0])) return null;
+  const location = cells.find((cell) => findingFromLocation(cell));
+  const synthetic = location ? findingFromLocation(location) : null;
+  if (!synthetic) return null;
+  // Prefer the real parsed finding (which has the correct severity)
+  // over the synthetic one (which hardcodes severity="medium").
+  const real = lookupFinding(synthetic.file, synthetic.line, findings);
+  return real ?? {
+    ...synthetic,
+    title: cells[2] || synthetic.title,
+    impact: cells[3] || "",
+  };
+}
+
+export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageProps) {
   const isUser = message.role === "user";
   const isThinkingOnly = !isUser
     && message.type === "text"
@@ -137,11 +183,16 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
                     const text = String(children).trim();
                     const locationFinding = findingFromLocation(text);
                     if (!className && locationFinding) {
+                      const real = lookupFinding(
+                        locationFinding.file,
+                        locationFinding.line,
+                        findings,
+                      );
                       return (
                         <button
                           type="button"
                           className="rounded bg-muted px-1.5 py-0.5 font-mono text-[0.85em] text-primary hover:bg-primary/10"
-                          onClick={() => onSelectFinding?.(locationFinding)}
+                          onClick={() => onSelectFinding?.(real ?? locationFinding)}
                         >
                           {text}
                         </button>
@@ -151,6 +202,29 @@ export function ChatMessage({ message, onSelectFinding }: ChatMessageProps) {
                       <code className={className} {...props}>
                         {children}
                       </code>
+                    );
+                  },
+                  tr({ children, ...props }) {
+                    const rowFinding = tableRowFinding(children, findings);
+                    if (!rowFinding) {
+                      return <tr {...props}>{children}</tr>;
+                    }
+                    return (
+                      <tr
+                        {...props}
+                        role="button"
+                        tabIndex={0}
+                        className="cursor-pointer hover:bg-primary/5"
+                        onClick={() => onSelectFinding?.(rowFinding)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            onSelectFinding?.(rowFinding);
+                          }
+                        }}
+                      >
+                        {children}
+                      </tr>
                     );
                   },
                 }}

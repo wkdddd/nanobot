@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, Code2, Loader2, MousePointerClick } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
+import { SeverityBadge } from "@/components/findings/SeverityBadge";
 import { fetchCodeContext, type ApiAuth } from "@/lib/api";
 import type { Finding } from "@/hooks/useReviewSession";
 import type { CodeContextPayload } from "@/lib/types";
@@ -159,29 +160,9 @@ export function CodePanel({ finding, sessionKey, auth, className }: CodePanelPro
           <div className="space-y-2">
             {/* Finding info bar */}
             <div className="flex items-center gap-2 text-xs text-[#8c7b6b]">
-              <span className="font-medium text-[#5c4f42]">{finding.file}</span>
-              {finding.line !== null && (
-                <>
-                  <span className="text-[#d4c8b8]">|</span>
-                  <span>第 {finding.line} 行</span>
-                </>
-              )}
-              <span className="text-[#d4c8b8]">|</span>
-              <span
-                className={cn(
-                  "inline-flex items-center rounded px-1.5 py-0.5 font-medium",
-                  finding.severity === "high" &&
-                    "bg-red-50 text-red-700",
-                  finding.severity === "medium" &&
-                    "bg-amber-50 text-amber-700",
-                  finding.severity === "low" &&
-                    "bg-blue-50 text-blue-700",
-                  finding.severity === "info" &&
-                    "bg-slate-50 text-slate-600"
-                )}
-              >
-                {finding.severity}
-              </span>
+              {finding.line !== null && <span>第 {finding.line} 行</span>}
+              {finding.line !== null && <span className="text-[#d4c8b8]">|</span>}
+              <SeverityBadge severity={finding.severity} />
             </div>
 
             {/* Code block */}

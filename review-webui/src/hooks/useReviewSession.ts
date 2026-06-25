@@ -69,6 +69,10 @@ export interface ReviewSessionState {
   task: ReviewTask | null;
   dimensions: DimensionResult[];
   findings: Finding[];
+  reportSummary: string;
+  recommendations: string[];
+  needsConfirmationCount: number;
+  rejectedCount: number;
   reportMarkdown: string;
   logs: string[];
   error: string | null;
@@ -80,6 +84,10 @@ const INITIAL_STATE: ReviewSessionState = {
   task: null,
   dimensions: [],
   findings: [],
+  reportSummary: "",
+  recommendations: [],
+  needsConfirmationCount: 0,
+  rejectedCount: 0,
   reportMarkdown: "",
   logs: [],
   error: null,
@@ -131,6 +139,230 @@ function isLikelyReviewReport(content: string): boolean {
     /(?:^|\n)\s*\|\s*(?:severity|严重级别|file|文件|finding|问题)\s*\|/i.test(text) ||
     /(?:^|\n)\s*(?:findings|审查发现|recommendations|建议)\s*[:：]?/i.test(text)
   );
+}
+
+interface ParsedReviewReport {
+  summary: string;
+  dimensions: DimensionResult[];
+  findings: Finding[];
+  recommendations: string[];
+  needsConfirmationCount: number;
+  rejectedCount: number;
+}
+
+function normalizeHeading(value: string): string {
+  return value
+    .trim()
+    .replace(/[*_`]/g, "")
+    .replace(/[:：]\s*$/, "")
+    .toLowerCase();
+}
+
+function splitMarkdownSections(markdown: string): Array<{ heading: string; body: string }> {
+  const sections: Array<{ heading: string; body: string }> = [];
+  const headingRe = /^(#{1,6})\s+(.+?)\s*$/gm;
+  const matches = [...markdown.matchAll(headingRe)];
+  for (let i = 0; i < matches.length; i += 1) {
+    const match = matches[i];
+    const next = matches[i + 1];
+    const heading = normalizeHeading(match[2] ?? "");
+    const start = (match.index ?? 0) + match[0].length;
+    const end = next?.index ?? markdown.length;
+    const body = markdown.slice(start, end).trim();
+    if (heading) sections.push({ heading, body });
+  }
+  return sections;
+}
+
+function sectionBody(sections: Array<{ heading: string; body: string }>, names: string[]): string {
+  return sections.find((section) =>
+    names.some((name) => section.heading.includes(name))
+  )?.body.trim() ?? "";
+}
+
+function cleanListItem(line: string): string {
+  return line
+    .trim()
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/^\[[ xX-]\]\s+/, "")
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|])/g, "$1")
+    .trim();
+}
+
+function parseRecommendations(body: string): string[] {
+  if (!body.trim()) return [];
+  return body
+    .split(/\r?\n/)
+    .map(cleanListItem)
+    .filter((line) => line && !/^no (?:priority )?(?:fixes|recommendations)/i.test(line));
+}
+
+function countListItems(body: string): number {
+  if (!body.trim()) return 0;
+  return body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*+]\s+/.test(line) || /^\d+[.)]\s+/.test(line))
+    .length;
+}
+
+function parseDimensions(body: string): DimensionResult[] {
+  if (!body.trim()) return [];
+  return body
+    .split(/\r?\n/)
+    .map(cleanListItem)
+    .map((line) => {
+      const match = line.match(/^(?:\*\*)?([^*\u2014-]+?)(?:\*\*)?\s*[\u2014-]\s*(.+)$/);
+      if (!match) return null;
+      const dimension = match[1].trim();
+      const rawStatus = match[2].trim();
+      const noFindings = /no[_\s-]?findings|无发现/i.test(rawStatus);
+      return {
+        dimension,
+        status: noFindings ? "done" : rawStatus,
+        acceptedCount: noFindings ? 0 : 1,
+        rejectedCount: 0,
+        uncertainCount: 0,
+      };
+    })
+    .filter((item): item is DimensionResult => item !== null);
+}
+
+function splitMarkdownTableRow(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|")) return [];
+  const content = trimmed.replace(/^\|/, "").replace(/\|\s*$/, "");
+  const cells: string[] = [];
+  let current = "";
+  let escaped = false;
+  for (const char of content) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "|") {
+      cells.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (escaped) current += "\\";
+  cells.push(current.trim());
+  return cells;
+}
+
+function isTableSeparator(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+}
+
+function parseLocation(value: string): { file: string; line: number | null } | null {
+  const clean = cleanListItem(value).replace(/^`|`$/g, "").trim();
+  if (!clean || clean === "-") return null;
+  const match = clean.match(/^(.+):(\d+)$/);
+  if (!match) return { file: clean, line: null };
+  return {
+    file: match[1].trim(),
+    line: Number.parseInt(match[2], 10),
+  };
+}
+
+function normalizeSeverity(value: string): string | null {
+  const text = normalizeHeading(value);
+  if (text.includes("critical")) return "critical";
+  if (text.includes("high")) return "high";
+  if (text.includes("medium")) return "medium";
+  if (text.includes("low")) return "low";
+  return null;
+}
+
+function parseFindingRecommendations(markdown: string): Map<number, string> {
+  const recommendations = new Map<number, string>();
+  let activeIndex: number | null = null;
+  for (const line of markdown.split(/\r?\n/)) {
+    const detail = line.match(/^\s*(\d+)\.\s+\*\*.+?\*\*\s+\(`.+?`\)/);
+    if (detail) {
+      activeIndex = Number.parseInt(detail[1], 10);
+      continue;
+    }
+    const recommendation = line.match(/^\s*[-*+]\s*Recommendation:\s*(.+)$/i);
+    if (recommendation && activeIndex !== null) {
+      recommendations.set(activeIndex, cleanListItem(recommendation[1]));
+    }
+  }
+  return recommendations;
+}
+
+function parseFindings(markdown: string): Finding[] {
+  const recommendations = parseFindingRecommendations(markdown);
+  const findings: Finding[] = [];
+  let inFindings = false;
+  let currentSeverity = "medium";
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const section = line.match(/^#{3}\s+(.+?)\s*$/);
+    if (section) {
+      const heading = normalizeHeading(section[1]);
+      inFindings = heading === "findings" || heading === "审查发现";
+      continue;
+    }
+
+    if (!inFindings) continue;
+
+    const severityHeading = line.match(/^#{4,6}\s+(.+?)\s*$/);
+    if (severityHeading) {
+      currentSeverity = normalizeSeverity(severityHeading[1]) ?? currentSeverity;
+      continue;
+    }
+
+    const cells = splitMarkdownTableRow(line);
+    if (cells.length < 4 || isTableSeparator(cells) || !/^\d+$/.test(cells[0])) {
+      continue;
+    }
+    const location = parseLocation(cells[1]);
+    if (!location) continue;
+    const index = Number.parseInt(cells[0], 10);
+    findings.push({
+      severity: currentSeverity,
+      dimension: "report",
+      file: location.file,
+      line: location.line,
+      title: cleanListItem(cells[2]) || `Finding ${index}`,
+      impact: cleanListItem(cells[3]),
+      recommendation: recommendations.get(index) ?? "",
+    });
+  }
+
+  return findings;
+}
+
+function parseReviewReport(markdown: string): ParsedReviewReport {
+  const sections = splitMarkdownSections(markdown);
+  const summary = sectionBody(sections, ["executive summary", "summary", "审查总结", "总结"]);
+  const checks = sectionBody(sections, ["checks performed", "review dimensions", "审查维度"]);
+  const recommendations = parseRecommendations(
+    sectionBody(sections, ["recommendations", "建议"]),
+  );
+  const needsConfirmationCount = countListItems(
+    sectionBody(sections, ["needs confirmation", "待确认"]),
+  );
+  const rejectedCount = countListItems(
+    sectionBody(sections, ["rejected/skipped summary", "rejected", "skipped", "拒绝", "跳过"]),
+  );
+  return {
+    summary,
+    dimensions: parseDimensions(checks),
+    findings: parseFindings(markdown),
+    recommendations,
+    needsConfirmationCount,
+    rejectedCount,
+  };
 }
 
 export function uiMessageToChatMessage(message: UIMessage): ChatMessage | null {
@@ -380,6 +612,23 @@ function hasMessage(messages: ChatMessage[], id: string | null): id is string {
   return !!id && messages.some((message) => message.id === id);
 }
 
+function stateWithReport(
+  state: ReviewSessionState,
+  reportMarkdown: string,
+): ReviewSessionState {
+  const parsed = parseReviewReport(reportMarkdown);
+  return {
+    ...state,
+    reportMarkdown,
+    reportSummary: parsed.summary,
+    dimensions: parsed.dimensions,
+    findings: parsed.findings,
+    recommendations: parsed.recommendations,
+    needsConfirmationCount: parsed.needsConfirmationCount,
+    rejectedCount: parsed.rejectedCount,
+  };
+}
+
 function isStopAckEvent(ev: InboundEvent): boolean {
   if (ev.event !== "message" || ev.kind || typeof ev.text !== "string") return false;
   return /^Stopped \d+ task\(s\)\.$/.test(ev.text) || ev.text === "No active task to stop.";
@@ -475,14 +724,13 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
     const reportMarkdown = [...chatMessages].reverse().find((message) => message.type === "report")?.content ?? "";
     const inferredPhase = error ? "error" : completedOrStoppedPhase(chatMessages);
     const phase = reviewInProgressRef.current && !error ? "reviewing" : inferredPhase;
-    setState({
+    setState(stateWithReport({
       ...INITIAL_STATE,
       phase,
       task,
       error,
-      reportMarkdown,
       messages: chatMessages,
-    });
+    }, reportMarkdown));
     reportBufferRef.current = "";
     assistantCarrierRef.current = placeholderId;
     reportMessageRef.current = null;
@@ -498,7 +746,12 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
       task,
       error: null,
       logs: [],
+      dimensions: [],
       findings: [],
+      reportSummary: "",
+      recommendations: [],
+      needsConfirmationCount: 0,
+      rejectedCount: 0,
       reportMarkdown: "",
       messages: [
         ...prev.messages,
@@ -635,20 +888,18 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
                     }
                   : message
               );
-              return {
+              return stateWithReport({
                 ...prev,
                 phase: "finalizing",
-                reportMarkdown: reportBufferRef.current,
                 messages: updated,
-              };
+              }, reportBufferRef.current);
             }
             const id = generateId();
             reportMessageRef.current = id;
             assistantCarrierRef.current = id;
-            return {
+            return stateWithReport({
               ...prev,
               phase: "finalizing",
-              reportMarkdown: reportBufferRef.current,
               messages: [
                 ...prev.messages,
                 {
@@ -661,7 +912,7 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
                   streaming: true,
                 },
               ],
-            };
+            }, reportBufferRef.current);
           }
 
           const existingId = hasMessage(prev.messages, textMessageRef.current)
@@ -884,11 +1135,15 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
                   : message
               );
               if (isReport) reportMessageRef.current = existingId;
-              return {
+              return isReport ? stateWithReport({
                 ...prev,
                 logs,
                 phase: isReport ? "completed" : prev.phase,
-                reportMarkdown: isReport ? content : prev.reportMarkdown,
+                messages: updated,
+              }, content) : {
+                ...prev,
+                logs,
+                phase: prev.phase,
                 messages: updated,
               };
             }
@@ -900,11 +1155,15 @@ export function useReviewSession(client: NanobotClient, chatId: string | null) {
               timestamp: Date.now(),
               streaming: false,
             };
-            return {
+            return isReport ? stateWithReport({
               ...prev,
               logs,
               phase: isReport ? "completed" : prev.phase,
-              reportMarkdown: isReport ? content : prev.reportMarkdown,
+              messages: [...markAllStreamingComplete(prev.messages), ordinaryMessage],
+            }, content) : {
+              ...prev,
+              logs,
+              phase: prev.phase,
               messages: [...markAllStreamingComplete(prev.messages), ordinaryMessage],
             };
           }

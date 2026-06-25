@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.loop import AgentLoop, TurnContext, TurnState
+from nanobot.agent.loop import AgentLoop, TurnContext, TurnState, _is_consumed_subagent_result
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
@@ -396,6 +396,14 @@ def test_session_history_preserves_subagent_result_metadata() -> None:
             "subagent_result": raw_result,
         },
     }]
+
+
+def test_consumed_subagent_result_helper_matches_consumed_task() -> None:
+    msg = _subagent_result("task-1", "security")
+
+    assert _is_consumed_subagent_result(msg, {"task-1"}) is True
+    assert _is_consumed_subagent_result(msg, {"other"}) is False
+    assert _is_consumed_subagent_result(msg, set()) is False
 
 
 def test_review_subagent_tools_include_structured_submitter(tmp_path) -> None:

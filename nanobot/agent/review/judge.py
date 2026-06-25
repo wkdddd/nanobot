@@ -151,7 +151,12 @@ class ReviewJudge:
         return (
             "Judge these code review candidates. Use decision accept, reject, or "
             "needs_confirmation. Reject unsupported, vague, duplicate, or non-actionable "
-            "items. Keep true high-risk issues.\n\n"
+            "items. Keep true high-risk issues. A hard_reason such as evidence not "
+            "found in file can be caused by evidence formatting; if the candidate has "
+            "a concrete file, line, and code-like evidence, do not reject solely for "
+            "that hard_reason. Use accept when the claim is supported by the supplied "
+            "evidence, or needs_confirmation when it is plausible but still requires "
+            "manual verification.\n\n"
             "Return JSON array objects with keys: id, decision, reason, confidence, severity.\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )

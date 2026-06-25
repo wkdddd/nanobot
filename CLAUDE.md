@@ -40,7 +40,23 @@ Messages flow through an async `MessageBus` (`nanobot/bus/queue.py`) that decoup
 
 ### Key Subsystems
 
-- **Agent Core** (`nanobot/agent/loop.py`, `runner.py`): The critical path. `AgentLoop` manages session keys, hooks, and context building. `AgentRunner` executes the multi-turn LLM conversation with tool execution. Changes here should be minimal and justified.
+- **Agent Core** (`nanobot/agent/loop.py`, `runner.py`, `subagent.py`): The critical path.
+  - `AgentLoop` is a state machine (`RESTORE→COMPACT→COMMAND→BUILD→RUN→SAVE→RESPOND→DONE`) driven by a `_TRANSITIONS` table. Changes here should be minimal and justified.
+  - `AgentRunner` is the pure LLM-tool executor — takes `AgentRunSpec`, returns `AgentRunResult`. No product logic lives here.
+  - `SubagentManager` (`subagent.py`) spawns concurrent subagents as background tasks; results are injected mid-turn via the message bus into pending queues.
+- **Hooks** (`nanobot/agent/hooks/`): Observer-pattern lifecycle callbacks for the runner.
+  - `AgentHook` base: `before_iteration`, `on_stream`, `before_execute_tools`, `after_iteration`, `finalize_content`.
+  - `CompositeHook` fans out to multiple hooks with per-hook error isolation (`reraise` flag).
+  - `AgentProgressHook` (`hooks/progress.py`) translates runner events into channel UI signals (streaming deltas, tool hints, reasoning blocks).
+  - `ReviewFinalizerHook` (`hooks/review_finalizer.py`) ingests subagent findings and renders the final review report via `finalize_content`.
+  - To add behavior: subclass `AgentHook`, pass instance to `AgentLoop(..., hooks=[...])`.
+- **Review Pipeline** (`nanobot/agent/review/`): Multi-subagent code review system.
+  - `beforeplan/`: normalizes user inputs (`normalizers.py`), maps depth to policy (`policy.py`: quick=2 subagents, full=4, deep=6+), extracts GitHub/local targets (`targets.py`).
+  - `planner.py`: builds `ReviewPlan` from target + depth + focus.
+  - `finalizer.py`: ingests subagent findings, applies `ReviewJudge` for confidence filtering, renders final markdown report.
+  - `tools/review_submit.py`: subagent-scoped tool for structured findings (required: severity/file/line/title/evidence/impact/recommendation).
+  - Review subagent system prompt: `nanobot/templates/agent/review_subagent_system.md`.
+  - Flow: plan → spawn subagents → each calls `review_submit` → `ReviewFinalizerHook` ingests → judge → render.
 - **LLM Providers** (`nanobot/providers/`): Provider implementations built on a common base (`base.py`). `factory.py` and `registry.py` handle instantiation and model discovery.
 - **Channels** (`nanobot/channels/`): Platform integrations auto-discovered via `pkgutil` scan + entry-point plugins. `manager.py` discovers and coordinates them. Each channel file should be self-contained.
 - **Tools** (`nanobot/agent/tools/`): Agent capabilities exposed to the LLM, auto-discovered via `pkgutil` scan + entry-point plugins.
@@ -98,3 +114,11 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for details on the two-branch model a
 - Linting: `ruff check` with rules E, F, I, N, W (E501 ignored).
 - pytest with `asyncio_mode = "auto"`.
 - Tests mirror the `nanobot/` package structure.
+
+## Collaboration Guidelines
+
+- 遇到不合适的设计要给出具体建议；不清楚的地方必须提问，不要猜测
+- 给出具体的修改位置和修改思路，不只是描述问题
+- 不需要兼容旧参数/旧配置，直接改
+- 审视时覆盖前后端细节、文档、配置，不要只看单个文件
+- 日志要完整（错误信息 + 关键节点 info），但不要泛滥

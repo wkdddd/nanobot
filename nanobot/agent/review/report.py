@@ -58,12 +58,23 @@ def render_review_report(
 
     stats = _severity_stats(all_accepted)
     incomplete = _has_incomplete_checks(dimensions)
-    summary = _build_summary(target_name, stats, dimensions, incomplete=incomplete)
+    summary = _build_summary(
+        stats,
+        dimensions,
+        uncertain_count=len(all_uncertain),
+        rejected_count=len(all_rejected),
+        incomplete=incomplete,
+    )
 
     sections: list[str] = []
     sections.append(f"## Code Review Report: {_escape_markdown_inline(target_name)}\n")
     sections.append(f"### Executive Summary\n\n{summary}\n")
-    sections.append(_render_findings(all_accepted, incomplete=incomplete))
+    sections.append(_render_findings(
+        all_accepted,
+        uncertain_count=len(all_uncertain),
+        rejected_count=len(all_rejected),
+        incomplete=incomplete,
+    ))
     sections.append(_render_checks_performed(dimensions))
     if policy is not None:
         sections.append(_render_mode_notes(policy, dimensions))
@@ -71,7 +82,12 @@ def render_review_report(
         sections.append(_render_needs_confirmation(all_uncertain))
     if all_rejected:
         sections.append(_render_rejected_summary(all_rejected))
-    sections.append(_render_recommendations(all_accepted))
+    sections.append(_render_recommendations(
+        all_accepted,
+        uncertain_count=len(all_uncertain),
+        rejected_count=len(all_rejected),
+        incomplete=incomplete,
+    ))
     return "\n".join(sections)
 
 
@@ -128,16 +144,27 @@ def _severity_stats(findings: list[ReviewFindingCandidate]) -> dict[str, int]:
 
 
 def _build_summary(
-    target: str,
     stats: dict[str, int],
     dims: list[ReviewDimensionResult],
     *,
+    uncertain_count: int = 0,
+    rejected_count: int = 0,
     incomplete: bool = False,
 ) -> str:
     total = sum(stats.values())
     if total == 0:
         if incomplete:
             return "Review incomplete. Some checks could not access enough evidence to produce a reliable result."
+        if uncertain_count:
+            return (
+                f"No confirmed actionable issues found, but {uncertain_count} candidate"
+                f"{'s' if uncertain_count != 1 else ''} need confirmation before this review can be considered clean."
+            )
+        if rejected_count:
+            return (
+                f"No confirmed actionable issues found. {rejected_count} candidate"
+                f"{'s were' if rejected_count != 1 else ' was'} rejected or skipped during validation."
+            )
         return "No actionable issues found."
     parts: list[str] = []
     for sev in SEVERITY_ORDER:
@@ -151,10 +178,20 @@ def _has_incomplete_checks(dims: list[ReviewDimensionResult]) -> bool:
     return not dims or any(d.status in {"incomplete", "error"} or d.errors for d in dims)
 
 
-def _render_findings(findings: list[ReviewFindingCandidate], *, incomplete: bool = False) -> str:
+def _render_findings(
+    findings: list[ReviewFindingCandidate],
+    *,
+    uncertain_count: int = 0,
+    rejected_count: int = 0,
+    incomplete: bool = False,
+) -> str:
     if not findings:
         if incomplete:
             return "### Findings\n\nReview incomplete; no reliable finding set was produced.\n"
+        if uncertain_count:
+            return "### Findings\n\nNo confirmed findings. See Needs Confirmation for candidates requiring verification.\n"
+        if rejected_count:
+            return "### Findings\n\nNo confirmed findings. Candidate findings were rejected or skipped during validation.\n"
         return "### Findings\n\nNo actionable issues found.\n"
     lines = ["### Findings\n"]
     current_sev = ""
@@ -247,9 +284,24 @@ def _render_rejected_summary(
     return "\n".join(lines)
 
 
-def _render_recommendations(findings: list[ReviewFindingCandidate]) -> str:
+def _render_recommendations(
+    findings: list[ReviewFindingCandidate],
+    *,
+    uncertain_count: int = 0,
+    rejected_count: int = 0,
+    incomplete: bool = False,
+) -> str:
     lines = ["### Recommendations\n"]
     if not findings:
+        if incomplete:
+            lines.append("1. Re-run the review after the missing evidence or failed checks are resolved.\n")
+            return "\n".join(lines)
+        if uncertain_count:
+            lines.append("1. Verify the items in Needs Confirmation before treating this review as clean.\n")
+            return "\n".join(lines)
+        if rejected_count:
+            lines.append("1. Review the rejected/skipped summary if you expected these candidates to be actionable.\n")
+            return "\n".join(lines)
         lines.append("No priority fixes needed.\n")
         return "\n".join(lines)
     critical_high = [f for f in findings if f.severity in ("critical", "high")]

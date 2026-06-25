@@ -8,10 +8,10 @@ interface ReportSummaryProps {
 }
 
 export function ReportSummary({ summary, findings }: ReportSummaryProps) {
-  const critical = findings.filter((f) => f.severity === "critical").length;
-  const high = findings.filter((f) => f.severity === "high").length;
-  const medium = findings.filter((f) => f.severity === "medium").length;
-  const low = findings.filter((f) => f.severity === "low").length;
+  const critical = findings.filter((f) => f.severity.toLowerCase() === "critical").length;
+  const high = findings.filter((f) => f.severity.toLowerCase() === "high").length;
+  const medium = findings.filter((f) => f.severity.toLowerCase() === "medium").length;
+  const low = findings.filter((f) => f.severity.toLowerCase() === "low").length;
 
   return (
     <Card className="border-2 border-primary/20">

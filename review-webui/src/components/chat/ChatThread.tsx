@@ -27,6 +27,9 @@ interface ChatThreadProps {
   emptyDescription?: string;
   onSelectFinding?: (finding: Finding) => void;
   onPause?: () => void;
+  /** Parsed findings from the review report, forwarded to ChatMessage
+   * so table-row / inline-code clicks carry the correct severity. */
+  findings?: Finding[];
 }
 
 /** Group consecutive finding messages into batches */
@@ -107,6 +110,7 @@ export function ChatThread({
   emptyDescription = "Your conversation with the review agent will appear in this thread.",
   onSelectFinding,
   onPause,
+  findings,
 }: ChatThreadProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -339,6 +343,7 @@ export function ChatThread({
                     key={message.id}
                     message={message}
                     onSelectFinding={onSelectFinding}
+                    findings={findings}
                   />
                 ));
               })

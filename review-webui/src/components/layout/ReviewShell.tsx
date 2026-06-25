@@ -2,6 +2,12 @@ import type { ReactNode } from "react";
 import { PanelLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from "@/components/ui/resizable";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { ReviewHeader } from "./ReviewHeader";
 import { ReviewSidebar } from "./ReviewSidebar";
 import { SessionInfoBar, type SessionInfo } from "./SessionInfoBar";
@@ -61,6 +67,8 @@ export function ReviewShell({
   onToggleSidebar,
   sessionInfo,
 }: ReviewShellProps) {
+  const isMobile = useIsMobile();
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-background">
       {/* Fixed header */}
@@ -110,19 +118,33 @@ export function ReviewShell({
             <SessionInfoBar info={sessionInfo || null} />
           </div>
 
-          {/* Content row: chat thread + right panel */}
+          {/* Content row: chat thread + resizable right panel.
+              Right panel: starts ~320px, draggable up to ~half the screen
+              (50vw), no narrower than 300px. Hidden below the md breakpoint,
+              matching the previous `hidden md:block` behavior. Double-clicking
+              the handle resets the right panel to its default width. */}
           <div className="flex flex-1 min-h-0 overflow-hidden">
-            {/* Chat thread */}
-            <div className="flex-1 min-w-0 overflow-hidden">
-              {mainContent}
-            </div>
-
-            {/* Right panel (hidden on narrow screens to avoid squeezing chat area) */}
-            {rightPanelContent ? (
-              <aside className="hidden h-full w-[300px] shrink-0 overflow-y-auto border-l bg-card scrollbar-thin scrollbar-track-transparent md:block">
-                {rightPanelContent}
-              </aside>
-            ) : null}
+            {rightPanelContent && !isMobile ? (
+              <ResizablePanelGroup
+                orientation="horizontal"
+                className="h-full w-full"
+              >
+                <ResizablePanel className="h-full min-w-0 overflow-hidden">
+                  {mainContent}
+                </ResizablePanel>
+                <ResizableHandle />
+                <ResizablePanel
+                  defaultSize={320}
+                  minSize={300}
+                  maxSize="50vw"
+                  className="h-full overflow-y-auto bg-card scrollbar-thin scrollbar-track-transparent"
+                >
+                  {rightPanelContent}
+                </ResizablePanel>
+              </ResizablePanelGroup>
+            ) : (
+              <div className="flex-1 min-w-0 overflow-hidden">{mainContent}</div>
+            )}
           </div>
         </main>
       </div>

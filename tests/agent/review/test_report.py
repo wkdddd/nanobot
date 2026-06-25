@@ -86,6 +86,9 @@ class TestReportStructure:
         report = render_review_report("repo", dims)
         assert "### Needs Confirmation" in report
         assert "Maybe bug" in report
+        assert "No actionable issues found" not in report
+        assert "No priority fixes needed" not in report
+        assert "Verify the items in Needs Confirmation" in report
 
     def test_rejected_summary_section(self):
         rejected = [(_candidate(title="False positive"), ReviewFindingVerdict(
@@ -95,6 +98,8 @@ class TestReportStructure:
         report = render_review_report("repo", dims)
         assert "### Rejected/Skipped Summary" in report
         assert "False positive" in report
+        assert "No actionable issues found" not in report
+        assert "No priority fixes needed" not in report
 
     def test_recommendations_from_critical_high(self):
         dims = [_dim("security", accepted=[
