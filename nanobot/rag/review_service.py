@@ -50,20 +50,23 @@ DEFAULT_IGNORE_DIRS = {
     "htmlcov",
 }
 
-DEFAULT_TEXT_EXTS = {
-    ".py",
-    ".ts",
-    ".tsx",
-    ".js",
-    ".jsx",
-    ".json",
-    ".md",
-    ".yml",
-    ".yaml",
-    ".toml",
-    ".css",
-    ".html",
-    ".txt",
+DEFAULT_BINARY_EXTS = {
+    # 图片
+    ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".svg", ".bmp", ".tiff",
+    # 音视频
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".flac", ".ogg", ".mkv", ".webm",
+    # 编译产物
+    ".pyc", ".pyo", ".class", ".exe", ".dll", ".so", ".dylib", ".o", ".a",
+    # 压缩/打包
+    ".zip", ".tar", ".gz", ".bz2", ".xz", ".rar", ".7z", ".whl", ".egg", ".jar",
+    # 字体
+    ".ttf", ".otf", ".woff", ".woff2", ".eot",
+    # 二进制文档
+    ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    # 数据库
+    ".db", ".sqlite", ".sqlite3",
+    # 其他
+    ".bin", ".dat",
 }
 
 REVIEW_RISK_TERMS = {
@@ -123,6 +126,7 @@ DEFAULT_IGNORE_GLOBS = (
     "*.gif",
     "*.ico",
     "*.lock",
+    ".nanobot_snapshot.json",
 )
 
 
@@ -153,7 +157,7 @@ class RepositoryRAGOptions:
     enable_chonkie: bool = True
     enable_rrf: bool = True
     semantic_weight: float = 0.6
-    text_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_TEXT_EXTS))
+    binary_extensions: set[str] = field(default_factory=lambda: set(DEFAULT_BINARY_EXTS))
     ignore_dirs: set[str] = field(default_factory=lambda: set(DEFAULT_IGNORE_DIRS))
     ignore_globs: tuple[str, ...] = DEFAULT_IGNORE_GLOBS
     dense_backfill_limit: int = 256
@@ -202,6 +206,18 @@ def _now_iso() -> str:
 
 def _safe_slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_") or "repo"
+
+
+def _snapshot_scope_digest(snapshot_name: str, files: dict[str, str]) -> str:
+    hasher = hashlib.sha256()
+    hasher.update(snapshot_name.encode("utf-8"))
+    hasher.update(b"\0")
+    for rel in sorted(files):
+        hasher.update(rel.encode("utf-8", errors="surrogatepass"))
+        hasher.update(b"\0")
+        hasher.update(hashlib.sha256(files[rel].encode("utf-8")).hexdigest().encode("ascii"))
+        hasher.update(b"\0")
+    return hasher.hexdigest()[:12]
 
 
 def _path_role_tags(rel_path: str, text: str = "") -> list[str]:
@@ -714,7 +730,7 @@ class RepositoryRAGService:
                 path = current / filename
                 if self.is_ignored(path, base=base):
                     continue
-                if path.suffix.lower() not in self.options.text_extensions:
+                if path.suffix.lower() in self.options.binary_extensions:
                     continue
                 count += 1
                 yield path
@@ -759,12 +775,19 @@ class RepositoryRAGService:
         return sorted(dict.fromkeys(matches))[:5]
 
     def write_snapshot(self, snapshot_name: str, files: dict[str, str]) -> Path:
-        digest = hashlib.sha256(snapshot_name.encode("utf-8")).hexdigest()[:12]
-        cache_root = self.workspace / ".nanobot" / "review_github" / f"{_safe_slug(snapshot_name)}_{digest}"
+        scope_digest = _snapshot_scope_digest(snapshot_name, files)
+        cache_root = (
+            self.workspace
+            / ".nanobot"
+            / "review_github"
+            / f"{_safe_slug(snapshot_name)}_{scope_digest}"
+        )
         start = time.perf_counter()
         cache_root.mkdir(parents=True, exist_ok=True)
         manifest = {
             "snapshot": snapshot_name,
+            "scope_digest": scope_digest,
+            "files_count": len(files),
             "created_at": _now_iso(),
             "files": sorted(files),
         }

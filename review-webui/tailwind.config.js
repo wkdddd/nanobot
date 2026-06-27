@@ -16,7 +16,8 @@ export default {
     extend: {
       fontFamily: {
         sans: [
-          '"DM Sans"',
+          '"Poppins"',
+          "ui-sans-serif",
           "system-ui",
           "-apple-system",
           "BlinkMacSystemFont",
@@ -27,7 +28,14 @@ export default {
           '"Microsoft YaHei"',
           "sans-serif",
         ],
+        serif: [
+          '"Lora"',
+          "Georgia",
+          "ui-serif",
+          "serif",
+        ],
         mono: [
+          '"Geist Mono"',
           '"JetBrains Mono"',
           '"Fira Code"',
           '"Cascadia Code"',

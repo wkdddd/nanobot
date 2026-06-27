@@ -16,16 +16,17 @@ class FakeSubagentManager:
 
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
+        self.result = (
+            "Review subagent [dependency] started (id: test). "
+            "The coordinator will wait for and integrate its result before finalizing."
+        )
 
     def get_running_count(self) -> int:
         return 0
 
     async def spawn(self, **kwargs: object) -> str:
         self.calls.append({"method": "spawn", **kwargs})
-        return (
-            "Review subagent [dependency] started (id: test). "
-            "The coordinator will wait for and integrate its result before finalizing."
-        )
+        return self.result
 
 
 def test_core_tools_expose_spawn_not_review_submitter(tmp_path) -> None:
@@ -90,3 +91,20 @@ async def test_spawn_rejects_unselected_dimension() -> None:
     assert "not allowed" in result
     assert "dependency" in result
     assert manager.calls == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_surfaces_duplicate_dimension_rejection() -> None:
+    manager = FakeSubagentManager()
+    manager.result = "Error: Cannot spawn review subagent: dimension 'dependency' has already completed for this review."
+    tool = SpawnTool(manager)  # type: ignore[arg-type]
+    tool.set_context(RequestContext(
+        channel="websocket",
+        chat_id="chat",
+        metadata={ReviewMetaKey.ALLOWED_DIMENSIONS: ["dependency"]},
+    ))
+
+    result = await tool.execute(task="review dependencies again", label="dependency")
+
+    assert "already completed" in result
+    assert manager.calls[0]["label"] == "dependency"

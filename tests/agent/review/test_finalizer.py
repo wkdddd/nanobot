@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from loguru import logger
 
 from nanobot.agent.hooks import AgentHookContext, ReviewFinalizerHook
 from nanobot.agent.review.beforeplan import policy_for_depth
@@ -229,6 +230,18 @@ class TestFinalize:
         assert result.errors == ["No structured findings were produced by this reviewer."]
         assert "Review incomplete" in report
         assert "No actionable issues found" not in report
+
+    def test_unstructured_subagent_output_does_not_log_json_error(self, workspace):
+        errors: list[str] = []
+        sink_id = logger.add(lambda message: errors.append(str(message)), level="ERROR")
+        try:
+            f = ReviewFinalizer(workspace)
+            result = f.ingest_subagent_output("bug-risk", "Plain review summary, no tool call.")
+        finally:
+            logger.remove(sink_id)
+
+        assert result.status == "incomplete"
+        assert not any("submit json error" in message for message in errors)
 
     def test_finalizer_skips_disallowed_dimensions(self, workspace):
         dependency_raw = _submit([{

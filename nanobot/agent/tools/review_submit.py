@@ -152,7 +152,7 @@ class SubmitReviewFindingsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Submit the final structured review findings. Review subagents must "
+            "Submit the final structured review findings. Review subagents **must** "
             "use this tool as their final deliverable instead of writing a prose report."
         )
 

@@ -156,11 +156,24 @@ class ReviewFinalizer:
                 status="incomplete" if incomplete_reason else "no_findings",
                 errors=[incomplete_reason] if incomplete_reason else [],
             )
-            self._dimensions.append(result)
+            self._upsert_dimension(result)
             return result
         result = self._validator.validate_candidates(candidates, dimension)
-        self._dimensions.append(result)
+        self._upsert_dimension(result)
         return result
+
+    _STATUS_PRIORITY: dict[str, int] = {
+        "validated": 3, "no_findings": 2, "incomplete": 1, "error": 0, "skipped_disallowed": -1
+    }
+
+    def _upsert_dimension(self, result: ReviewDimensionResult) -> None:
+        """Insert or update a dimension result,removing the redundant dimensions."""
+        for i, existing in enumerate(self._dimensions):
+            if existing.dimension == result.dimension:
+                if self._STATUS_PRIORITY.get(result.status, 0) > self._STATUS_PRIORITY.get(existing.status, 0):
+                    self._dimensions[i] = result
+                return
+        self._dimensions.append(result)
 
     def get_needs_confirmation(self) -> list[tuple[ReviewFindingCandidate, ReviewFindingVerdict]]:
         """Return uncertain candidates that should be shown separately in the report."""
@@ -204,6 +217,7 @@ class ReviewFinalizer:
         logger.info("review.finalizer.judge.applied dimensions={}", len(self._dimensions))
 
     def _apply_judged_defaults(self) -> None:
+        '''keep review when AIjudge is unenable or fail'''
         for dimension in self._dimensions:
             if dimension.judged:
                 continue
@@ -276,25 +290,34 @@ class ReviewFinalizer:
 
     @classmethod
     def _looks_like_empty_or_structured_output(cls, text: str) -> bool:
-        payload = cls._review_submit_payload(text)
+        payload = cls._review_submit_payload(text, log_diagnostics=False)
         if payload is None:
             return False
         findings = payload.get("findings")
         return isinstance(findings, list) and all(isinstance(item, dict) for item in findings)
 
     @staticmethod
-    def _review_submit_payload(raw: str) -> dict[str, Any] | None:
+    def _review_submit_payload(raw: str, *, log_diagnostics: bool = True) -> dict[str, Any] | None:
+        text = raw.strip()
+        if not text:
+            return None
+        if not text.startswith("{"):
+            logger.debug("review.finalizer.submit_payload.skip_non_json")
+            return None
         try:
-            data = json.loads(raw.strip())
+            data = json.loads(text)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.error("submit json error:{}",e)
+            if log_diagnostics:
+                logger.warning("review.finalizer.submit_payload.invalid_json error={}", e)
             return None
         if not isinstance(data, dict) or data.get("submitted") is not True :
-            logger.error("submit json not have 'submitted' or not isinstance")
+            if log_diagnostics:
+                logger.warning("review.finalizer.submit_payload.invalid_schema reason=submitted")
             return None
         errors = data.get("errors")
         if not isinstance(errors, list):
-            logger.error("submit json not have 'errors' ")
+            if log_diagnostics:
+                logger.warning("review.finalizer.submit_payload.invalid_schema reason=errors")
             return None
         return data
 

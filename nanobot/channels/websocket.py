@@ -43,8 +43,9 @@ from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.schema import Config
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base
-from nanobot.session.goal_state import goal_state_ws_blob
+
 from nanobot.utils.helpers import safe_filename
+from nanobot.utils.log_style import log_event
 from nanobot.utils.media_decode import (
     FileSizeExceeded,
     save_base64_data_url,
@@ -601,24 +602,6 @@ class WebSocketChannel(BaseChannel):
                 )
             )
 
-    async def _maybe_push_active_goal_state(self, chat_id: str) -> None:
-        """Replay an active sustained goal from session metadata after *chat_id* is subscribed.
-
-        Goal metadata lives on the session JSONL and survives gateway restarts, but
-        connected clients normally see it via ``goal_state`` / ``turn_end`` frames.
-        Pushing here makes refresh + reconnect restore the strip without a new model turn.
-        """
-        if self._session_manager is None:
-            return
-        row = self._session_manager.read_session_file(f"websocket:{chat_id}")
-        meta = row.get("metadata", {}) if isinstance(row, dict) else {}
-        if not isinstance(meta, dict):
-            meta = {}
-        blob = goal_state_ws_blob(meta)
-        if not blob.get("active"):
-            return
-        await self.send_goal_state(chat_id, blob)
-
     async def _maybe_push_turn_run_wall_clock(self, chat_id: str) -> None:
         """Replay ``goal_status: running`` when a turn is still active (same-process refresh)."""
         t0 = websocket_turn_wall_started_at(chat_id)
@@ -658,7 +641,6 @@ class WebSocketChannel(BaseChannel):
         if not isinstance(meta, dict):
             return
         review_enabled = bool(meta.get("review_mode", False))
-        long_task_enabled = bool(meta.get("long_task_mode", False))
         conns = list(self._subs.get(chat_id, ()))
         for conn in conns:
             if review_enabled:
@@ -669,17 +651,9 @@ class WebSocketChannel(BaseChannel):
                     enabled=review_enabled,
                     **_review_mode_payload(meta),
                 )
-            if long_task_enabled:
-                await self._send_event(
-                    conn,
-                    "long_task_mode_updated",
-                    chat_id=chat_id,
-                    enabled=long_task_enabled,
-                )
 
     async def _hydrate_after_subscribe(self, chat_id: str) -> None:
         """Replay goal/run strip state after subscribe (same-process refresh)."""
-        await self._maybe_push_active_goal_state(chat_id)
         await self._maybe_push_turn_run_wall_clock(chat_id)
         await self._maybe_push_session_approval_state(chat_id)
         await self._maybe_push_specialist_modes(chat_id)
@@ -2740,25 +2714,6 @@ class WebSocketChannel(BaseChannel):
                 **review_payload,
             )
             return
-        if t == "set_long_task_mode":
-            cid = envelope.get("chat_id")
-            enabled = bool(envelope.get("enabled", False))
-            if not _is_valid_chat_id(cid):
-                await self._send_event(connection, "error", detail="invalid chat_id")
-                return
-            logger.info("session websocket:{} long-task mode: {}", cid, "enabled" if enabled else "disabled")
-            if self._session_manager is not None:
-                session_key = f"websocket:{cid}"
-                session = self._session_manager.get_or_create(session_key)
-                session.metadata["long_task_mode"] = enabled
-                self._session_manager.save(session)
-            await self._send_event(
-                connection,
-                "long_task_mode_updated",
-                chat_id=cid,
-                enabled=enabled,
-            )
-            return
         await self._send_event(connection, "error", detail=f"unknown type: {t!r}")
 
     async def stop(self) -> None:
@@ -2820,7 +2775,6 @@ class WebSocketChannel(BaseChannel):
                 msg.metadata.get("_turn_end")
                 or msg.metadata.get("_session_updated")
                 or msg.metadata.get("_goal_status")
-                or msg.metadata.get("_goal_state_sync")
             ):
                 self.logger.debug("no active subscribers for chat_id={}", msg.chat_id)
                 return
@@ -2832,10 +2786,6 @@ class WebSocketChannel(BaseChannel):
                     "no active subscribers for chat_id={}, persisting transcript only",
                     msg.chat_id,
                 )
-        if msg.metadata.get("_goal_state_sync"):
-            blob = msg.metadata.get("goal_state")
-            await self.send_goal_state(msg.chat_id, blob if isinstance(blob, dict) else {"active": False})
-            return
         if msg.metadata.get("_goal_status"):
             status = msg.metadata.get("goal_status")
             if status in ("running", "idle"):
@@ -2850,14 +2800,11 @@ class WebSocketChannel(BaseChannel):
         if msg.metadata.get("_turn_end"):
             lat = msg.metadata.get("latency_ms")
             lat_i = int(lat) if isinstance(lat, (int, float)) else None
-            gs = msg.metadata.get("goal_state")
-            gs_blob = gs if isinstance(gs, dict) else None
             trace = msg.metadata.get("turn_trace")
             trace_items = trace if isinstance(trace, list) else None
             await self.send_turn_end(
                 msg.chat_id,
                 latency_ms=lat_i,
-                goal_state=gs_blob,
                 turn_trace=trace_items,
             )
             self._complete_auto_task_run_from_chat(msg.chat_id)
@@ -2991,15 +2938,12 @@ class WebSocketChannel(BaseChannel):
         chat_id: str,
         latency_ms: int | None = None,
         *,
-        goal_state: dict[str, Any] | None = None,
         turn_trace: list[dict[str, Any]] | None = None,
     ) -> None:
         """Signal that the agent has fully finished processing the current turn."""
         body: dict[str, Any] = {"event": "turn_end", "chat_id": chat_id}
         if latency_ms is not None:
             body["latency_ms"] = int(latency_ms)
-        if goal_state is not None:
-            body["goal_state"] = goal_state
         if turn_trace is not None:
             body["turn_trace"] = turn_trace
         self._try_append_webui_transcript(chat_id, body)
@@ -3010,16 +2954,6 @@ class WebSocketChannel(BaseChannel):
         raw = json.dumps(body, ensure_ascii=False)
         for connection in conns:
             await self._safe_send_to(connection, raw, label=" turn_end ")
-
-    async def send_goal_state(self, chat_id: str, blob: dict[str, Any]) -> None:
-        """Push persisted goal-state snapshot for *chat_id* (multi-chat isolation)."""
-        conns = list(self._subs.get(chat_id, ()))
-        if not conns:
-            return
-        body = {"event": "goal_state", "chat_id": chat_id, "goal_state": blob}
-        raw = json.dumps(body, ensure_ascii=False)
-        for connection in conns:
-            await self._safe_send_to(connection, raw, label=" goal_state ")
 
     async def send_goal_status(
         self,

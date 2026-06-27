@@ -19,12 +19,18 @@ import {
   X,
   RotateCcw,
   Check,
+  Sun,
+  Moon,
+  Monitor,
 } from "lucide-react";
 import type { ReviewDepth, ReviewFocus } from "@/lib/types";
+
+export type ThemeMode = "light" | "dark" | "system";
 
 export interface ReviewSettings {
   defaultDepth: ReviewDepth;
   defaultFocus: ReviewFocus[];
+  theme: ThemeMode;
 }
 
 const DEFAULT_SETTINGS: ReviewSettings = {
@@ -38,12 +44,24 @@ const DEFAULT_SETTINGS: ReviewSettings = {
     "maintainability",
     "dependency",
   ],
+  theme: "light",
 };
 
 const DEPTH_OPTIONS: { value: ReviewDepth; label: string; description: string }[] = [
   { value: "quick", label: "Quick", description: "Fast scan focused on obvious high-risk issues" },
   { value: "full", label: "Full", description: "Balanced review across the selected dimensions" },
   { value: "deep", label: "Deep", description: "More thorough analysis for subtle or systemic risks" },
+];
+
+const THEME_OPTIONS: {
+  value: ThemeMode;
+  label: string;
+  description: string;
+  icon: React.ElementType;
+}[] = [
+  { value: "light", label: "Light", description: "暖色调的明亮主题", icon: Sun },
+  { value: "dark", label: "Dark", description: "温暖的深色主题", icon: Moon },
+  { value: "system", label: "System", description: "跟随操作系统自动切换", icon: Monitor },
 ];
 
 const DIMENSIONS: {
@@ -113,6 +131,10 @@ export function SettingsDialog({
     onSettingsChange({ ...settings, defaultDepth: depth });
   };
 
+  const handleThemeChange = (theme: ThemeMode) => {
+    onSettingsChange({ ...settings, theme });
+  };
+
   const toggleDimension = (key: ReviewFocus) => {
     const next = settings.defaultFocus.includes(key)
       ? settings.defaultFocus.filter((item) => item !== key)
@@ -149,6 +171,58 @@ export function SettingsDialog({
         </div>
 
         <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+          {/* Appearance */}
+          <section className="space-y-3">
+            <h3 className="text-sm font-medium text-foreground">
+              Appearance
+            </h3>
+            <div className="grid grid-cols-3 gap-2">
+              {THEME_OPTIONS.map((option) => {
+                const Icon = option.icon;
+                const active = settings.theme === option.value;
+                return (
+                  <label
+                    key={option.value}
+                    className={cn(
+                      "flex cursor-pointer flex-col items-center gap-1.5 rounded-md border p-3 transition-colors",
+                      active
+                        ? "border-primary bg-primary/5"
+                        : "border-border hover:bg-accent/50",
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="theme-mode"
+                      value={option.value}
+                      checked={active}
+                      onChange={() => handleThemeChange(option.value)}
+                      className="sr-only"
+                    />
+                    <Icon
+                      className={cn(
+                        "h-5 w-5 transition-colors",
+                        active ? "text-primary" : "text-muted-foreground",
+                      )}
+                    />
+                    <span
+                      className={cn(
+                        "text-xs font-medium transition-colors",
+                        active ? "text-foreground" : "text-muted-foreground",
+                      )}
+                    >
+                      {option.label}
+                    </span>
+                    {active && (
+                      <Check className="h-3 w-3 shrink-0 text-primary" />
+                    )}
+                  </label>
+                );
+              })}
+            </div>
+          </section>
+
+          <Separator />
+
           <section className="space-y-3">
             <h3 className="text-sm font-medium text-foreground">
               Default Review Depth

@@ -7,7 +7,7 @@ import { ReviewShell } from "@/components/layout/ReviewShell";
 import type { SessionInfo } from "@/components/layout/SessionInfoBar";
 import { NewReviewForm, type NewReviewSubmit } from "@/components/review/NewReviewForm";
 import { ReportView } from "@/components/report/ReportView";
-import { SettingsDialog, type ReviewSettings } from "@/components/settings/SettingsDialog";
+import { SettingsDialog, type ReviewSettings, type ThemeMode } from "@/components/settings/SettingsDialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -50,9 +50,36 @@ type BootState =
       refreshAuth: () => Promise<string | null>;
     };
 
+const THEME_STORAGE_KEY = "nanobot-review-webui.theme";
+
+function loadSavedTheme(): ThemeMode {
+  try {
+    const saved = localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark" || saved === "system") return saved;
+  } catch { /* ignore */ }
+  return "light";
+}
+
+function saveTheme(theme: ThemeMode): void {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch { /* ignore */ }
+}
+
+function applyThemeClass(theme: ThemeMode): void {
+  const root = document.documentElement;
+  if (theme === "system") {
+    const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    root.classList.toggle("dark", prefersDark);
+  } else {
+    root.classList.toggle("dark", theme === "dark");
+  }
+}
+
 const DEFAULT_SETTINGS: ReviewSettings = {
   defaultDepth: "full",
   defaultFocus: [],
+  theme: "light",
 };
 
 function exportMarkdown(reportMarkdown: string, target: string) {
@@ -192,6 +219,11 @@ export default function App() {
   const [state, setState] = useState<BootState>({ status: "loading" });
   const authRefreshRef = useRef<Promise<string | null> | null>(null);
 
+  // Apply saved theme on mount (before React renders, to avoid flash)
+  useEffect(() => {
+    applyThemeClass(loadSavedTheme());
+  }, []);
+
   const bootstrapWithSecret = useCallback((secret: string) => {
     let cancelled = false;
     (async () => {
@@ -301,6 +333,22 @@ function ReviewAppShell({
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<ReviewSettings>(DEFAULT_SETTINGS);
+
+  // Apply theme whenever settings.theme changes
+  useEffect(() => {
+    applyThemeClass(settings.theme);
+    saveTheme(settings.theme);
+  }, [settings.theme]);
+
+  // Listen for system theme changes when in "system" mode
+  useEffect(() => {
+    if (settings.theme !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => applyThemeClass("system");
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [settings.theme]);
+
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarView, setSidebarView] = useState<"reviews" | "auto">("reviews");
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");

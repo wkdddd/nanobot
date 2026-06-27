@@ -8,7 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from nanobot.agent.memory import MemoryStore
 from nanobot.agent.skills import SkillsLoader
-from nanobot.session.goal_state import goal_state_runtime_lines, long_task_mode_enabled
+
 from nanobot.utils.helpers import (
     current_time_str,
     detect_image_mime,
@@ -127,25 +127,11 @@ class ContextBuilder:
         session_metadata: Mapping[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the complete message list for an LLM call."""
-        if long_task_mode_enabled(session_metadata):
-            extra = goal_state_runtime_lines(session_metadata)
-            if not extra:
-                extra = [
-                    "[Long-task mode ON] You MUST call `long_task` immediately to register "
-                    "the user's objective as a sustained goal.",
-                    "Do not plan, research, or ask clarifying questions before calling `long_task`.",
-                    "Write an idempotent, self-contained, bounded goal with explicit done-ness criteria.",
-                    "After setting the goal, proceed with execution using ordinary tools.",
-                    "When fully done or cancelled, call `complete_goal` with a recap.",
-                ]
-        else:
-            extra = []
         runtime_ctx = self._build_runtime_context(
             channel,
             chat_id,
             self.timezone,
             sender_id=sender_id,
-            supplemental_lines=extra or None,
         )
         user_content = self._build_user_content(current_message, media)
 
@@ -193,4 +179,3 @@ class ContextBuilder:
         if not images:
             return text
         return images + [{"type": "text", "text": text}]
-

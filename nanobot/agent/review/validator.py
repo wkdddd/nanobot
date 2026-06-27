@@ -132,7 +132,8 @@ class ReviewValidator:
             with path.open("r", encoding="utf-8", errors="replace") as f:
                 count = sum(1 for _ in f)
             return line <= count
-        except OSError:
+        except OSError as e:
+            logger.warning("file open failed:{}",e)
             return False
 
     @staticmethod
@@ -202,16 +203,14 @@ class ReviewValidator:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
+        if line is not None:
+            lines_list = text.splitlines()
+            start = max(line - 5, 0)
+            end = min(line + 4, len(lines_list))
+            nearby = " ".join(" ".join(item.split()) for item in lines_list[start:end])
+            return any(snippet in nearby for snippet in snippets)
         normalized_text = " ".join(text.split())
-        if any(snippet in normalized_text for snippet in snippets):
-            return True
-        if line is None:
-            return False
-        lines = text.splitlines()
-        start = max(line - 4, 0)
-        end = min(line + 3, len(lines))
-        nearby = " ".join(" ".join(item.split()) for item in lines[start:end])
-        return any(snippet in nearby for snippet in snippets)
+        return any(snippet in normalized_text for snippet in snippets)
 
     @staticmethod
     def _evidence_snippets(evidence: str) -> list[str]:

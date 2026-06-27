@@ -18,10 +18,10 @@ from pydantic import Field
 
 from nanobot.agent.review.utils import changed_lines_from_patch, parse_repo
 from nanobot.config.schema import Base
-from nanobot.rag.review_service import DEFAULT_TEXT_EXTS
+from nanobot.rag.review_service import DEFAULT_BINARY_EXTS
 from nanobot.utils.log_style import log_event
 
-_DEFAULT_TEXT_EXTS = DEFAULT_TEXT_EXTS
+_DEFAULT_BINARY_EXTS = DEFAULT_BINARY_EXTS
 
 
 class GitHubRepoConfig(Base):
@@ -516,7 +516,7 @@ class GitHubRepoReader:
                 continue
             path = str(item.get("path", ""))
             suffix = Path(path).suffix.lower()
-            if suffix not in _DEFAULT_TEXT_EXTS:
+            if suffix in _DEFAULT_BINARY_EXTS:
                 continue
             if pattern and not fnmatch.fnmatch(path, pattern):
                 continue
@@ -588,7 +588,7 @@ class GitHubRepoReader:
         touched: dict[str, list[int]] = {}
         for item in data[: self.config.max_patch_files]:
             filename = str(item.get("filename", ""))
-            if not filename or Path(filename).suffix.lower() not in _DEFAULT_TEXT_EXTS:
+            if not filename or Path(filename).suffix.lower() in _DEFAULT_BINARY_EXTS:
                 continue
             patch = item.get("patch") or ""
             touched[filename] = changed_lines_from_patch(filename, patch)
@@ -652,7 +652,7 @@ class GitHubRepoReader:
                 path = str(getattr(item, "path", ""))
                 if getattr(item, "type", "") != "blob":
                     continue
-                if Path(path).suffix.lower() not in _DEFAULT_TEXT_EXTS:
+                if Path(path).suffix.lower() in _DEFAULT_BINARY_EXTS:
                     continue
                 if pattern and not fnmatch.fnmatch(path, pattern):
                     continue
@@ -699,7 +699,7 @@ class GitHubRepoReader:
             touched: dict[str, list[int]] = {}
             for item in list(pr.get_files())[: self.config.max_patch_files]:
                 filename = str(getattr(item, "filename", ""))
-                if not filename or Path(filename).suffix.lower() not in _DEFAULT_TEXT_EXTS:
+                if not filename or Path(filename).suffix.lower() in _DEFAULT_BINARY_EXTS:
                     continue
                 patch = str(getattr(item, "patch", "") or "")
                 touched[filename] = changed_lines_from_patch(filename, patch)

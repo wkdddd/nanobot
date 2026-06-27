@@ -21,6 +21,12 @@ from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.prompt_templates import render_template
 
+
+_DIMENSION_RUNNING = "running"
+_DIMENSION_COMPLETED = "completed"
+_DIMENSION_FAILED = "failed"
+
+
 class SubagentManager:
     """Manages concurrent subagent execution and result injection."""
 
@@ -67,6 +73,7 @@ class SubagentManager:
         self._task_statuses: dict[str, SubagentStatus] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
         self._session_results: dict[str, asyncio.Queue[InboundMessage]] = {}
+        self._session_dimension_state: dict[str, dict[str, str]] = {}
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
@@ -120,6 +127,20 @@ class SubagentManager:
         origin_message_id: str | None = None,
     ) -> str:
         """Start a dedicated review subagent for same-turn result integration."""
+        if session_key:
+            state = self._session_dimension_state.setdefault(session_key, {})
+            current = state.get(label)
+            if current == _DIMENSION_RUNNING:
+                return (
+                    "Error: Cannot spawn review subagent: dimension "
+                    f"'{label}' is already running for this review."
+                )
+            if current == _DIMENSION_COMPLETED:
+                return (
+                    "Error: Cannot spawn review subagent: dimension "
+                    f"'{label}' has already completed for this review."
+                )
+            state[label] = _DIMENSION_RUNNING
         task_id = str(uuid.uuid4())[:8]
         origin = {"channel": origin_channel, "chat_id": origin_chat_id, "session_key": session_key}
         status = SubagentStatus(
@@ -144,6 +165,8 @@ class SubagentManager:
                 ids.discard(task_id)
                 if not ids:
                     del self._session_tasks[session_key]
+            if session_key and self._dimension_state(session_key, label) == _DIMENSION_RUNNING:
+                self._set_dimension_state(session_key, label, _DIMENSION_FAILED)
 
         bg_task.add_done_callback(_cleanup)
         logger.info("Spawned review subagent [{}]: {}", task_id, label)
@@ -197,10 +220,10 @@ class SubagentManager:
                 session_key=sess_key,
                 llm_timeout_s=llm_timeout,
             ))
-            status.phase = "done"
             status.stop_reason = result.stop_reason
 
             if result.stop_reason == "tool_error":
+                status.phase = "error"
                 status.tool_events = list(result.tool_events)
                 final_result = self._format_partial_progress(result)
                 await self._announce_result(
@@ -208,6 +231,7 @@ class SubagentManager:
                 )
                 return
             if result.stop_reason == "error":
+                status.phase = "error"
                 await self._announce_result(
                     task_id,
                     label,
@@ -220,11 +244,32 @@ class SubagentManager:
                 return
 
             final_result = self._extract_review_submit_result(result.messages, result.tool_events)
+            if final_result is None and result.stop_reason == "completed":
+                status.phase = "retrying_review_submit"
+                retry_messages = list(result.messages) + [{
+                    "role": "user",
+                    "content": "You did not call review_submit. You MUST call it now. Use findings:[] if no issues were found.",
+                }]
+                retry = await self.runner.run(AgentRunSpec(
+                    initial_messages=retry_messages,
+                    tools=tools,
+                    model=self.model,
+                    max_iterations=2,
+                    max_tool_result_chars=self.max_tool_result_chars,
+                    tool_choice={"function": {"name": "review_submit"}},
+                    error_message=None,
+                    fail_on_tool_error=False,
+                    session_key=sess_key,
+                    llm_timeout_s=llm_timeout,
+                ))
+                status.stop_reason = retry.stop_reason
+                final_result = self._extract_review_submit_result(retry.messages, retry.tool_events)
             if final_result is None:
                 final_result = result.final_content or (
                     "Review task completed but no structured findings were submitted."
                 )
             logger.info("Review subagent [{}] completed successfully", task_id)
+            status.phase = "done"
             await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
 
         except Exception as e:
@@ -280,7 +325,18 @@ class SubagentManager:
 
         await self.bus.publish_inbound(msg)
         self._publish_session_result(override, msg)
+        self._set_dimension_state(
+            override,
+            label,
+            _DIMENSION_COMPLETED if status == "ok" else _DIMENSION_FAILED,
+        )
         logger.debug("Subagent [{}] announced result to {}:{}", task_id, origin['channel'], origin['chat_id'])
+
+    def _dimension_state(self, session_key: str, label: str) -> str | None:
+        return self._session_dimension_state.get(session_key, {}).get(label)
+
+    def _set_dimension_state(self, session_key: str, label: str, state: str) -> None:
+        self._session_dimension_state.setdefault(session_key, {})[label] = state
 
     def _publish_session_result(self, session_key: str, msg: InboundMessage) -> None:
         self._session_results.setdefault(session_key, asyncio.Queue()).put_nowait(msg)
@@ -345,15 +401,11 @@ class SubagentManager:
         from nanobot.agent.skills import SkillsLoader
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
-        skills_summary = SkillsLoader(
-            self.workspace,
-            disabled_skills=self.disabled_skills,
-        ).build_skills_summary()
         return render_template(
             "agent/review_subagent_system.md",
             time_ctx=time_ctx,
             workspace=str(self.workspace),
-            skills_summary=skills_summary or "",
+            skills_summary= "",#保留skillsummary接口
         )
 
     @staticmethod

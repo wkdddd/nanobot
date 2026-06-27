@@ -19,6 +19,36 @@ from nanobot.agent.review.types import (
     ReviewJudgeVerdict,
 )
 
+_VERDICT_TOOL: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_verdicts",
+        "description": "Submit judge verdicts for all candidates.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "verdicts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "decision": {
+                                "type": "string",
+                                "enum": ["accept", "reject", "needs_confirmation"],
+                            },
+                            "reason": {"type": "string"},
+                            "confidence": {"type": "string"},
+                        },
+                        "required": ["id", "decision", "reason", "confidence"],
+                    },
+                }
+            },
+            "required": ["verdicts"],
+        },
+    },
+}
+
 
 @dataclass(frozen=True, slots=True)
 class ReviewJudgeConfig:
@@ -69,11 +99,11 @@ class ReviewJudge:
                         {"role": "system", "content": self._system_prompt()},
                         {"role": "user", "content": prompt},
                     ],
-                    tools=[],
+                    tools=[_VERDICT_TOOL],
                     model=self._model,
                     max_tokens=self._config.max_tokens,
                     temperature=0,
-                    tool_choice="none",
+                    tool_choice={"function": {"name": "submit_verdicts"}},
                 ),
                 timeout=self._config.timeout_seconds,
             )
@@ -86,7 +116,7 @@ class ReviewJudge:
             )
             return {}
 
-        verdicts = self._parse_verdicts(response.content or "")
+        verdicts = self._parse_verdicts(response.tool_calls)
         logger.info(
             "review.judge.done trace_id={} status=ok verdicts={} elapsed_ms={:.1f}",
             trace_id,
@@ -126,7 +156,7 @@ class ReviewJudge:
     def _system_prompt() -> str:
         return (
             "You are a strict code-review judge. Decide whether each candidate is "
-            "actionable and supported. Output only a JSON array."
+            "actionable and supported. Call submit_verdicts with your decisions."
         )
 
     @staticmethod
@@ -157,27 +187,15 @@ class ReviewJudge:
             "that hard_reason. Use accept when the claim is supported by the supplied "
             "evidence, or needs_confirmation when it is plausible but still requires "
             "manual verification.\n\n"
-            "Return JSON array objects with keys: id, decision, reason, confidence, severity.\n\n"
             + json.dumps(payload, ensure_ascii=False)
         )
 
     @staticmethod
-    def _parse_verdicts(raw: str) -> dict[str, ReviewJudgeVerdict]:
-        text = raw.strip()
-        if "```" in text:
-            parts = text.split("```")
-            for part in parts:
-                cleaned = part.strip()
-                if cleaned.startswith("json"):
-                    cleaned = cleaned[4:].strip()
-                if cleaned.startswith("["):
-                    text = cleaned
-                    break
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            logger.warning("review.judge.parse_failed chars={}", len(raw))
+    def _parse_verdicts(tool_calls: list) -> dict[str, ReviewJudgeVerdict]:
+        if not tool_calls:
+            logger.warning("review.judge.parse_failed reason=no_tool_calls")
             return {}
+        data = tool_calls[0].arguments.get("verdicts", [])
         if not isinstance(data, list):
             return {}
         verdicts: dict[str, ReviewJudgeVerdict] = {}

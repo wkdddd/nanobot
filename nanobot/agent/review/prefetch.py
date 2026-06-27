@@ -75,7 +75,7 @@ async def _emit_prefetch_progress(
         logger.exception("review.prefetch.progress_emit_failed trace_id={}", trace_id)
 
 
-def _compact_evidence(raw: str, *, budget: int = 2400) -> str:
+def _compact_evidence(raw: str, *, budget: int = 10000) -> str:
     if not raw.strip():
         return ""
     lines = raw.splitlines()

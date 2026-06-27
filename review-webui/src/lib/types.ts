@@ -336,11 +336,6 @@ export type InboundEvent =
       chat_id: string;
       enabled: boolean;
     }
-  | {
-      event: "long_task_mode_updated";
-      chat_id: string;
-      enabled: boolean;
-    }
   | { event: "error"; chat_id?: string; detail?: string };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
@@ -449,8 +444,4 @@ export type Outbound =
       chat_id: string;
       enabled: boolean;
     }
-  | {
-      type: "set_long_task_mode";
-      chat_id: string;
-      enabled: boolean;
-    };
+  ;

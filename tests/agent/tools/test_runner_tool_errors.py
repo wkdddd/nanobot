@@ -97,6 +97,19 @@ def make_spec(tools: ToolRegistry | None = None, **overrides: Any) -> AgentRunSp
     return AgentRunSpec(**values)
 
 
+def test_build_request_kwargs_includes_tool_choice() -> None:
+    runner = AgentRunner(DummyProvider())
+    choice = {"function": {"name": "review_submit"}}
+
+    kwargs = runner._build_request_kwargs(
+        make_spec(tool_choice=choice),
+        [{"role": "user", "content": "submit"}],
+        tools=[],
+    )
+
+    assert kwargs["tool_choice"] == choice
+
+
 @pytest.mark.asyncio
 async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeypatch) -> None:
     log_calls: list[tuple[str, str]] = []

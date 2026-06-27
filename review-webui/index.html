@@ -3,14 +3,15 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="color-scheme" content="light" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="description" content="nanobot Review Agent — 代码审查工作台" />
-    <meta name="theme-color" content="#FAF8F5" />
+    <meta name="theme-color" content="#FAF9F5" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#262624" media="(prefers-color-scheme: dark)" />
     <link rel="icon" type="image/jpeg" href="/logo.png" />
     <link rel="apple-touch-icon" href="/logo.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
     <style>
       html,
       body,
@@ -20,13 +21,18 @@
 
       body {
         margin: 0;
-        background: #FAF8F5;
-        color: #2A2420;
+        background: #FAF9F5;
+        color: #3D3929;
         font-family:
-          "DM Sans",
-          system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Poppins",
+          ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
           "Noto Sans", "Noto Sans SC", "PingFang SC",
           "Microsoft YaHei", sans-serif;
+      }
+
+      html.dark body {
+        background: #262624;
+        color: #f1f1ef;
       }
 
       .boot-splash {
@@ -40,15 +46,19 @@
         display: flex;
         align-items: center;
         gap: 10px;
-        color: rgba(42, 36, 32, 0.64);
+        color: rgba(61, 57, 41, 0.64);
         font-size: 14px;
+      }
+
+      html.dark .boot-splash-inner {
+        color: rgba(241, 241, 239, 0.64);
       }
 
       .boot-dot {
         width: 8px;
         height: 8px;
         border-radius: 9999px;
-        background: #7A5C4C;
+        background: #C96442;
         opacity: 0.75;
         animation: boot-pulse 1s ease-in-out infinite;
       }
@@ -58,6 +68,20 @@
         50% { transform: scale(1); opacity: 0.85; }
       }
     </style>
+    <script>
+      // Apply saved theme class to <html> BEFORE React loads, to prevent flash
+      (function() {
+        try {
+          var t = localStorage.getItem("nanobot-review-webui.theme");
+          if (t === "dark") document.documentElement.classList.add("dark");
+          else if (t === "system") {
+            if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+              document.documentElement.classList.add("dark");
+            }
+          }
+        } catch(e) {}
+      })();
+    </script>
     <title>Review Agent</title>
   </head>
   <body class="antialiased">

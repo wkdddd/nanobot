@@ -19,7 +19,7 @@ from nanobot.agent.review.utils import (
     path_matches_scope,
 )
 from nanobot.rag.review_service import (
-    DEFAULT_TEXT_EXTS,
+    DEFAULT_BINARY_EXTS,
     REMOTE_SOURCE_TYPE,
     SOURCE_TYPE,
     RepositoryRAGRequest,
@@ -47,6 +47,8 @@ class ReviewEvidenceService:
         self.repository_rag = rag_service
         self.workspace = (workspace or rag_service.workspace).expanduser().resolve()
         self.github = github or GitHubRepoReader(workspace=self.workspace)
+        self.last_cache_root: Path | None = None
+        self.last_changed_files: list[str] = []
 
     async def dispatch(
         self,
@@ -66,6 +68,8 @@ class ReviewEvidenceService:
         trace_id: str = "",
     ) -> str:
         """Unified entry point that routes to the appropriate evidence method."""
+        self.last_cache_root = None
+        self.last_changed_files = []
         if target_type == "github":
             if action == "diff":
                 return await self.github_diff_context(
@@ -131,7 +135,7 @@ class ReviewEvidenceService:
                     candidate.relative_to(rag_service.workspace)
                 except ValueError:
                     raise PermissionError(f"target path is outside review root: {rel}") from None
-                if candidate.is_file() and candidate.suffix.lower() in DEFAULT_TEXT_EXTS:
+                if candidate.is_file() and candidate.suffix.lower() not in DEFAULT_BINARY_EXTS:
                     files.append(candidate)
                 elif candidate.is_dir():
                     files.extend(rag_service.iter_candidate_files(candidate))
@@ -289,7 +293,7 @@ class ReviewEvidenceService:
             text_paths: list[str] = []
             for path in sorted(raw_paths):
                 rel_path = self._path_relative_to_root(path, worktree=worktree, root=root)
-                if rel_path is None or Path(rel_path).suffix.lower() not in DEFAULT_TEXT_EXTS:
+                if rel_path is None or Path(rel_path).suffix.lower() in DEFAULT_BINARY_EXTS:
                     continue
                 text_paths.append(rel_path)
                 lines: set[int] = set()
@@ -326,7 +330,7 @@ class ReviewEvidenceService:
             paths.update(self._git_cli("diff", "--name-only", "--cached", cwd=root).splitlines())
             paths.update(self._git_cli("ls-files", "--others", "--exclude-standard", cwd=root).splitlines())
             text_paths = sorted(
-                path for path in paths if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS
+                path for path in paths if path and Path(path).suffix.lower() not in DEFAULT_BINARY_EXTS
             )
             untracked = set(self._git_cli("ls-files", "--others", "--exclude-standard", cwd=root).splitlines())
             touched: dict[str, list[int]] = {}
@@ -392,7 +396,7 @@ class ReviewEvidenceService:
             target.relative_to(Path(worktree).resolve())
         except ValueError:
             return []
-        if target.suffix.lower() not in DEFAULT_TEXT_EXTS:
+        if target.suffix.lower() in DEFAULT_BINARY_EXTS:
             return []
         try:
             text = target.read_text(encoding="utf-8")
@@ -407,7 +411,7 @@ class ReviewEvidenceService:
             target.relative_to(root)
         except ValueError:
             return []
-        if target.suffix.lower() not in DEFAULT_TEXT_EXTS:
+        if target.suffix.lower() in DEFAULT_BINARY_EXTS:
             return []
         try:
             text = target.read_text(encoding="utf-8")
@@ -441,6 +445,7 @@ class ReviewEvidenceService:
                 trace_id=trace_id,
             )
         )
+        self.last_cache_root = result.cache_root
         log_event(
             logger,
             "info",
@@ -497,6 +502,7 @@ class ReviewEvidenceService:
                 )
             )
             return f"Error: failed to fetch GitHub repository context: {exc}"
+        self.last_changed_files = list(files)
         if not files:
             log_event(
                 logger,
@@ -599,6 +605,7 @@ class ReviewEvidenceService:
                 )
             )
             return f"Error: failed to fetch GitHub PR diff context: {exc}"
+        self.last_changed_files = list(files)
         if not files:
             log_event(
                 logger,

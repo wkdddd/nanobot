@@ -120,5 +120,4 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for details on the two-branch model a
 - 遇到不合适的设计要给出具体建议；不清楚的地方必须提问，不要猜测
 - 给出具体的修改位置和修改思路，不只是描述问题
 - 不需要兼容旧参数/旧配置，直接改
-- 审视时覆盖前后端细节、文档、配置，不要只看单个文件
 - 日志要完整（错误信息 + 关键节点 info），但不要泛滥

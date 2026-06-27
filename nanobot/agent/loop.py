@@ -38,10 +38,6 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
-from nanobot.session.goal_state import (
-    goal_state_ws_blob,
-    runner_wall_llm_timeout_s,
-)
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.artifacts import generated_image_paths_from_messages
 from nanobot.utils.document import extract_documents
@@ -304,7 +300,7 @@ class AgentLoop:
                 if max_concurrent_subagents is not None
                 else defaults.max_concurrent_subagents
             ),
-            llm_wall_timeout_for_session=lambda sk: runner_wall_llm_timeout_s(self.sessions, sk),
+            llm_wall_timeout_for_session=lambda sk: None,
         )
         self._unified_session = unified_session
         self._max_messages = max_messages if max_messages > 0 else 120
@@ -527,7 +523,7 @@ class AgentLoop:
 
     def _build_review_judge(self) -> ReviewJudge | None:
         judge_settings = getattr(self.review_config, "judge", None)
-        if judge_settings is not None and  getattr(judge_settings, "enabled", False):
+        if judge_settings is not None and not getattr(judge_settings, "enabled", True):
             return None
         provider = self.provider
         model = self.model
@@ -877,10 +873,23 @@ class AgentLoop:
                     "content": (
                         "[System] All same-session review subagents have completed. "
                         "Continue integrating the injected subagent results and finalize "
-                        "only if validation is complete."
+                        "only if validation is complete. Do not spawn another subagent "
+                        "for a review dimension that has already returned a result."
                     ),
                     "_metadata": {"injected_event": "subagent_barrier"},
                 }
+
+            def _append_subagent_barrier_if_done() -> None:
+                nonlocal subagent_barrier_sent
+                if (
+                    saw_running_subagents
+                    and not subagent_barrier_sent
+                    and _running_subagents() == 0
+                    and is_review_session
+                    and len(items) < limit
+                ):
+                    subagent_barrier_sent = True
+                    items.append(_subagent_barrier_message())
 
             while buffered_pending and len(items) < limit and _running_subagents() == 0:
                 items.append(_to_user_message(buffered_pending.pop(0)))
@@ -920,6 +929,8 @@ class AgentLoop:
             ):
                 subagent_barrier_sent = True
                 items.append(_subagent_barrier_message())
+            else:
+                _append_subagent_barrier_if_done()
 
             return items
 
@@ -958,11 +969,20 @@ class AgentLoop:
                 if review_hook is not None and hasattr(review_hook, "set_allowed_dimensions"):
                     review_hook.set_allowed_dimensions(review_meta[ReviewMetaKey.ALLOWED_DIMENSIONS])
             if review_hook is not None and hasattr(review_hook, "set_validation_context"):
+                target_type_value = str(review_meta.get(ReviewMetaKey.TARGET_TYPE) or "").strip().lower()
+                evidence_provider = review_meta.get(ReviewMetaKey.EVIDENCE_PROVIDER)
                 validation_workspace = str(review_meta.get(ReviewMetaKey.LOCAL_ROOT) or self.workspace)
+                changed_files: list[str] = []
                 local_target = review_meta.get(ReviewMetaKey.LOCAL_TARGET)
+                if target_type_value == "github" and evidence_provider is not None:
+                    cache_root = getattr(evidence_provider, "last_cache_root", None)
+                    if cache_root is not None:
+                        validation_workspace = str(cache_root)
+                        changed_files = list(getattr(evidence_provider, "last_changed_files", []))
+                        local_target = None
                 review_hook.set_validation_context(
                     workspace=validation_workspace,
-                    changed_files=[],
+                    changed_files=changed_files,
                     local_target=local_target if isinstance(local_target, str) else None,
                 )
             if review_meta:
@@ -1025,13 +1045,7 @@ class AgentLoop:
                 retry_wait_callback=on_retry_wait,
                 checkpoint_callback=_checkpoint,
                 injection_callback=_drain_pending,
-                # Sustained goals may legitimately exceed NANOBOT_LLM_TIMEOUT_S; idle stall
-                # is still capped by NANOBOT_STREAM_IDLE_TIMEOUT_S in streaming providers.
-                llm_timeout_s=runner_wall_llm_timeout_s(
-                    self.sessions,
-                    session.key if session is not None else session_key,
-                    metadata=(session.metadata if session is not None else None),
-                ),
+                llm_timeout_s=None,
                 permission_policy=permission_policy,
                 permission_request_callback=_permission_request_cb,
             ))
@@ -1219,7 +1233,6 @@ class AgentLoop:
                     metadata=meta,
                 ))
                 stream_segment += 1
-            sess_turn = self.sessions.get_or_create(session_key)
             await self.bus.publish_outbound(OutboundMessage(
                 channel=msg.channel,
                 chat_id=msg.chat_id,
@@ -1227,7 +1240,6 @@ class AgentLoop:
                 metadata={
                     **dict(msg.metadata or {}),
                     "_turn_end": True,
-                    "goal_state": goal_state_ws_blob(sess_turn.metadata),
                 },
             ))
             turn_end_sent = True
@@ -1293,8 +1305,6 @@ class AgentLoop:
                             turn_metadata["latency_ms"] = int(turn_lat)  # 这一轮用了多长时间
                         if turn_trace:
                             turn_metadata["turn_trace"] = turn_trace
-                        sess_turn = self.sessions.get_or_create(session_key)
-                        turn_metadata["goal_state"] = goal_state_ws_blob(sess_turn.metadata)  # 当前持久目标的状态
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=turn_metadata,

@@ -14,6 +14,7 @@ from nanobot.agent.review.utils import (
     parse_repo,
 )
 from nanobot.rag.review_service import (
+    REMOTE_SOURCE_TYPE,
     RepoReviewHit,
     RepositoryRAGRequest,
     RepositoryRAGOptions,
@@ -410,3 +411,64 @@ async def test_repository_rag_logs_empty_query_and_no_terms(tmp_path: Path) -> N
     assert hits == []
     assert "status=empty_query" in sink.text
     assert "status=no_terms" in sink.text
+
+
+def test_repository_rag_snapshot_cache_is_scoped_by_file_set(tmp_path: Path) -> None:
+    service = RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False))
+
+    broad = service.write_snapshot(
+        "owner/repo@main",
+        {
+            "review-webui/index.html": "<html></html>",
+            "review-webui/src/App.tsx": "export function App() {}",
+        },
+    )
+    narrow = service.write_snapshot(
+        "owner/repo@main",
+        {"review-webui/index.html": "<html></html>"},
+    )
+    narrow_again = service.write_snapshot(
+        "owner/repo@main",
+        {"review-webui/index.html": "<html></html>"},
+    )
+
+    assert broad != narrow
+    assert narrow == narrow_again
+    assert [path.relative_to(narrow).as_posix() for path in service.iter_candidate_files(narrow)] == [
+        "review-webui/index.html"
+    ]
+    manifest = (narrow / ".nanobot_snapshot.json").read_text(encoding="utf-8")
+    assert '"scope_digest"' in manifest
+    assert '"files_count": 1' in manifest
+
+
+def test_repository_rag_snapshot_sync_prunes_previous_scope(tmp_path: Path) -> None:
+    service = RepositoryRAGService(tmp_path, options=RepositoryRAGOptions(enable_chonkie=False))
+    broad = service.write_snapshot(
+        "owner/repo@main",
+        {
+            "review-webui/index.html": "<html></html>",
+            "review-webui/src/App.tsx": "export function App() {}",
+        },
+    )
+    narrow = service.write_snapshot(
+        "owner/repo@main",
+        {"review-webui/index.html": "<html></html>"},
+    )
+
+    service.sync_files(
+        source_type=REMOTE_SOURCE_TYPE,
+        files=list(service.iter_candidate_files(broad)),
+        trace_id="broad",
+    )
+    assert service.index.count(REMOTE_SOURCE_TYPE) == 2
+
+    service.sync_files(
+        source_type=REMOTE_SOURCE_TYPE,
+        files=list(service.iter_candidate_files(narrow)),
+        trace_id="narrow",
+    )
+
+    chunk_paths = [chunk.path for chunk in service.index.list_chunks(REMOTE_SOURCE_TYPE)]
+    assert len(chunk_paths) == 1
+    assert chunk_paths[0].endswith("review-webui/index.html")

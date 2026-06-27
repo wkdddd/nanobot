@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from nanobot.agent.loop import AgentLoop, TurnContext, TurnState, _is_consumed_subagent_result
+from nanobot.agent.hooks.subagent import SubagentStatus
 from nanobot.agent.runner import AgentRunResult, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.bus.queue import MessageBus
@@ -81,6 +82,50 @@ class InjectionRunner:
         )
 
 
+class ReviewSubmitRetryRunner:
+    def __init__(self) -> None:
+        self.specs: list[AgentRunSpec] = []
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        self.specs.append(spec)
+        if len(self.specs) == 1:
+            return AgentRunResult(
+                final_content="review prose without tool call",
+                messages=list(spec.initial_messages),
+                stop_reason="completed",
+            )
+        return AgentRunResult(
+            final_content=None,
+            messages=list(spec.initial_messages),
+            tool_events=[{
+                "name": "review_submit",
+                "status": "ok",
+                "detail": '{"submitted": true, "findings": [], "errors": []}',
+                "raw_result": '{"submitted":true,"findings":[],"errors":[]}',
+            }],
+        )
+
+
+class BlockingSubmitRunner:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+        self.specs: list[AgentRunSpec] = []
+
+    async def run(self, spec: AgentRunSpec) -> AgentRunResult:
+        self.specs.append(spec)
+        await self.release.wait()
+        return AgentRunResult(
+            final_content=None,
+            messages=list(spec.initial_messages),
+            tool_events=[{
+                "name": "review_submit",
+                "status": "ok",
+                "detail": '{"submitted": true, "findings": [], "errors": []}',
+                "raw_result": '{"submitted":true,"findings":[],"errors":[]}',
+            }],
+        )
+
+
 class RunningSubagents:
     def __init__(self, running: int = 1) -> None:
         self.running = running
@@ -139,6 +184,10 @@ class MultiDrainRunner:
         task_ids = [item.get("_metadata", {}).get("subagent_task_id") for item in second]
         assert "second" in task_ids
         assert any(item.get("content") == "user interjection" for item in second)
+        assert any(
+            item.get("_metadata", {}).get("injected_event") == "subagent_barrier"
+            for item in second
+        )
 
         messages = list(spec.initial_messages)
         for batch in self.injected_batches:
@@ -294,6 +343,7 @@ async def test_agent_loop_pending_drain_waits_for_running_subagent_results(tmp_p
     subagents = RunningSubagents(running=1)
     loop.subagents = subagents
     session = Session(key="test:pending")
+    session.metadata["review_target"] = "target"
     pending: asyncio.Queue = asyncio.Queue()
     runner = MultiDrainRunner(pending, subagents)
     loop.runner = runner
@@ -309,6 +359,7 @@ async def test_agent_loop_pending_drain_waits_for_running_subagent_results(tmp_p
         "first",
         "second",
     ]
+    assert runner.injected_batches[1][-1]["_metadata"]["injected_event"] == "subagent_barrier"
 
 
 @pytest.mark.asyncio
@@ -317,6 +368,7 @@ async def test_agent_loop_drain_waits_on_subagent_manager_result_queue(tmp_path)
     subagents = RunningSubagents(running=1)
     loop.subagents = subagents
     session = Session(key="test:pending")
+    session.metadata["review_target"] = "target"
     pending: asyncio.Queue = asyncio.Queue()
     runner = ManagerQueueDrainRunner(subagents)
     loop.runner = runner
@@ -328,8 +380,9 @@ async def test_agent_loop_drain_waits_on_subagent_manager_result_queue(tmp_path)
         pending_queue=pending,
     )
 
-    assert len(runner.injected) == 1
+    assert len(runner.injected) == 2
     assert runner.injected[0]["_metadata"]["subagent_task_id"] == "direct"
+    assert runner.injected[1]["_metadata"]["injected_event"] == "subagent_barrier"
 
 
 def test_invalid_max_concurrent_requests_falls_back_to_default(monkeypatch) -> None:
@@ -508,6 +561,94 @@ def test_review_subagent_ignores_unprocessed_review_submit_arguments() -> None:
     }]
 
     assert SubagentManager._extract_review_submit_result(messages) is None
+
+
+@pytest.mark.asyncio
+async def test_review_subagent_finalization_retry_forces_review_submit(tmp_path) -> None:
+    manager = SubagentManager(
+        DummyProvider(),
+        tmp_path,
+        MessageBus(),
+        max_tool_result_chars=1000,
+    )
+    runner = ReviewSubmitRetryRunner()
+    manager.runner = runner  # type: ignore[assignment]
+    status = SubagentStatus(
+        task_id="task1",
+        label="security",
+        task_description="review security",
+        started_at=0.0,
+    )
+
+    await manager._run_subagent(
+        "task1",
+        "review security",
+        "security",
+        {"channel": "cli", "chat_id": "direct", "session_key": "cli:direct"},
+        status,
+    )
+
+    assert len(runner.specs) == 2
+    assert runner.specs[0].tool_choice is None
+    assert runner.specs[1].tool_choice == {"function": {"name": "review_submit"}}
+    assert runner.specs[1].tools.has("review_submit")
+    assert status.phase == "done"
+    assert status.stop_reason == "completed"
+    assert manager._dimension_state("cli:direct", "security") == "completed"
+
+
+@pytest.mark.asyncio
+async def test_subagent_manager_rejects_duplicate_dimension_lifecycle(tmp_path) -> None:
+    manager = SubagentManager(
+        DummyProvider(),
+        tmp_path,
+        MessageBus(),
+        max_tool_result_chars=1000,
+    )
+    runner = BlockingSubmitRunner()
+    manager.runner = runner  # type: ignore[assignment]
+
+    first = await manager.spawn(
+        "review security",
+        "security",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        session_key="cli:direct",
+    )
+    running_duplicate = await manager.spawn(
+        "review security again",
+        "security",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        session_key="cli:direct",
+    )
+
+    assert "started" in first
+    assert "already running" in running_duplicate
+    assert manager._dimension_state("cli:direct", "security") == "running"
+    for _ in range(50):
+        if runner.specs:
+            break
+        await asyncio.sleep(0.01)
+    assert len(runner.specs) == 1
+
+    runner.release.set()
+    msg = await manager.wait_for_session_result("cli:direct", timeout=0.5)
+    assert msg is not None
+    if manager._running_tasks:
+        await asyncio.gather(*list(manager._running_tasks.values()))
+
+    completed_duplicate = await manager.spawn(
+        "review security after completion",
+        "security",
+        origin_channel="cli",
+        origin_chat_id="direct",
+        session_key="cli:direct",
+    )
+
+    assert "already completed" in completed_duplicate
+    assert manager._dimension_state("cli:direct", "security") == "completed"
+    assert len(runner.specs) == 1
 
 
 @pytest.mark.asyncio

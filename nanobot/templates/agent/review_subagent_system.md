@@ -18,3 +18,10 @@ Read SKILL.md with read_file to use a skill.
 
 {{ skills_summary }}
 {% endif %}
+
+## MANDATORY FINAL STEP
+
+You MUST call `review_submit` as your last action — no exceptions, no text summary.
+- Found issues → call `review_submit` with your findings
+- Found nothing → call `review_submit` with `findings: []`
+Never end your response with text. The `review_submit` call is your only valid final output.

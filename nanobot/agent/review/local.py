@@ -10,7 +10,7 @@ from pathlib import Path
 from loguru import logger
 
 from nanobot.agent.tools.path_utils import WORKSPACE_BOUNDARY_NOTE, is_under
-from nanobot.rag.review_service import DEFAULT_TEXT_EXTS, RepositoryRAGOptions
+from nanobot.rag.review_service import DEFAULT_BINARY_EXTS, RepositoryRAGOptions
 
 
 _KEY_FILES = (
@@ -159,7 +159,7 @@ class LocalRepoReader:
                 | set(repo.git.diff("--name-only", "--cached").splitlines())
                 | set(str(path) for path in repo.untracked_files)
             )
-            changed = [path for path in changed if path and Path(path).suffix.lower() in DEFAULT_TEXT_EXTS]
+            changed = [path for path in changed if path and Path(path).suffix.lower() not in DEFAULT_BINARY_EXTS]
             lines = ["Local Diff:", "-" * 40, f"Changed text files: {len(changed)}"]
             lines.extend(f"- {path}" for path in changed[:200])
             if len(changed) > 200:
@@ -201,7 +201,7 @@ class LocalRepoReader:
             return "", "", "", "unknown"
 
     def _iter_files(self, root: Path) -> list[Path]:
-        return [item for item in self._walk(root) if item.is_file() and item.suffix.lower() in self.options.text_extensions]
+        return [item for item in self._walk(root) if item.is_file() and item.suffix.lower() not in self.options.binary_extensions]
 
     def _walk(self, root: Path) -> list[Path]:
         results: list[Path] = []

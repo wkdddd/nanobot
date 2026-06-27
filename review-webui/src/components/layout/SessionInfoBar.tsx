@@ -85,22 +85,22 @@ export function SessionInfoBar({ info }: SessionInfoBarProps) {
               {counts.total}
             </span>
             {counts.critical > 0 && (
-              <span className="text-[9px] font-semibold text-red-600 bg-red-50 px-0.5 py-0 rounded leading-3">
+              <span className="text-[9px] font-semibold text-red-600 bg-red-50 dark:text-red-400 dark:bg-red-950 px-0.5 py-0 rounded leading-3">
                 {counts.critical}C
               </span>
             )}
             {counts.high > 0 && (
-              <span className="text-[9px] font-semibold text-orange-600 bg-orange-50 px-0.5 py-0 rounded leading-3">
+              <span className="text-[9px] font-semibold text-orange-600 bg-orange-50 dark:text-orange-400 dark:bg-orange-950 px-0.5 py-0 rounded leading-3">
                 {counts.high}H
               </span>
             )}
             {counts.medium > 0 && (
-              <span className="text-[9px] font-semibold text-yellow-600 bg-yellow-50 px-0.5 py-0 rounded leading-3">
+              <span className="text-[9px] font-semibold text-yellow-600 bg-yellow-50 dark:text-yellow-400 dark:bg-yellow-950 px-0.5 py-0 rounded leading-3">
                 {counts.medium}M
               </span>
             )}
             {counts.low > 0 && (
-              <span className="text-[9px] font-semibold text-blue-600 bg-blue-50 px-0.5 py-0 rounded leading-3">
+              <span className="text-[9px] font-semibold text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-950 px-0.5 py-0 rounded leading-3">
                 {counts.low}L
               </span>
             )}

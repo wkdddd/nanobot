@@ -130,28 +130,28 @@ export function CodePanel({ finding, sessionKey, auth, className }: CodePanelPro
   return (
     <div
       className={cn(
-        "flex flex-col h-full rounded-xl border border-[#e8e0d4] bg-[#fdfbf7] shadow-sm",
+        "flex flex-col h-full rounded-xl border border-border bg-card shadow-sm",
         className
       )}
     >
       {/* Header */}
-      <div className="flex items-center gap-1.5 px-3 py-2 border-b border-[#e8e0d4] bg-[#f7f3ec]">
-        <Code2 className="h-3.5 w-3.5 text-[#8c7b6b]" />
-        <h3 className="text-xs font-semibold text-[#5c4f42]">代码上下文</h3>
+      <div className="flex items-center gap-1.5 px-3 py-2 border-b bg-muted/40">
+        <Code2 className="h-3.5 w-3.5 text-muted-foreground" />
+        <h3 className="text-xs font-semibold text-foreground">代码上下文</h3>
       </div>
 
       {/* Content */}
       <div className="flex-1 p-3 overflow-auto">
         {!finding ? (
           <div className="flex flex-col items-center justify-center h-full text-center gap-2 py-10">
-            <div className="rounded-full bg-[#f0ebe3] p-3">
-              <MousePointerClick className="h-5 w-5 text-[#b0a08c]" />
+            <div className="rounded-full bg-muted p-3">
+              <MousePointerClick className="h-5 w-5 text-muted-foreground" />
             </div>
             <div>
-              <p className="text-xs font-medium text-[#8c7b6b]">
+              <p className="text-xs font-medium text-muted-foreground">
                 选择一个发现项以查看相关代码
               </p>
-              <p className="text-[11px] text-[#b0a08c] mt-0.5">
+              <p className="text-[11px] text-muted-foreground/70 mt-0.5">
                 在左侧列表中点击任意发现项即可预览对应代码
               </p>
             </div>
@@ -159,20 +159,20 @@ export function CodePanel({ finding, sessionKey, auth, className }: CodePanelPro
         ) : (
           <div className="space-y-2">
             {/* Finding info bar */}
-            <div className="flex items-center gap-2 text-xs text-[#8c7b6b]">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
               {finding.line !== null && <span>第 {finding.line} 行</span>}
-              {finding.line !== null && <span className="text-[#d4c8b8]">|</span>}
+              {finding.line !== null && <span className="text-border">|</span>}
               <SeverityBadge severity={finding.severity} />
             </div>
 
             {/* Code block */}
             {loadState.status === "loading" ? (
-              <div className="flex items-center gap-1.5 rounded-md border border-[#e8e0d4] bg-[#faf6f0] px-2.5 py-1.5 text-[11px] text-[#8c7b6b]">
+              <div className="flex items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 正在加载代码上下文...
               </div>
             ) : loadState.status === "error" && !context ? (
-              <div className="flex items-start gap-1.5 rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-700">
+              <div className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive">
                 <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
                 <span>{loadState.message}</span>
               </div>
@@ -193,7 +193,7 @@ export function CodePanel({ finding, sessionKey, auth, className }: CodePanelPro
                 />
               </>
             ) : (
-              <div className="rounded-md border border-[#e8e0d4] bg-[#faf6f0] px-2.5 py-1.5 text-[11px] text-[#8c7b6b]">
+              <div className="rounded-md border border-border bg-background px-2.5 py-1.5 text-[11px] text-muted-foreground">
                 当前发现项没有可定位的代码文件。
               </div>
             )}

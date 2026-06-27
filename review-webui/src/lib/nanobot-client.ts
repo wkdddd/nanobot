@@ -338,14 +338,6 @@ export class NanobotClient {
     });
   }
 
-  sendSetLongTaskMode(chatId: string, enabled: boolean): void {
-    this.queueSend({
-      type: "set_long_task_mode",
-      chat_id: chatId,
-      enabled,
-    });
-  }
-
   // -- internals ---------------------------------------------------------
 
   private setStatus(status: ConnectionStatus): void {

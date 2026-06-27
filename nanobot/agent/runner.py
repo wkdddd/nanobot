@@ -14,7 +14,7 @@ from loguru import logger
 
 from nanobot.agent.hooks.lifecycle import AgentHook, AgentHookContext
 from nanobot.agent.tools.registry import ToolRegistry
-from nanobot.agent.violation_classifier import classify_violation
+from nanobot.agent.tools.safety_boundary import classify_violation
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.utils.helpers import (
     IncrementalThinkExtractor,
@@ -72,6 +72,7 @@ class AgentRunSpec:
     temperature: float | None = None
     max_tokens: int | None = None
     reasoning_effort: str | None = None
+    tool_choice: str | dict[str, Any] | None = None
     hook: AgentHook | None = None
     error_message: str | None = _DEFAULT_ERROR_MESSAGE
     max_iterations_message: str | None = None
@@ -600,6 +601,8 @@ class AgentRunner:
             kwargs["max_tokens"] = spec.max_tokens
         if spec.reasoning_effort is not None:
             kwargs["reasoning_effort"] = spec.reasoning_effort
+        if spec.tool_choice is not None:
+            kwargs["tool_choice"] = spec.tool_choice
         return kwargs
 
     async def _request_model(

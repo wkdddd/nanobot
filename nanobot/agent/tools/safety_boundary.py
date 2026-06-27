@@ -1,4 +1,4 @@
-"""Classifies tool execution results into safety-boundary violations."""
+"""guard tool execution results into safety-boundary ."""
 
 from __future__ import annotations
 

@@ -2,42 +2,92 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ── Design tokens: warm cream palette ── */
+/* ── Design tokens: Claude Design System ── */
 @layer base {
   :root {
-    --background: 40 20% 97%;
-    --foreground: 30 10% 15%;
-    --card: 40 15% 99%;
-    --card-foreground: 30 10% 15%;
-    --popover: 40 15% 99%;
-    --popover-foreground: 30 10% 15%;
-    --primary: 25 35% 35%;
-    --primary-foreground: 40 20% 97%;
-    --secondary: 40 12% 93%;
+    /* Claude brand: terra-cotta #C96442 */
+    --background: 40 28% 96%;
+    --foreground: 30 14% 14%;
+    --card: 40 28% 97%;
+    --card-foreground: 30 14% 8%;
+    --popover: 40 18% 99%;
+    --popover-foreground: 30 14% 8%;
+    --primary: 16 50% 52%;
+    --primary-foreground: 40 28% 98%;
+    --secondary: 40 20% 90%;
     --secondary-foreground: 30 10% 20%;
-    --muted: 40 10% 90%;
-    --muted-foreground: 30 8% 45%;
-    --accent: 35 60% 55%;
-    --accent-foreground: 30 10% 15%;
-    --destructive: 0 60% 50%;
-    --destructive-foreground: 40 20% 97%;
-    --border: 40 10% 88%;
-    --input: 40 10% 88%;
-    --ring: 25 35% 35%;
-    --radius: 0.5rem;
+    --muted: 40 16% 91%;
+    --muted-foreground: 30 6% 42%;
+    --accent: 16 50% 52%;
+    --accent-foreground: 30 10% 14%;
+    --destructive: 0 62% 55%;
+    --destructive-foreground: 40 28% 98%;
+    --border: 40 12% 86%;
+    --input: 40 12% 84%;
+    --ring: 16 50% 52%;
+    --radius: 1rem;
 
-    /* Severity palette */
-    --severity-critical: 0 72% 51%;
-    --severity-high: 24 85% 53%;
-    --severity-medium: 45 90% 51%;
-    --severity-low: 210 60% 55%;
+    /* Claude status colors (warm-toned) */
+    --severity-critical: 0 62% 55%;
+    --severity-high: 16 76% 56%;
+    --severity-medium: 45 68% 48%;
+    --severity-low: 240 36% 48%;
 
-    /* Sidebar */
-    --sidebar: 40 18% 95%;
-    --sidebar-foreground: 30 10% 15%;
-    --sidebar-accent: 40 12% 91%;
+    /* Claude sidebar tokens */
+    --sidebar: 40 24% 95%;
+    --sidebar-foreground: 30 10% 14%;
+    --sidebar-accent: 40 16% 93%;
     --sidebar-accent-foreground: 30 10% 20%;
     --sidebar-border: 40 10% 88%;
+
+    /* Claude shadow tokens */
+    --shadow-xs: 0 1px 3px 0px rgba(0, 0, 0, 0.05);
+    --shadow-sm: 0 1px 3px 0px rgba(0, 0, 0, 0.1), 0 1px 2px -1px rgba(0, 0, 0, 0.1);
+    --shadow-md: 0 1px 3px 0px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 1px 3px 0px rgba(0, 0, 0, 0.1), 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  }
+
+  .dark {
+    /* Claude dark: warm charcoal background, lighter brand */
+    --background: 40 7% 15%;
+    --foreground: 60 6% 94%;
+    --card: 40 7% 17%;
+    --card-foreground: 60 6% 95%;
+    --popover: 40 7% 19%;
+    --popover-foreground: 60 6% 90%;
+    --primary: 16 60% 59%;
+    --primary-foreground: 30 6% 6%;
+    --secondary: 40 7% 19%;
+    --secondary-foreground: 60 6% 76%;
+    --muted: 40 7% 19%;
+    --muted-foreground: 40 6% 60%;
+    --accent: 30 6% 6%;
+    --accent-foreground: 60 6% 94%;
+    --destructive: 0 72% 60%;
+    --destructive-foreground: 60 6% 94%;
+    --border: 40 7% 24%;
+    --input: 40 7% 26%;
+    --ring: 16 60% 59%;
+    --radius: 1rem;
+
+    /* Dark severity: slightly lighter for readability */
+    --severity-critical: 0 72% 60%;
+    --severity-high: 16 80% 56%;
+    --severity-medium: 45 68% 50%;
+    --severity-low: 240 36% 56%;
+
+    /* Dark sidebar */
+    --sidebar: 40 8% 12%;
+    --sidebar-foreground: 60 6% 76%;
+    --sidebar-accent: 40 7% 19%;
+    --sidebar-accent-foreground: 60 6% 76%;
+    --sidebar-border: 40 7% 22%;
+
+    /* Dark shadows */
+    --shadow-xs: 0 1px 3px 0px rgba(0, 0, 0, 0.15);
+    --shadow-sm: 0 1px 3px 0px rgba(0, 0, 0, 0.25), 0 1px 2px -1px rgba(0, 0, 0, 0.2);
+    --shadow-md: 0 1px 3px 0px rgba(0, 0, 0, 0.25), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+    --shadow-lg: 0 1px 3px 0px rgba(0, 0, 0, 0.25), 0 4px 6px -1px rgba(0, 0, 0, 0.2);
   }
 }
 
@@ -53,7 +103,8 @@
   }
 
   body {
-    @apply bg-background text-foreground font-sans antialiased;
+    @apply bg-background text-foreground antialiased;
+    font-family: Poppins, ui-sans-serif, system-ui, sans-serif;
   }
 
   ::selection {
@@ -62,9 +113,7 @@
 }
 
 @layer utilities {
-  /* Fix Radix ScrollArea horizontal overflow: the internal wrapper uses
-     ``display: table`` which expands to fit content, pushing elements
-     (e.g. delete buttons in the sidebar) outside the visible viewport. */
+  /* Fix Radix ScrollArea horizontal overflow */
   [data-radix-scroll-area-viewport] > div {
     display: block !important;
     max-width: 100% !important;
@@ -96,14 +145,14 @@
   /* Subtle scrollbar */
   .scrollbar-thin {
     scrollbar-width: thin;
-    scrollbar-color: hsl(var(--muted-foreground) / 0.3) transparent;
+    scrollbar-color: hsl(var(--muted-foreground) / 0.25) transparent;
   }
   .scrollbar-thin::-webkit-scrollbar {
     width: 5px;
     height: 5px;
   }
   .scrollbar-thin::-webkit-scrollbar-thumb {
-    background-color: hsl(var(--muted-foreground) / 0.3);
+    background-color: hsl(var(--muted-foreground) / 0.25);
     border-radius: 9999px;
   }
   .scrollbar-track-transparent {
@@ -113,14 +162,19 @@
     background: transparent;
   }
 
-  /* Paper texture overlay for cards */
-  .paper-texture {
+  /* Claude paper texture (light only) */
+  :root:not(.dark) .paper-texture {
     background-image:
-      radial-gradient(ellipse at 20% 50%, hsl(40 20% 96% / 0.4) 0%, transparent 50%),
-      radial-gradient(ellipse at 80% 20%, hsl(35 15% 95% / 0.3) 0%, transparent 50%);
+      radial-gradient(ellipse at 20% 50%, hsl(40 20% 96% / 0.5) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, hsl(30 15% 95% / 0.4) 0%, transparent 50%);
+  }
+  .dark .paper-texture {
+    background-image:
+      radial-gradient(ellipse at 20% 50%, hsl(40 7% 19% / 0.5) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 20%, hsl(30 6% 18% / 0.4) 0%, transparent 50%);
   }
 
-  /* Subtle left border accent for cards */
+  /* Claude card accent stripe */
   .card-accent-left {
     border-left: 3px solid hsl(var(--accent));
   }
