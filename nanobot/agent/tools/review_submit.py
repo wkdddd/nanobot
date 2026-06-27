@@ -30,7 +30,11 @@ _FINDING_SCHEMA = ObjectSchema(
         "file": StringSchema("Path to the affected file.", min_length=1),
         "line": IntegerSchema(description="Relevant line number.", minimum=1, nullable=True),
         "title": StringSchema("Short finding title.", min_length=1),
-        "evidence": StringSchema("Specific evidence that supports the finding.", min_length=1),
+        "evidence": StringSchema(
+            "Verbatim single-line code snippet in backticks from near the reported line, "
+            "copied character-for-character. Example: `candidate.line = matched_line`",
+            min_length=1,
+        ),
         "impact": StringSchema("What can go wrong.", min_length=1),
         "recommendation": StringSchema("How to fix or mitigate the issue.", min_length=1),
     },
@@ -152,7 +156,7 @@ class SubmitReviewFindingsTool(Tool):
     @property
     def description(self) -> str:
         return (
-            "Submit the final structured review findings. Review subagents **must** "
+            "Submit the final structured review findings. Review subagents must "
             "use this tool as their final deliverable instead of writing a prose report."
         )
 

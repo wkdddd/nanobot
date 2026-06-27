@@ -5,13 +5,14 @@ from typing import Any
 
 import pytest
 
+from nanobot.agent.hooks import AgentHookContext
+from nanobot.agent.hooks.subagent import SubagentHook, SubagentStatus
 from nanobot.agent.loop import AgentLoop, TurnContext, TurnState, _is_consumed_subagent_result
-from nanobot.agent.hooks.subagent import SubagentStatus
-from nanobot.agent.runner import AgentRunResult, AgentRunSpec
+from nanobot.agent.runner import AgentRunner, AgentRunResult, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.bus.queue import MessageBus
-from nanobot.config.schema import Config, _resolve_tool_config_refs
-from nanobot.config.schema import ToolsConfig
+from nanobot.config.schema import Config, ToolsConfig, _resolve_tool_config_refs
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 from nanobot.session.manager import Session
 
@@ -26,7 +27,9 @@ class DummyProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        _ = response_format
         return LLMResponse(content="ok")
 
     def get_default_model(self) -> str:
@@ -124,6 +127,23 @@ class BlockingSubmitRunner:
                 "raw_result": '{"submitted":true,"findings":[],"errors":[]}',
             }],
         )
+
+
+class StreamingChoiceProvider(DummyProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    async def chat_with_retry(self, **kwargs: Any) -> LLMResponse:
+        self.calls.append("chat")
+        return LLMResponse(content="non-stream")
+
+    async def chat_stream_with_retry(self, **kwargs: Any) -> LLMResponse:
+        self.calls.append("stream")
+        on_content_delta = kwargs.get("on_content_delta")
+        if callable(on_content_delta):
+            await on_content_delta("partial")
+        return LLMResponse(content="streamed final")
 
 
 class RunningSubagents:
@@ -495,6 +515,28 @@ def test_review_subagent_inherits_subagent_tool_config(tmp_path) -> None:
     assert ctx.config.github_repo.token == "gh-test-token"
 
 
+@pytest.mark.asyncio
+async def test_subagent_hook_uses_streaming_request_path() -> None:
+    provider = StreamingChoiceProvider()
+    runner = AgentRunner(provider)
+    hook = SubagentHook("task-1")
+    spec = AgentRunSpec(
+        initial_messages=[{"role": "user", "content": "review this"}],
+        tools=ToolRegistry(),
+        model="dummy",
+        max_iterations=1,
+        max_tool_result_chars=1000,
+        hook=hook,
+    )
+    context = AgentHookContext(iteration=0, messages=list(spec.initial_messages))
+
+    response = await runner._request_model(spec, spec.initial_messages, hook, context)
+
+    assert provider.calls == ["stream"]
+    assert response.content == "streamed final"
+    assert context.streamed_content is True
+
+
 def test_review_subagent_extracts_review_submit_tool_result() -> None:
     messages = [{
         "role": "tool",
@@ -591,6 +633,9 @@ async def test_review_subagent_finalization_retry_forces_review_submit(tmp_path)
     assert len(runner.specs) == 2
     assert runner.specs[0].tool_choice is None
     assert runner.specs[1].tool_choice == {"function": {"name": "review_submit"}}
+    assert runner.specs[1].response_format == {"type": "json_object"}
+    retry_content = str(runner.specs[1].initial_messages[-1]["content"])
+    assert "JSON" in retry_content
     assert runner.specs[1].tools.has("review_submit")
     assert status.phase == "done"
     assert status.stop_reason == "completed"

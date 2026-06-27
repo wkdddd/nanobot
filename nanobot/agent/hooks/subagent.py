@@ -33,6 +33,20 @@ class SubagentHook(AgentHook):
         super().__init__()
         self._task_id = task_id
         self._status = status
+        self._stream_buf = ""
+
+    def wants_streaming(self) -> bool:
+        # Force review subagents onto the provider streaming path so they avoid
+        # long non-stream request timeouts while keeping the execution flow local.
+        return True
+
+    async def on_stream(self, context: AgentHookContext, delta: str) -> None:
+        if not delta:
+            return
+        self._stream_buf += delta
+
+    async def on_stream_end(self, context: AgentHookContext, *, resuming: bool) -> None:
+        self._stream_buf = ""
 
     async def before_execute_tools(self, context: AgentHookContext) -> None:
         for tool_call in context.tool_calls:

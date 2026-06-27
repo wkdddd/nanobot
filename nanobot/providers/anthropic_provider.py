@@ -553,7 +553,9 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        _ = response_format
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,
@@ -588,9 +590,11 @@ class AnthropicProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
+        _ = response_format
         kwargs = self._build_kwargs(
             messages, tools, model, max_tokens, temperature,
             reasoning_effort, tool_choice,

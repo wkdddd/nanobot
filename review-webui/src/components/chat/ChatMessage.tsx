@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FindingDetail } from "@/components/findings/FindingDetail";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { Children, isValidElement, useEffect, useRef, useState, type ReactNode } from "react";
+import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Finding } from "@/hooks/useReviewSession";
 
 interface ChatMessageProps {
@@ -30,7 +30,7 @@ function findingFromLocation(value: string): Finding | null {
   const match = value.trim().replace(/^`|`$/g, "").match(LOCATION_RE);
   if (!match) return null;
   return {
-    severity: "medium",
+    severity: "needs-confirmation",
     dimension: "report",
     file: match[1],
     line: Number.parseInt(match[2], 10),
@@ -38,6 +38,45 @@ function findingFromLocation(value: string): Finding | null {
     impact: "",
     recommendation: "",
   };
+}
+
+function normalizeSeverity(value: string): string | null {
+  const text = value.trim().toLowerCase();
+  if (text.includes("critical")) return "critical";
+  if (text.includes("high")) return "high";
+  if (text.includes("medium")) return "medium";
+  if (text.includes("low")) return "low";
+  return null;
+}
+
+function parseNeedsConfirmationFindings(markdown: string): Finding[] {
+  const findings: Finding[] = [];
+  let inSection = false;
+  for (const line of markdown.split(/\r?\n/)) {
+    const heading = line.match(/^#{1,6}\s+(.+?)\s*$/);
+    if (heading) {
+      const normalized = heading[1].trim().replace(/[:：]\s*$/, "").toLowerCase();
+      inSection = normalized.includes("needs confirmation") || normalized.includes("待确认");
+      continue;
+    }
+    if (!inSection) continue;
+    const match = line.match(/^\s*[-*+]\s+\*\*(.+?)\*\*\s+\(`(.+?)`\)\s+-\s+(.+)$/);
+    if (!match) continue;
+    const location = findingFromLocation(match[2]);
+    if (!location) continue;
+    const detail = match[3].trim();
+    const severity = normalizeSeverity(detail.match(/severity:\s*([^-]+)/i)?.[1] ?? "") ?? "needs-confirmation";
+    const reason = detail.replace(/^severity:\s*[^-]+-\s*/i, "").trim();
+    findings.push({
+      ...location,
+      severity,
+      dimension: "needs-confirmation",
+      title: match[1].trim(),
+      impact: reason,
+      recommendation: "Verify this candidate before treating the review as clean.",
+    });
+  }
+  return findings;
 }
 
 /**
@@ -93,6 +132,13 @@ export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageP
   const [showThinking, setShowThinking] = useState(() => Boolean(message.streaming || isThinkingOnly));
   const collapseTimerRef = useRef<number | null>(null);
   const hasVisibleContent = message.type !== "text" || message.content.trim().length > 0;
+  const clickableFindings = useMemo(
+    () => [
+      ...(findings ?? []),
+      ...(message.type === "report" ? parseNeedsConfirmationFindings(message.content) : []),
+    ],
+    [findings, message.content, message.type],
+  );
   const toggleThinking = () => {
     setUserToggledThinking(true);
     setShowThinking((value) => !value);
@@ -186,7 +232,7 @@ export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageP
                       const real = lookupFinding(
                         locationFinding.file,
                         locationFinding.line,
-                        findings,
+                        clickableFindings,
                       );
                       return (
                         <button
@@ -205,7 +251,7 @@ export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageP
                     );
                   },
                   tr({ children, ...props }) {
-                    const rowFinding = tableRowFinding(children, findings);
+                    const rowFinding = tableRowFinding(children, clickableFindings);
                     if (!rowFinding) {
                       return <tr {...props}>{children}</tr>;
                     }

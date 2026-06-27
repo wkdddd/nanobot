@@ -21,7 +21,6 @@ from nanobot.config.schema import AgentDefaults, ToolsConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.utils.prompt_templates import render_template
 
-
 _DIMENSION_RUNNING = "running"
 _DIMENSION_COMPLETED = "completed"
 _DIMENSION_FAILED = "failed"
@@ -194,6 +193,7 @@ class SubagentManager:
         try:
             tools = self._build_tools()
             system_prompt = self._build_subagent_prompt()
+            hook = SubagentHook(task_id, status)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -210,7 +210,7 @@ class SubagentManager:
                 model=self.model,
                 max_iterations=self.max_iterations,
                 max_tool_result_chars=self.max_tool_result_chars,
-                hook=SubagentHook(task_id, status),
+                hook=hook,
                 max_iterations_message=(
                     "Review task completed but no structured findings were submitted."
                 ),
@@ -248,7 +248,11 @@ class SubagentManager:
                 status.phase = "retrying_review_submit"
                 retry_messages = list(result.messages) + [{
                     "role": "user",
-                    "content": "You did not call review_submit. You MUST call it now. Use findings:[] if no issues were found.",
+                    "content": (
+                        "You did not call review_submit. You MUST call it now. "
+                        "Use JSON-compatible structured tool arguments. "
+                        "Use findings:[] if no issues were found."
+                    ),
                 }]
                 retry = await self.runner.run(AgentRunSpec(
                     initial_messages=retry_messages,
@@ -256,7 +260,9 @@ class SubagentManager:
                     model=self.model,
                     max_iterations=2,
                     max_tool_result_chars=self.max_tool_result_chars,
+                    hook=hook,
                     tool_choice={"function": {"name": "review_submit"}},
+                    response_format={"type": "json_object"},
                     error_message=None,
                     fail_on_tool_error=False,
                     session_key=sess_key,
@@ -398,7 +404,6 @@ class SubagentManager:
     def _build_subagent_prompt(self) -> str:
         """Build the system prompt for dedicated review subagents."""
         from nanobot.agent.context import ContextBuilder
-        from nanobot.agent.skills import SkillsLoader
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         return render_template(

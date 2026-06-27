@@ -501,6 +501,7 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float,
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
+        response_format: dict[str, Any] | None,
     ) -> dict[str, Any]:
         model_name = model or self.default_model
         spec = self._spec
@@ -589,6 +590,8 @@ class OpenAICompatProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = tool_choice or "auto"
+        if response_format is not None:
+            kwargs["response_format"] = response_format
 
         # Backfill reasoning_content="" on assistants missing it: DeepSeek
         # thinking mode rejects history otherwise (#3554, #3584); "" reads
@@ -709,8 +712,10 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float,
         reasoning_effort: str | None,
         tool_choice: str | dict[str, Any] | None,
+        response_format: dict[str, Any] | None,
     ) -> dict[str, Any]:
         """Build a Responses API body for direct OpenAI requests."""
+        _ = response_format
         model_name = model or self.default_model
         if self._spec and self._spec.strip_model_prefix:
             model_name = model_name.split("/")[-1]
@@ -1162,13 +1167,14 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         try:
-            if self._should_use_responses_api(model, reasoning_effort):
+            if response_format is None and self._should_use_responses_api(model, reasoning_effort):
                 try:
                     body = self._build_responses_body(
                         messages, tools, model, max_tokens, temperature,
-                        reasoning_effort, tool_choice,
+                        reasoning_effort, tool_choice, response_format,
                     )
                     result = parse_response_output(await self._client.responses.create(**body))
                     self._record_responses_success(model, reasoning_effort)
@@ -1180,7 +1186,7 @@ class OpenAICompatProvider(LLMProvider):
 
             kwargs = self._build_kwargs(
                 messages, tools, model, max_tokens, temperature,
-                reasoning_effort, tool_choice,
+                reasoning_effort, tool_choice, response_format,
             )
             return self._parse(await self._client.chat.completions.create(**kwargs))
         except Exception as e:
@@ -1195,16 +1201,17 @@ class OpenAICompatProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
         idle_timeout_s = int(os.environ.get("NANOBOT_STREAM_IDLE_TIMEOUT_S", "45"))
         try:
-            if self._should_use_responses_api(model, reasoning_effort):
+            if response_format is None and self._should_use_responses_api(model, reasoning_effort):
                 try:
                     body = self._build_responses_body(
                         messages, tools, model, max_tokens, temperature,
-                        reasoning_effort, tool_choice,
+                        reasoning_effort, tool_choice, response_format,
                     )
                     body["stream"] = True
                     stream = await self._client.responses.create(**body)
@@ -1239,7 +1246,7 @@ class OpenAICompatProvider(LLMProvider):
 
             kwargs = self._build_kwargs(
                 messages, tools, model, max_tokens, temperature,
-                reasoning_effort, tool_choice,
+                reasoning_effort, tool_choice, response_format,
             )
             kwargs["stream"] = True
             kwargs["stream_options"] = {"include_usage": True}

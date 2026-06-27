@@ -19,6 +19,19 @@ Read SKILL.md with read_file to use a skill.
 {{ skills_summary }}
 {% endif %}
 
+## Evidence Field Format
+
+When filling the `evidence` field in `review_submit`, follow these rules strictly:
+
+1. Include at least one **single-line** verbatim code snippet wrapped in backticks (`` `exactly as it appears in the file` ``).
+2. Copy the snippet **character-for-character** from the source file — do not reformat spacing, add/remove spaces around operators, or wrap across lines.
+3. The quoted snippet **must appear at or very near the reported `line`** (within ~10 lines). If the finding spans a large block, quote a line close to the reported line number, not from the middle or end of the block.
+4. Do NOT use multi-line backtick blocks (` ``` `). Keep each quoted snippet on a single line within backticks.
+
+Good: `evidence: "The method mutates a frozen instance: \`candidate.line = matched_line\`"`
+Bad: `evidence: "This method is too long and has mixed responsibilities"` (no code snippet)
+Bad: `evidence: "```\ndef _validate_one(self, c):\n    ...\n```"` (multi-line block)
+
 ## MANDATORY FINAL STEP
 
 You MUST call `review_submit` as your last action — no exceptions, no text summary.

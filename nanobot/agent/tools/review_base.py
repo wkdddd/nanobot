@@ -114,8 +114,11 @@ class ReviewToolBase(Tool):
         started: float,
     ) -> None:
         result_kind = review_result_kind(result_text, status=status)
-        logger.info(
-            "{}.finish {} trace_id={} action={} target_type={} status={} result_kind={} result_chars={} error={} elapsed_ms={:.1f}",
+        msg = (
+            "{}.finish {} trace_id={} action={} target_type={} "
+            "status={} result_kind={} result_chars={} elapsed_ms={:.1f}"
+        )
+        args: list = [
             self.name,
             "ok" if result_kind == "success" else "check",
             trace_id,
@@ -124,6 +127,9 @@ class ReviewToolBase(Tool):
             status,
             result_kind,
             len(result_text),
-            error,
             (time.perf_counter() - started) * 1000,
-        )
+        ]
+        if error:
+            msg += " error={}"
+            args.append(error)
+        logger.info(msg, *args)

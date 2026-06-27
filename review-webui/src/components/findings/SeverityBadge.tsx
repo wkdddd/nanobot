@@ -10,6 +10,7 @@ const SEVERITY_STYLES: Record<string, string> = {
   high: "bg-orange-100 text-orange-700 border-orange-200 dark:bg-orange-950 dark:text-orange-400 dark:border-orange-900",
   medium: "bg-yellow-100 text-yellow-700 border-yellow-200 dark:bg-yellow-950 dark:text-yellow-400 dark:border-yellow-900",
   low: "bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-950 dark:text-blue-400 dark:border-blue-900",
+  "needs-confirmation": "bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-950 dark:text-amber-400 dark:border-amber-900",
 };
 
 const SEVERITY_LABELS: Record<string, string> = {
@@ -17,6 +18,7 @@ const SEVERITY_LABELS: Record<string, string> = {
   high: "High",
   medium: "Medium",
   low: "Low",
+  "needs-confirmation": "Needs Confirmation",
 };
 
 export function SeverityBadge({ severity }: SeverityBadgeProps) {

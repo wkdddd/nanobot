@@ -1,8 +1,6 @@
 """Tests for the fixed Markdown report renderer."""
 from __future__ import annotations
 
-import pytest
-
 from nanobot.agent.review.report import render_review_report
 from nanobot.agent.review.types import (
     FindingVerdict,
@@ -86,6 +84,7 @@ class TestReportStructure:
         report = render_review_report("repo", dims)
         assert "### Needs Confirmation" in report
         assert "Maybe bug" in report
+        assert "Severity: high" in report
         assert "No actionable issues found" not in report
         assert "No priority fixes needed" not in report
         assert "Verify the items in Needs Confirmation" in report

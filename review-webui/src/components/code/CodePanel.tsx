@@ -163,6 +163,11 @@ export function CodePanel({ finding, sessionKey, auth, className }: CodePanelPro
               {finding.line !== null && <span>第 {finding.line} 行</span>}
               {finding.line !== null && <span className="text-border">|</span>}
               <SeverityBadge severity={finding.severity} />
+              {finding.dimension === "needs-confirmation" && (
+                <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                  待确认
+                </span>
+              )}
             </div>
 
             {/* Code block */}

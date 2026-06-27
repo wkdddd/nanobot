@@ -25,7 +25,6 @@ from urllib.parse import parse_qs, unquote, urlparse
 from aiohttp import web
 from loguru import logger
 from pydantic import Field, field_validator, model_validator
-from websockets.asyncio.server import ServerConnection, serve
 from websockets.datastructures import Headers
 from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
@@ -40,10 +39,8 @@ from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundM
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import builtin_command_palette
-from nanobot.config.schema import Config
 from nanobot.config.paths import get_media_dir
-from nanobot.config.schema import Base
-
+from nanobot.config.schema import Base, Config
 from nanobot.utils.helpers import safe_filename
 from nanobot.utils.log_style import log_event
 from nanobot.utils.media_decode import (

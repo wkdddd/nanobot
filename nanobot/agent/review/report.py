@@ -262,7 +262,7 @@ def _render_needs_confirmation(
         reason = v.reason
         lines.append(
             f"- **{_escape_markdown_inline(c.title)}** (`{_clean_text(loc)}`) - "
-            f"{_escape_markdown_inline(reason)}"
+            f"Severity: {_escape_markdown_inline(c.severity)} - {_escape_markdown_inline(reason)}"
         )
     lines.append("")
     return "\n".join(lines)

@@ -7,8 +7,8 @@
     <meta name="description" content="nanobot Review Agent — 代码审查工作台" />
     <meta name="theme-color" content="#FAF9F5" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#262624" media="(prefers-color-scheme: dark)" />
-    <link rel="icon" type="image/jpeg" href="/logo.png" />
-    <link rel="apple-touch-icon" href="/logo.png" />
+    <link rel="icon" type="image/jpeg" href="./logo.png" />
+    <link rel="apple-touch-icon" href="./logo.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Poppins:ital,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
@@ -72,14 +72,27 @@
       // Apply saved theme class to <html> BEFORE React loads, to prevent flash
       (function() {
         try {
-          var t = localStorage.getItem("nanobot-review-webui.theme");
-          if (t === "dark") document.documentElement.classList.add("dark");
-          else if (t === "system") {
-            if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-              document.documentElement.classList.add("dark");
-            }
+          var storageKey = "nanobot-review-webui.theme";
+          var mql = window.matchMedia("(prefers-color-scheme: dark)");
+          var t = localStorage.getItem(storageKey);
+          if (t === "dark") {
+            document.documentElement.classList.add("dark");
+          } else if (t === "system") {
+            if (mql.matches) document.documentElement.classList.add("dark");
+            // React 接管前监听系统主题变化，避免此窗口期内切换不生效
+            mql.addEventListener("change", function() {
+              try {
+                if (localStorage.getItem(storageKey) === "system") {
+                  document.documentElement.classList.toggle("dark", mql.matches);
+                }
+              } catch(e) {
+                console.warn("[theme] failed to handle system theme change", e);
+              }
+            });
           }
-        } catch(e) {}
+        } catch(e) {
+          console.warn("[theme] failed to apply saved theme", e);
+        }
       })();
     </script>
     <title>Review Agent</title>

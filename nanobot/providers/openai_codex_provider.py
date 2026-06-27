@@ -90,7 +90,9 @@ class OpenAICodexProvider(LLMProvider):
         model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        _ = response_format
         return await self._call_codex(messages, tools, model, reasoning_effort, tool_choice)
 
     async def chat_stream(
@@ -98,10 +100,11 @@ class OpenAICodexProvider(LLMProvider):
         model: str | None = None, max_tokens: int = 4096, temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
-        _ = on_thinking_delta
+        _ = on_thinking_delta, response_format
         return await self._call_codex(messages, tools, model, reasoning_effort, tool_choice, on_content_delta)
 
     def get_default_model(self) -> str:

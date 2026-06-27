@@ -96,7 +96,7 @@ class LocalReviewTool(ReviewToolBase):
         action_value = (action or ReviewAction.REPO.value).strip().lower()
         result_text = ""
         status = "ok"
-        error = "None"
+        error = ""
         logger.info(
             "local_review.start trace_id={} action={} target={} query_chars={} max_results={}",
             trace_id,

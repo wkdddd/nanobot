@@ -126,7 +126,7 @@ class GitHubReviewTool(ReviewToolBase):
         action_value = (action or ReviewAction.REPO.value).strip().lower()
         result_text = ""
         status = "ok"
-        error = "None"
+        error = ""
         pr_repo, parsed_pr_number = parse_pr_target(target)
         if pr_repo:
             target_repo = target_repo or pr_repo

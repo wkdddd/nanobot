@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-nanobot 是一个轻量级个人ai code-review Agent，主体为 Python 项目，并包含 React/TypeScript WebUI。核心流程是：渠道接收消息，Agent 构建上下文并调用 LLM Provider，按需执行工具，然后把响应发回对应渠道。
+nanobot 是一个轻量级个人code-review Agent，主体为 Python 项目，并包含 React/TypeScript WebUI。核心流程是：渠道接收消息，主Agent 构建上下文并调用 LLM Provider，spawn所需的用于codereview的subagent，然后把响应发回对应渠道。
 
 ## 常用命令
 

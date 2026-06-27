@@ -274,6 +274,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
         """
         Send a chat completion request.
@@ -285,6 +286,7 @@ class LLMProvider(ABC):
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             tool_choice: Tool selection strategy ("auto", "required", or specific tool dict).
+            response_format: Optional structured output mode, e.g. {"type": "json_object"}.
 
         Returns:
             LLMResponse with content and/or tool calls.
@@ -369,6 +371,23 @@ class LLMProvider(ABC):
             return True
         # Unknown 429 defaults to WAIT+retry.
         return True
+
+    @staticmethod
+    def _is_response_format_unsupported_error(content: str | None) -> bool:
+        text = (content or "").lower()
+        if "response_format" not in text and "response format" not in text:
+            return False
+        markers = (
+            "unexpected keyword argument",
+            "unsupported",
+            "unknown parameter",
+            "unrecognized",
+            "not support",
+            "not supported",
+            "invalid parameter",
+            "extra inputs are not permitted",
+        )
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _enforce_role_alternation(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -487,6 +506,16 @@ class LLMProvider(ABC):
             return await self.chat(**kwargs)
         except asyncio.CancelledError:
             raise
+        except TypeError as exc:
+            if (
+                kwargs.get("response_format") is not None
+                and self._is_response_format_unsupported_error(str(exc))
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs.pop("response_format", None)
+                logger.warning("Provider does not accept response_format; retrying without it")
+                return await self._safe_chat(**retry_kwargs)
+            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
         except Exception as exc:
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
@@ -499,6 +528,7 @@ class LLMProvider(ABC):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
@@ -515,11 +545,14 @@ class LLMProvider(ABC):
         streaming should override this method.
         """
         _ = on_thinking_delta
-        response = await self.chat(
+        chat_kwargs: dict[str, Any] = dict(
             messages=messages, tools=tools, model=model,
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
+        if response_format is not None:
+            chat_kwargs["response_format"] = response_format
+        response = await self.chat(**chat_kwargs)
         if on_content_delta and response.content:
             await on_content_delta(response.content)
         return response
@@ -530,6 +563,16 @@ class LLMProvider(ABC):
             return await self.chat_stream(**kwargs)
         except asyncio.CancelledError:
             raise
+        except TypeError as exc:
+            if (
+                kwargs.get("response_format") is not None
+                and self._is_response_format_unsupported_error(str(exc))
+            ):
+                retry_kwargs = dict(kwargs)
+                retry_kwargs.pop("response_format", None)
+                logger.warning("Provider stream does not accept response_format; retrying without it")
+                return await self._safe_chat_stream(**retry_kwargs)
+            return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
         except Exception as exc:
             return LLMResponse(content=f"Error calling LLM: {exc}", finish_reason="error")
 
@@ -542,6 +585,7 @@ class LLMProvider(ABC):
         temperature: object = _SENTINEL,
         reasoning_effort: object = _SENTINEL,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         on_content_delta: Callable[[str], Awaitable[None]] | None = None,
         on_thinking_delta: Callable[[str], Awaitable[None]] | None = None,
         retry_mode: str = "standard",
@@ -562,6 +606,8 @@ class LLMProvider(ABC):
             on_content_delta=on_content_delta,
             on_thinking_delta=on_thinking_delta,
         )
+        if response_format is not None:
+            kw["response_format"] = response_format
         return await self._run_with_retry(
             self._safe_chat_stream,
             kw,
@@ -579,6 +625,7 @@ class LLMProvider(ABC):
         temperature: object = _SENTINEL,
         reasoning_effort: object = _SENTINEL,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
         retry_mode: str = "standard",
         on_retry_wait: Callable[[str], Awaitable[None]] | None = None,
     ) -> LLMResponse:
@@ -603,6 +650,8 @@ class LLMProvider(ABC):
             max_tokens=max_tokens, temperature=temperature,
             reasoning_effort=reasoning_effort, tool_choice=tool_choice,
         )
+        if response_format is not None:
+            kw["response_format"] = response_format
         return await self._run_with_retry(
             self._safe_chat,
             kw,
@@ -735,6 +784,20 @@ class LLMProvider(ABC):
                 identical_error_count = 1 if error_key else 0
 
             if not self._is_transient_response(response):
+                if (
+                    kw.get("response_format") is not None
+                    and self._is_response_format_unsupported_error(response.content)
+                ):
+                    logger.warning("Provider rejected response_format; retrying without it")
+                    retry_kw = dict(kw)
+                    retry_kw.pop("response_format", None)
+                    return await self._run_with_retry(
+                        call,
+                        retry_kw,
+                        original_messages,
+                        retry_mode=retry_mode,
+                        on_retry_wait=on_retry_wait,
+                    )
                 stripped = self._strip_image_content(original_messages)
                 if stripped is not None and stripped != kw["messages"]:
                     logger.warning(

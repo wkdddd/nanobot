@@ -73,6 +73,7 @@ class AgentRunSpec:
     max_tokens: int | None = None
     reasoning_effort: str | None = None
     tool_choice: str | dict[str, Any] | None = None
+    response_format: dict[str, Any] | None = None
     hook: AgentHook | None = None
     error_message: str | None = _DEFAULT_ERROR_MESSAGE
     max_iterations_message: str | None = None
@@ -603,6 +604,8 @@ class AgentRunner:
             kwargs["reasoning_effort"] = spec.reasoning_effort
         if spec.tool_choice is not None:
             kwargs["tool_choice"] = spec.tool_choice
+        if spec.response_format is not None:
+            kwargs["response_format"] = spec.response_format
         return kwargs
 
     async def _request_model(

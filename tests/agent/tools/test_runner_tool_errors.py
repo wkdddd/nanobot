@@ -4,8 +4,8 @@ from typing import Any
 
 import pytest
 
-from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.hooks.lifecycle import AgentHook, AgentHookContext
+from nanobot.agent.runner import AgentRunner, AgentRunSpec
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
@@ -21,7 +21,9 @@ class DummyProvider(LLMProvider):
         temperature: float = 0.7,
         reasoning_effort: str | None = None,
         tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
     ) -> LLMResponse:
+        _ = response_format
         return LLMResponse(content="ok")
 
     def get_default_model(self) -> str:
@@ -85,6 +87,35 @@ class ErrorTextTool(Tool):
         return "Error handling best practices: keep the real result intact."
 
 
+class ResponseFormatRejectingProvider(LLMProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[dict[str, Any] | None] = []
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.7,
+        reasoning_effort: str | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> LLMResponse:
+        self.calls.append(response_format)
+        if response_format is not None:
+            return LLMResponse(
+                content="Error: unsupported parameter: response_format",
+                finish_reason="error",
+                error_status_code=400,
+            )
+        return LLMResponse(content="ok")
+
+    def get_default_model(self) -> str:
+        return "dummy"
+
+
 def make_spec(tools: ToolRegistry | None = None, **overrides: Any) -> AgentRunSpec:
     values: dict[str, Any] = {
         "initial_messages": [],
@@ -108,6 +139,32 @@ def test_build_request_kwargs_includes_tool_choice() -> None:
     )
 
     assert kwargs["tool_choice"] == choice
+
+
+def test_build_request_kwargs_includes_response_format() -> None:
+    runner = AgentRunner(DummyProvider())
+    response_format = {"type": "json_object"}
+
+    kwargs = runner._build_request_kwargs(
+        make_spec(response_format=response_format),
+        [{"role": "user", "content": "submit JSON"}],
+        tools=[],
+    )
+
+    assert kwargs["response_format"] == response_format
+
+
+@pytest.mark.asyncio
+async def test_chat_with_retry_falls_back_when_response_format_is_unsupported() -> None:
+    provider = ResponseFormatRejectingProvider()
+
+    response = await provider.chat_with_retry(
+        messages=[{"role": "user", "content": "Return JSON"}],
+        response_format={"type": "json_object"},
+    )
+
+    assert response.content == "ok"
+    assert provider.calls == [{"type": "json_object"}, None]
 
 
 @pytest.mark.asyncio
