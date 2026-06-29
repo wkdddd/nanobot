@@ -24,6 +24,13 @@ from nanobot.utils.prompt_templates import render_template
 _DIMENSION_RUNNING = "running"
 _DIMENSION_COMPLETED = "completed"
 _DIMENSION_FAILED = "failed"
+_SUBAGENT_SOFT_TOOL_ERROR_TOOLS = frozenset({
+    "github_review",
+    "grep",
+    "list_dir",
+    "local_review",
+    "read_file",
+})
 
 
 class SubagentManager:
@@ -216,6 +223,7 @@ class SubagentManager:
                 ),
                 error_message=None,
                 fail_on_tool_error=True,
+                soft_tool_error_tools=_SUBAGENT_SOFT_TOOL_ERROR_TOOLS,
                 checkpoint_callback=_on_checkpoint,
                 session_key=sess_key,
                 llm_timeout_s=llm_timeout,

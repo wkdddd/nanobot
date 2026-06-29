@@ -7,9 +7,6 @@ import uuid
 
 from loguru import logger
 
-from nanobot.agent.review.types import ReviewAction
-from nanobot.agent.review.types import ReviewMetaKey
-from nanobot.agent.review.utils import parse_pr_target
 from nanobot.agent.tools.base import tool_parameters
 from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.review_base import (
@@ -23,6 +20,8 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
+from nanobot.review.source.utils import parse_pr_target
+from nanobot.review.types import ReviewAction, ReviewMetaKey
 
 
 @tool_parameters(

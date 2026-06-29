@@ -30,17 +30,17 @@ from websockets.exceptions import ConnectionClosed
 from websockets.http11 import Request as WsRequest
 from websockets.http11 import Response
 
-from nanobot.agent.review import normalize_review_action, normalize_review_target_type
-from nanobot.agent.review.beforeplan import parse_repo_target
-from nanobot.auto_tasks.github import parse_pull_request_event, verify_github_signature
-from nanobot.auto_tasks.service import AutoTaskService
-from nanobot.auto_tasks.store import AutoTaskStore
+from nanobot.review.auto_tasks.github import parse_pull_request_event, verify_github_signature
+from nanobot.review.auto_tasks.service import AutoTaskService
+from nanobot.review.auto_tasks.store import AutoTaskStore
 from nanobot.bus.events import OUTBOUND_META_AGENT_UI, InboundMessage, OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.command.builtin import builtin_command_palette
 from nanobot.config.paths import get_media_dir
 from nanobot.config.schema import Base, Config
+from nanobot.review import normalize_review_action, normalize_review_target_type
+from nanobot.review.input import parse_repo_target
 from nanobot.utils.helpers import safe_filename
 from nanobot.utils.log_style import log_event
 from nanobot.utils.media_decode import (
@@ -1358,7 +1358,33 @@ class WebSocketChannel(BaseChannel):
         metadata = data.get("metadata")
         if not isinstance(metadata, dict):
             metadata = {}
-        rel_path = self._normal_code_rel_path(file_path)
+        # 如果前端传了绝对路径，先尝试转成相对路径（workspace 或 review_target 内）
+        _raw = file_path.strip()
+        if _raw:
+            _p = Path(_raw)
+            if _p.is_absolute() or "/" in _raw and _raw.startswith("/"):
+                _ws = self._workspace_root()
+                try:
+                    _abs = _p.resolve() if _p.is_absolute() else (_ws / _raw.lstrip("/")).resolve()
+                    _abs.relative_to(_ws)
+                    _raw = _abs.relative_to(_ws).as_posix()
+                except (ValueError, OSError):
+                    # 不在 workspace 内，尝试 review_target
+                    target_value = str(metadata.get("review_target") or "").strip()
+                    if target_value:
+                        _t = Path(target_value).expanduser()
+                        _t_root = _t if _t.is_absolute() else _ws / _t
+                        try:
+                            _t_resolved = _t_root.resolve()
+                            if _t_resolved.is_file():
+                                _t_parent = _t_resolved.parent
+                            else:
+                                _t_parent = _t_resolved
+                            _abs.relative_to(_t_parent)
+                            _raw = _abs.relative_to(_t_parent).as_posix()
+                        except (ValueError, OSError):
+                            pass
+        rel_path = self._normal_code_rel_path(_raw)
         target_type = normalize_review_target_type(
             str(metadata.get("review_target_type") or ""),
             str(metadata.get("review_target") or "") or None,
@@ -2086,7 +2112,7 @@ class WebSocketChannel(BaseChannel):
             return web.json_response({"error": "pr_number is required"}, status=400)
         if pr_number <= 0:
             return web.json_response({"error": "pr_number is required"}, status=400)
-        from nanobot.auto_tasks.github import GitHubPullRequestEvent
+        from nanobot.review.auto_tasks.github import GitHubPullRequestEvent
 
         event = GitHubPullRequestEvent(
             action="manual",

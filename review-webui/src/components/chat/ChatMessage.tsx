@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { FindingDetail } from "@/components/findings/FindingDetail";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { Children, isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Children, Fragment, isValidElement, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { Finding } from "@/hooks/useReviewSession";
 
 interface ChatMessageProps {
@@ -121,6 +121,31 @@ function tableRowFinding(children: ReactNode, findings?: Finding[]): Finding | n
   };
 }
 
+/** Extract header cell texts from a markdown table element's children. */
+function extractTableHeaders(tableChildren: ReactNode): string[] {
+  const parts = Children.toArray(tableChildren);
+  const thead = parts.find((p) => isValidElement(p) && p.type === "thead");
+  if (!isValidElement(thead)) return [];
+  const headerRow = Children.toArray(thead.props.children).find((p) =>
+    isValidElement(p),
+  );
+  if (!isValidElement(headerRow)) return [];
+  return Children.toArray(headerRow.props.children).map((th) =>
+    textFromNode(th).trim(),
+  );
+}
+
+/** Detect the standard findings table (#, File, Issue, Impact). */
+function isFindingsTable(headers: string[]): boolean {
+  return (
+    headers.length === 4 &&
+    /^#\s*$/.test(headers[0]) &&
+    /file/i.test(headers[1]) &&
+    /issue/i.test(headers[2]) &&
+    /impact/i.test(headers[3])
+  );
+}
+
 export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageProps) {
   const isUser = message.role === "user";
   const isThinkingOnly = !isUser
@@ -210,7 +235,7 @@ export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageP
             "text-xs leading-relaxed",
             isUser
               ? "px-3 py-2 bg-primary/10 rounded-xl rounded-tr-sm text-foreground max-w-[65%]"
-              : "max-w-[80%]"
+              : "max-w-[90%]"
           )}
         >
           {message.type === "finding" && message.finding ? (
@@ -272,6 +297,52 @@ export function ChatMessage({ message, onSelectFinding, findings }: ChatMessageP
                         {children}
                       </tr>
                     );
+                  },
+                  table({ children, ...props }) {
+                    const headers = extractTableHeaders(children);
+                    const findingsTable = isFindingsTable(headers);
+                    return (
+                      <div className="overflow-x-auto my-2">
+                        <table
+                          className={cn(findingsTable && "table-fixed w-full")}
+                          {...props}
+                        >
+                          {findingsTable && (
+                            <colgroup>
+                              <col className="w-8" />
+                              <col className="w-[20%]" />
+                              <col className="w-[30%]" />
+                              <col />
+                            </colgroup>
+                          )}
+                          {children}
+                        </table>
+                      </div>
+                    );
+                  },
+                  td({ children, ...props }) {
+                    const text = textFromNode(children).trim();
+                    const loc = findingFromLocation(text);
+                    if (loc) {
+                      // 完整路径显示，在分隔符 (/ \ :) 后插入 <wbr>
+                      // 实现按需换行：空间足够时单行，不够时在分隔符处断行
+                      const full =
+                        loc.line != null ? `${loc.file}:${loc.line}` : loc.file;
+                      const segments = full.split(/([\/\\:])/);
+                      return (
+                        <td title={text} {...props}>
+                          <code className="font-mono text-[0.8em] text-primary/90">
+                            {segments.map((seg, i) => (
+                              <Fragment key={i}>
+                                {seg}
+                                {/[\/\\:]/.test(seg) ? <wbr /> : null}
+                              </Fragment>
+                            ))}
+                          </code>
+                        </td>
+                      );
+                    }
+                    return <td {...props}>{children}</td>;
                   },
                 }}
               >

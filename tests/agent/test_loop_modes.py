@@ -632,6 +632,8 @@ async def test_review_subagent_finalization_retry_forces_review_submit(tmp_path)
 
     assert len(runner.specs) == 2
     assert runner.specs[0].tool_choice is None
+    assert "read_file" in runner.specs[0].soft_tool_error_tools
+    assert "review_submit" not in runner.specs[0].soft_tool_error_tools
     assert runner.specs[1].tool_choice == {"function": {"name": "review_submit"}}
     assert runner.specs[1].response_format == {"type": "json_object"}
     retry_content = str(runner.specs[1].initial_messages[-1]["content"])

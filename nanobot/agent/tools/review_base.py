@@ -8,10 +8,6 @@ from typing import Any
 
 from loguru import logger
 
-from nanobot.agent.review.evidence import ReviewEvidenceService
-from nanobot.agent.review.github import GitHubRepoConfig, GitHubRepoReader
-from nanobot.agent.review.local import LocalRepoReader
-from nanobot.agent.review.types import ReviewAction
 from nanobot.agent.tools.base import Tool
 from nanobot.rag import create_rag_runtime
 from nanobot.rag.config import RAGConfig
@@ -21,7 +17,10 @@ from nanobot.rag.review_service import (
     RepositoryRAGService,
 )
 from nanobot.rag.runtime import RAGRuntime
-
+from nanobot.review.planning.evidence import ReviewEvidenceService
+from nanobot.review.source.github import GitHubRepoConfig, GitHubRepoReader
+from nanobot.review.source.local import LocalRepoReader
+from nanobot.review.types import ReviewAction
 
 READER_ACTIONS = ("meta", "tree", "file")
 REVIEW_ACTIONS = tuple(action.value for action in ReviewAction)

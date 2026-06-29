@@ -199,6 +199,52 @@ async def test_run_tool_logs_exception_and_preserves_model_error_payload(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_run_tool_soft_error_tool_overrides_fail_on_tool_error(monkeypatch) -> None:
+    monkeypatch.setattr("nanobot.agent.runner.logger.exception", lambda *args, **kwargs: None)
+
+    tools = ToolRegistry()
+    tools.register(FailingTool())
+    runner = AgentRunner(DummyProvider())
+    spec = make_spec(
+        tools,
+        fail_on_tool_error=True,
+        soft_tool_error_tools=frozenset({"fail_tool"}),
+    )
+
+    result, event, error = await runner._run_tool(
+        spec,
+        ToolCallRequest(id="call_1", name="fail_tool", arguments={}),
+        external_lookup_counts={},
+        workspace_violation_counts={},
+    )
+
+    assert result == "Error: ValueError: boom"
+    assert event["status"] == "error"
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_run_tool_fail_on_tool_error_remains_strict_by_default(monkeypatch) -> None:
+    monkeypatch.setattr("nanobot.agent.runner.logger.exception", lambda *args, **kwargs: None)
+
+    tools = ToolRegistry()
+    tools.register(FailingTool())
+    runner = AgentRunner(DummyProvider())
+    spec = make_spec(tools, fail_on_tool_error=True)
+
+    result, event, error = await runner._run_tool(
+        spec,
+        ToolCallRequest(id="call_1", name="fail_tool", arguments={}),
+        external_lookup_counts={},
+        workspace_violation_counts={},
+    )
+
+    assert result == "Error: ValueError: boom"
+    assert event["status"] == "error"
+    assert isinstance(error, ValueError)
+
+
+@pytest.mark.asyncio
 async def test_replaced_final_content_does_not_drain_injections() -> None:
     calls = 0
 

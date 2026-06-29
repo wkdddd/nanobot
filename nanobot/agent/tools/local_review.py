@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 
 from loguru import logger
 
-from nanobot.agent.review.types import ReviewAction, ReviewMetaKey
 from nanobot.agent.tools.base import tool_parameters
 from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.review_base import (
@@ -21,6 +21,8 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
+from nanobot.review.source.local import LocalRepoReader
+from nanobot.review.types import LocalReviewScope, ReviewAction, ReviewMetaKey
 
 
 @tool_parameters(
@@ -47,6 +49,18 @@ from nanobot.agent.tools.schema import (
             description="Maximum local tree entries to return",
             minimum=1,
             maximum=10000,
+        ),
+        offset=IntegerSchema(
+            1,
+            description="Line number to start reading from for action='file' (1-indexed)",
+            minimum=1,
+        ),
+        limit=IntegerSchema(
+            200,
+            description="Maximum lines to return for action='file'",
+            minimum=1,
+            maximum=500,
+            nullable=True,
         ),
         review_query=StringSchema(
             "Question or keywords describing repository review references to retrieve",
@@ -88,6 +102,8 @@ class LocalReviewTool(ReviewToolBase):
         repo_path: str | None = None,
         tree_pattern: str | None = None,
         tree_limit: int = 500,
+        offset: int = 1,
+        limit: int | None = None,
         max_results: int = 5,
         include_tests: bool | None = None,
     ) -> str:
@@ -129,13 +145,18 @@ class LocalReviewTool(ReviewToolBase):
                 return result_text
             if action_value in READER_ACTIONS:
                 path = repo_path or target
-                result_text = await self.local.execute(
+                local_scope = self._get_local_scope()
+                reader = self._scoped_reader(local_scope)
+                result_text = await reader.execute(
                     action=action_value,
                     path=path,
                     pattern=tree_pattern,
                     max_entries=tree_limit,
+                    offset=offset,
+                    limit=limit,
                 )
                 return result_text
+            local_scope = self._get_local_scope()
             result_text = await self.evidence_service.dispatch(
                 target_type="local",
                 action=action_value,
@@ -143,6 +164,7 @@ class LocalReviewTool(ReviewToolBase):
                 review_query=review_query,
                 max_results=max_results,
                 include_tests=include_tests,
+                local_scope=local_scope,
                 trace_id=trace_id,
             )
             return result_text
@@ -172,3 +194,23 @@ class LocalReviewTool(ReviewToolBase):
         ctx = current_request_context()
         metadata = ctx.metadata if ctx is not None else {}
         return str(metadata.get(ReviewMetaKey.TARGET_TYPE) or "").strip().lower() == "github"
+
+    def _get_local_scope(self) -> LocalReviewScope | None:
+        ctx = current_request_context()
+        metadata = ctx.metadata if ctx is not None else {}
+        local_root = metadata.get(ReviewMetaKey.LOCAL_ROOT)
+        if not local_root:
+            return None
+        return LocalReviewScope(
+            review_root=str(local_root),
+            kind=metadata.get(ReviewMetaKey.LOCAL_SCOPE_KIND, "directory"),
+            target_path=metadata.get(ReviewMetaKey.LOCAL_TARGET, ""),
+        )
+
+    def _scoped_reader(self, local_scope: LocalReviewScope | None) -> LocalRepoReader:
+        if local_scope is None:
+            return self.local
+        scoped_root = Path(local_scope.review_root).expanduser().resolve()
+        if scoped_root == self.workspace:
+            return self.local
+        return LocalRepoReader(scoped_root, options=self.local.options)

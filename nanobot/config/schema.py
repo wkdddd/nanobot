@@ -11,8 +11,8 @@ from pydantic_settings import BaseSettings
 from nanobot.rag.config import RAGConfig
 
 if TYPE_CHECKING:
-    from nanobot.agent.review.github import GitHubRepoConfig
     from nanobot.agent.tools.shell import ExecToolConfig
+    from nanobot.review.source.github import GitHubRepoConfig
 
 
 class Base(BaseModel):
@@ -224,7 +224,7 @@ class ToolsConfig(Base):
     restrict_to_workspace: bool = False  # restrict all tool access to workspace directory
     ssrf_whitelist: list[str] = Field(default_factory=list)  # CIDR ranges to exempt from SSRF blocking (e.g. ["100.64.0.0/10"] for Tailscale)
     github_repo: GitHubRepoConfig = Field(
-        default_factory=lambda: _lazy_default("nanobot.agent.review.github", "GitHubRepoConfig")
+        default_factory=lambda: _lazy_default("nanobot.review.source.github", "GitHubRepoConfig")
     )
 
     def __init__(self, **data: Any) -> None:
@@ -506,8 +506,8 @@ def _resolve_tool_config_refs() -> None:
     """
     import sys
 
-    from nanobot.agent.review.github import GitHubRepoConfig
     from nanobot.agent.tools.shell import ExecToolConfig
+    from nanobot.review.source.github import GitHubRepoConfig
 
     # Re-export into this module's namespace
     mod = sys.modules[__name__]

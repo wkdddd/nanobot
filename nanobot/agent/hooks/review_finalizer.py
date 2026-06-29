@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any, Callable
 
 from loguru import logger
 
 from nanobot.agent.hooks.lifecycle import AgentHook, AgentHookContext
-from nanobot.agent.review.beforeplan import policy_for_depth
-from nanobot.agent.review.finalizer import ReviewFinalizer
-from nanobot.agent.review.judge import ReviewJudge
-from nanobot.agent.review.types import ReviewDepth
+from nanobot.review.input import policy_for_depth
+from nanobot.review.output.finalizer import ReviewFinalizer
+from nanobot.review.output.judge import ReviewJudge
+from nanobot.review.types import ReviewDepth
 
 
 class ReviewFinalizerHook(AgentHook):
     """Runner hook that renders a fixed review report from subagent outputs."""
+
+    # Matches the task id in spawn tool result text:
+    # "Review subagent [<label>] started (id: <task_id>). ..."
+    _SPAWN_ID_PATTERN = re.compile(r"started \(id: (\w+)\)")
 
     def __init__(
         self,
@@ -95,6 +100,28 @@ class ReviewFinalizerHook(AgentHook):
         digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
         return f"{label}:{digest}"
 
+    def _has_unreceived_spawns(self, context: AgentHookContext) -> bool:
+        """Return True if any spawn tool result has no matching ingested subagent result.
+
+        扫描 context.messages 中的 spawn tool 结果，提取已启动的 task_id，
+        与 _seen_subagent_results 对比，判断是否存在结果尚未到达的子代理。
+        用于在 finalize_content 中避免过早渲染空报告，让 runner 的注入机制
+        有机会从 _session_results 队列获取已完成的子代理结果。
+        """
+        for msg in context.messages:
+            if msg.get("role") != "tool" or msg.get("name") != "spawn":
+                continue
+            content_text = msg.get("content", "")
+            if not isinstance(content_text, str):
+                continue
+            match = self._SPAWN_ID_PATTERN.search(content_text)
+            if not match:
+                continue
+            task_id = match.group(1)
+            if task_id not in self._seen_subagent_results:
+                return True
+        return False
+
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         if self._rendered:
             context.content_replaced = True
@@ -109,6 +136,18 @@ class ReviewFinalizerHook(AgentHook):
                 )
             return content
         if ingested == 0 and not self._finalizer.dimensions:
+            # 子代理 Task 可能已完成并把结果放入 _session_results 队列，但
+            # 尚未通过 _drain_pending 注入到 context.messages。此时渲染空报告
+            # 会设置 content_replaced=True，导致 runner 跳过 _try_drain_injections，
+            # 子代理结果被推迟到下一个 turn，最终产生第二份报告。
+            # 这里检测已 spawn 但结果尚未到达的情况，保留原始 content，让 runner
+            # 的注入机制有机会从 _session_results 队列获取结果。
+            if self._has_unreceived_spawns(context):
+                logger.info(
+                    "review.finalizer.defer_for_pending_spawns target={}",
+                    self._target_name,
+                )
+                return content
             logger.warning("review.finalizer.no_subagent_results target={}", self._target_name)
             result = self._finalizer.finalize(self._target_name)
             self._rendered = True

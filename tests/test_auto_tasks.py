@@ -3,9 +3,9 @@ import hmac
 
 import pytest
 
-from nanobot.auto_tasks.github import parse_pull_request_event, verify_github_signature
-from nanobot.auto_tasks.service import AutoTaskService
-from nanobot.auto_tasks.store import AutoTaskStore
+from nanobot.review.auto_tasks.github import parse_pull_request_event, verify_github_signature
+from nanobot.review.auto_tasks.service import AutoTaskService
+from nanobot.review.auto_tasks.store import AutoTaskStore
 from nanobot.config.schema import Config
 from nanobot.session.manager import SessionManager
 

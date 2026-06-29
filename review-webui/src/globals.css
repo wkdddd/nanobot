@@ -134,6 +134,36 @@
     --tw-prose-lead: hsl(var(--foreground));
   }
 
+  /* 标题中的长路径（如 Windows 绝对路径）在窗口缩窄时换行 */
+  .markdown-content h1,
+  .markdown-content h2,
+  .markdown-content h3,
+  .markdown-content h4,
+  .markdown-content h5,
+  .markdown-content h6 {
+    overflow-wrap: anywhere;
+  }
+
+  /* Markdown table styling */
+  .markdown-content table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 0.75rem;
+    margin: 0.5rem 0;
+  }
+  .markdown-content table th,
+  .markdown-content table td {
+    border: 1px solid hsl(var(--border));
+    padding: 4px 6px;
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  .markdown-content table th {
+    background: hsl(var(--muted) / 0.5);
+    font-weight: 600;
+  }
+
   /* CJK-friendly line-height */
   :lang(zh), :lang(zh-CN), :lang(zh-TW), :lang(ja), :lang(ko) {
     --cjk-line-height: 1.8;

@@ -21,12 +21,6 @@ from nanobot.agent.hooks.lifecycle import AgentHook, CompositeHook
 from nanobot.agent.hooks.progress import AgentProgressHook
 from nanobot.agent.hooks.review_finalizer import ReviewFinalizerHook
 from nanobot.agent.memory import Consolidator
-from nanobot.agent.review import (
-    apply_review_metadata_from_message,
-    resolve_code_review_context,
-)
-from nanobot.agent.review.judge import ReviewJudge, ReviewJudgeConfig
-from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.runner import _MAX_INJECTIONS_PER_TURN, AgentRunner, AgentRunSpec
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.file_state import FileStateStore, bind_file_states, reset_file_states
@@ -38,6 +32,12 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
+from nanobot.review import (
+    apply_review_metadata_from_message,
+    resolve_code_review_context,
+)
+from nanobot.review.output.judge import ReviewJudge, ReviewJudgeConfig
+from nanobot.review.types import ReviewMetaKey
 from nanobot.session.manager import Session, SessionManager
 from nanobot.utils.artifacts import generated_image_paths_from_messages
 from nanobot.utils.document import extract_documents
@@ -1096,7 +1096,7 @@ class AgentLoop:
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
-        
+
         self._running = True
 
         while self._running:
@@ -1247,7 +1247,7 @@ class AgentLoop:
         try:
             async with lock, gate:
                 try:
-    
+
                     on_stream = on_stream_end = None
                     if wants_stream:
                         async def on_stream(delta: str) -> None:
@@ -1282,22 +1282,22 @@ class AgentLoop:
                         pending_queue=pending,
                         consumed_subagent_task_ids=consumed_subagent_task_ids,
                     )
-                    
-    
+
+
                     if response is not None:
-               
+
                         await self.bus.publish_outbound(response)
                     elif msg.channel == "cli":
-                 
+
                         await self.bus.publish_outbound(OutboundMessage(
                             channel=msg.channel, chat_id=msg.chat_id,
                             content="", metadata=msg.metadata or {},
                         ))
-                    
-             
+
+
                     if msg.channel == "websocket":
-               
-            
+
+
                         turn_lat = self._pending_turn_latency_ms.pop(session_key, None)
                         turn_trace = self._pending_turn_traces.pop(session_key, None)
                         turn_metadata: dict[str, Any] = {**msg.metadata, "_turn_end": True}  # 关键标记
@@ -1329,11 +1329,11 @@ class AgentLoop:
                                     ))
 
                             self._schedule_background(_generate_title_and_notify())
-        
+
                 except asyncio.CancelledError:
-              
+
                     logger.info("Task cancelled for session {}", session_key)
-         
+
                     try:
                         key = self._effective_session_key(msg)
                         session = self.sessions.get_or_create(key)
@@ -1352,9 +1352,9 @@ class AgentLoop:
                         )
                     if msg.channel == "websocket":
                         await publish_forced_turn_end()
-                    raise  
+                    raise
                 except Exception:
-              
+
                     logger.exception("Error processing message for session {}", session_key)
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
@@ -1362,7 +1362,7 @@ class AgentLoop:
                     ))
                     if msg.channel == "websocket":
                         await publish_forced_turn_end()
-    
+
         finally:
 
             queue = self._pending_queues.pop(session_key, None)
@@ -1383,8 +1383,8 @@ class AgentLoop:
                         "Re-published {} leftover message(s) to bus for session {}",
                         leftover, session_key,
                     )
-            
-           
+
+
             await publish_turn_run_status(self.bus, msg, "idle")
             # 清除本轮的延迟记录
             self._pending_turn_latency_ms.pop(session_key, None)
@@ -2058,16 +2058,16 @@ class AgentLoop:
     def _checkpoint_message_key(message: dict[str, Any]) -> tuple[Any, ...]:
         tc = message.get("tool_calls")
         if isinstance(tc, list):
-            tc = tuple((c.get("id"), c.get("type"), 
+            tc = tuple((c.get("id"), c.get("type"),
                         (c.get("function") or {}).get("name")) for c in tc if isinstance(c, dict))
         content = message.get("content")
         if isinstance(content, list):
             content = tuple(str(b) for b in content)
         return (message.get("role"),
-                content, 
+                content,
                 message.get("tool_call_id"),
-                message.get("name"), 
-                tc, 
+                message.get("name"),
+                tc,
                 message.get("reasoning_content"),
                 tuple(message.get("thinking_blocks") or ()))
 

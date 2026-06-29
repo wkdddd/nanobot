@@ -6,9 +6,6 @@ import httpx
 import pytest
 from loguru import logger
 
-from nanobot.agent.review.github import GitHubRepoConfig
-from nanobot.agent.review.types import ReviewMetaKey
-from nanobot.agent.review.utils import changed_lines_from_patch, parse_pr_target, parse_repo
 from nanobot.agent.tools.context import (
     RequestContext,
     reset_current_request_context,
@@ -20,6 +17,9 @@ from nanobot.agent.tools.local_review import LocalReviewTool
 from nanobot.config.schema import Config
 from nanobot.rag.review_service import rrf_merge
 from nanobot.rag.utils import IndexedChunk, IndexedHit
+from nanobot.review.source.github import GitHubRepoConfig
+from nanobot.review.source.utils import changed_lines_from_patch, parse_pr_target, parse_repo
+from nanobot.review.types import ReviewMetaKey
 
 
 class _LogSink:
@@ -99,6 +99,29 @@ async def test_local_review_meta_tree_and_file_actions(tmp_path: Path) -> None:
     assert "Text files:" in meta
     assert "src/auth.py" in tree
     assert "def login" in content
+
+
+@pytest.mark.asyncio
+async def test_local_review_file_supports_pagination_arguments(tmp_path: Path) -> None:
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text(
+        "\n".join(f"line {i}" for i in range(1, 11)),
+        encoding="utf-8",
+    )
+    tool = LocalReviewTool(workspace=tmp_path)
+
+    result = await tool.execute(
+        action="file",
+        repo_path="src/app.py",
+        offset=4,
+        limit=3,
+    )
+
+    assert "File: src/app.py" in result
+    assert "4| line 4" in result
+    assert "6| line 6" in result
+    assert "7| line 7" not in result
+    assert "offset=7, limit=3" in result
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from nanobot.agent.loop import AgentLoop
-from nanobot.agent.review import (
+from nanobot.bus.queue import MessageBus
+from nanobot.providers.base import LLMProvider, LLMResponse
+from nanobot.review import (
     ALL_REVIEW_ROLES,
     DEFAULT_REVIEW_ROLES,
     OPTIONAL_REVIEW_ROLES,
@@ -16,8 +18,6 @@ from nanobot.agent.review import (
     normalize_review_action,
     resolve_code_review_context,
 )
-from nanobot.bus.queue import MessageBus
-from nanobot.providers.base import LLMProvider, LLMResponse
 
 
 class DummyProvider(LLMProvider):

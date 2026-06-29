@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from nanobot.agent.tools.base import Tool, tool_parameters
-from nanobot.agent.review.types import ReviewMetaKey
 from nanobot.agent.tools.context import current_request_context
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
 from nanobot.agent.tools.path_utils import is_under, resolve_workspace_path
@@ -18,6 +17,7 @@ from nanobot.agent.tools.schema import (
     StringSchema,
     tool_parameters_schema,
 )
+from nanobot.review.types import ReviewMetaKey
 from nanobot.utils.helpers import build_image_content_blocks, detect_image_mime
 
 

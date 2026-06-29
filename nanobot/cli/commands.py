@@ -852,6 +852,8 @@ def _run_gateway(
 # Agent Commands
 # ============================================================================
 from nanobot.bus.queue import MessageBus
+
+
 @app.command()
 def review(
     target: str | None = typer.Argument(None, help="Local file/directory path or GitHub repository URL"),
@@ -872,8 +874,13 @@ def review(
     output: str | None = typer.Option(None, "--output", "-o", help="Save report to file"),
 ):
     """Review a local or GitHub repository with CodeReviewAgent."""
-    from nanobot.agent.review import infer_review_target_type, normalize_focus, normalize_review_action, normalize_review_target_type
     from nanobot.cli.stream import StreamRenderer
+    from nanobot.review import (
+        infer_review_target_type,
+        normalize_focus,
+        normalize_review_action,
+        normalize_review_target_type,
+    )
 
     if mode not in ("quick", "deep", "full"):
         console.print(f"[red]Invalid mode '{mode}'. Must be: quick, deep, or full[/red]")
@@ -1218,7 +1225,7 @@ def _check_fail_on(report_content: str, threshold: str) -> int:
     """Return non-zero exit code if findings meet or exceed the severity threshold."""
     import re
 
-    from nanobot.agent.review import SEVERITY_ORDER
+    from nanobot.review import SEVERITY_ORDER
 
     threshold_idx = SEVERITY_ORDER.index(threshold)
     target_severities = set(SEVERITY_ORDER[: threshold_idx + 1])

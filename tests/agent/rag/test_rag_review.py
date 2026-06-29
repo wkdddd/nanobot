@@ -6,22 +6,22 @@ from pathlib import Path
 import pytest
 from loguru import logger
 
-from nanobot.agent.review.evidence import LocalChangedSummary, ReviewEvidenceService
-from nanobot.agent.review.types import LocalReviewScope
-from nanobot.agent.review.utils import (
-    changed_lines_from_patch,
-    parse_pr_target,
-    parse_repo,
-)
 from nanobot.rag.review_service import (
     REMOTE_SOURCE_TYPE,
     RepoReviewHit,
-    RepositoryRAGRequest,
     RepositoryRAGOptions,
+    RepositoryRAGRequest,
     RepositoryRAGService,
     rrf_merge,
 )
 from nanobot.rag.utils import IndexedChunk, IndexedHit
+from nanobot.review.planning.evidence import LocalChangedSummary, ReviewEvidenceService
+from nanobot.review.source.utils import (
+    changed_lines_from_patch,
+    parse_pr_target,
+    parse_repo,
+)
+from nanobot.review.types import LocalReviewScope
 
 
 class _GitHub:

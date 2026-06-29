@@ -92,6 +92,7 @@ class AgentRunSpec:
     llm_timeout_s: float | None = None
     permission_policy: Any | None = None
     permission_request_callback: Any | None = None
+    soft_tool_error_tools: frozenset[str] = field(default_factory=frozenset)
 
 
 @dataclass(slots=True)
@@ -810,7 +811,7 @@ class AgentRunner:
                 "status": "error",
                 "detail": "repeated external lookup blocked",
             }
-            if spec.fail_on_tool_error:
+            if spec.fail_on_tool_error and tool_call.name not in spec.soft_tool_error_tools:
                 return lookup_error + hint, event, RuntimeError(lookup_error)
             return lookup_error + hint, event, None
         prepare_call = getattr(spec.tools, "prepare_call", None)
@@ -835,9 +836,10 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            return prep_error + hint, event, (
-                RuntimeError(prep_error) if spec.fail_on_tool_error else None
-            )
+            error = None
+            if spec.fail_on_tool_error and tool_call.name not in spec.soft_tool_error_tools:
+                error = RuntimeError(prep_error)
+            return prep_error + hint, event, error
         try:
             if spec.permission_policy and spec.permission_request_callback:
                 from nanobot.agent.tools.permissions import PermissionVerdict, check_permission
@@ -891,7 +893,7 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            if spec.fail_on_tool_error:
+            if spec.fail_on_tool_error and tool_call.name not in spec.soft_tool_error_tools:
                 return payload, event, exc
             return payload, event, None
 
@@ -910,7 +912,7 @@ class AgentRunner:
             )
             if handled is not None:
                 return handled
-            if spec.fail_on_tool_error:
+            if spec.fail_on_tool_error and tool_call.name not in spec.soft_tool_error_tools:
                 return result + hint, event, RuntimeError(result)
             return result + hint, event, None
 
